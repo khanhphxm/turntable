@@ -137,7 +137,7 @@ impl Shell {
 						.relative()
 						.h(px(200.))
 						.bg(theme::raised_hover())
-						.when_some(photo, |s, src| s.child(gpui_kit::img(src).size_full()))
+						.when_some(photo, |s, src| s.child(gpui_kit::img(src).size_full().rounded_t(px(8.))))
 						.child(
 							div().absolute().top_4().left_4().text_size(px(16.)).font_weight(FontWeight::BOLD).child("About the artist"),
 						),

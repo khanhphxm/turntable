@@ -89,6 +89,10 @@ pub enum Msg {
 	PlayListing,
 	/// Add the now-playing track to Liked Songs, or take it out.
 	ToggleLike,
+	/// Add a row's track URI to Liked Songs (never changes owned playlists).
+	AddToLiked(String),
+	/// Remove a row's track URI from Liked Songs (never changes owned playlists).
+	RemoveFromLiked(String),
 	/// Queue row `n` of the current listing after the current track.
 	QueueRow(usize),
 	/// Take upcoming song `n` out of the queue (the rebuild goes out once the clicking pauses).

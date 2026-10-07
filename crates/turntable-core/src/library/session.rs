@@ -1,0 +1,641 @@
+//! Read-only library data from the player's authenticated Session. Playlist4 keeps raw page
+//! offsets; extended metadata resolves each page in batches, never one request per song.
+
+mod collection;
+#[cfg(test)]
+mod tests;
+
+use std::{
+	collections::{HashMap, HashSet},
+	sync::Arc,
+	time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+
+use collection::{CollectionItem, PageResponse, Set as CollectionSet};
+use librespot_core::{FileId, Session, SpotifyId, SpotifyUri};
+use librespot_protocol::{
+	extended_metadata::{BatchedEntityRequest, EntityRequest, ExtensionQuery},
+	extension_kind::ExtensionKind,
+	metadata,
+	playlist4_external::{ListAttributes, MetaItem, SelectedListContent},
+};
+use protobuf::{EnumOrUnknown, Message};
+
+use super::{Listing, PAGE, Route, Tile, added::TrackId, artist::Popularity};
+use crate::{
+	engine::SessionReader,
+	net::{cache::Cache, trace},
+	spotify::{self, Album, Artist, Image, Page, Playlist, Track, User},
+};
+
+const BATCH: usize = 100;
+const TTL: Duration = Duration::from_secs(180);
+const METADATA_TTL: Duration = Duration::from_secs(1800);
+const LIBRARY_ITEMS: usize = 500;
+
+pub(super) struct Reader {
+	shared:        SessionReader,
+	albums:        Cache<String, Arc<AlbumData>>,
+	artists:       Cache<String, Arc<ArtistData>>,
+	collection:    Option<(Instant, Vec<CollectionItem>)>,
+	liked_ids:     Option<Arc<[TrackId]>>,
+	liked_changed: bool,
+	followed:      Option<(Instant, Vec<CollectionItem>)>,
+	roots:         Option<(Instant, Vec<Playlist>)>,
+}
+
+struct AlbumData {
+	album:  Album,
+	tracks: Vec<String>,
+}
+
+struct ArtistData {
+	artist:  Artist,
+	top:     Vec<String>,
+	groups:  Vec<(&'static str, Vec<String>)>,
+	appears: Vec<String>,
+}
+
+impl Reader {
+	pub(super) fn new(shared: SessionReader) -> Self {
+		Self {
+			shared,
+			albums: Cache::new(16, METADATA_TTL),
+			artists: Cache::new(16, METADATA_TTL),
+			collection: None,
+			liked_ids: None,
+			liked_changed: false,
+			followed: None,
+			roots: None,
+		}
+	}
+
+	pub(super) fn matches(&self, username: &str) -> bool {
+		!self.shared.session().is_invalid() && self.shared.session().username() == username
+	}
+
+	pub(super) fn forget(&mut self, route: &Route) {
+		match route {
+			Route::Liked => self.collection = None,
+			Route::Playlist(_) => self.roots = None,
+			Route::Album(_) | Route::Artist(_) | Route::Home | Route::Search | Route::Library => {},
+		}
+	}
+
+	pub(super) fn saved(&mut self, uri: &str, saved: bool) {
+		let cache = if uri.starts_with("spotify:artist:") { &mut self.followed } else { &mut self.collection };
+		if let Some((_, items)) = cache {
+			items.retain(|item| item.uri != uri);
+			if saved {
+				let added_at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+				items.insert(0, CollectionItem { uri: uri.to_owned(), added_at, ..CollectionItem::default() });
+			}
+		}
+		if uri.starts_with("spotify:track:") {
+			self.liked_ids = None;
+			self.liked_changed = true;
+		}
+		if uri.starts_with("spotify:playlist:") {
+			self.roots = None;
+		}
+	}
+
+	fn collection(&mut self, set: CollectionSet) -> spotify::Result<&[CollectionItem]> {
+		let cache = match set {
+			CollectionSet::Saved => &mut self.collection,
+			CollectionSet::Artists => &mut self.followed,
+		};
+		if cache.as_ref().is_none_or(|(at, _)| at.elapsed() >= TTL) {
+			let items = self.shared.block_on(collection(self.shared.session(), set)).map_err(network)?;
+			*cache = Some((Instant::now(), items));
+			if matches!(set, CollectionSet::Saved) {
+				self.liked_ids = None;
+				self.liked_changed = true;
+			}
+		}
+		Ok(cache.as_ref().map_or(&[], |(_, items)| items.as_slice()))
+	}
+
+	/// A full snapshot only when the collection was refreshed or locally edited.
+	/// Checking another row while fresh neither allocates nor republishes the same membership.
+	pub(super) fn liked_update(&mut self) -> spotify::Result<Option<Arc<[TrackId]>>> {
+		self.collection(CollectionSet::Saved)?;
+		let items = self.collection.as_ref().map_or(&[][..], |(_, items)| items.as_slice());
+		Ok(liked_snapshot(items, &mut self.liked_ids, &mut self.liked_changed))
+	}
+
+	pub(super) fn contains(&mut self, uri: &str) -> spotify::Result<bool> {
+		if uri.starts_with("spotify:playlist:") {
+			return Ok(self.playlists()?.iter().any(|p| p.uri == uri));
+		}
+		let set = if uri.starts_with("spotify:artist:") { CollectionSet::Artists } else { CollectionSet::Saved };
+		Ok(self.collection(set)?.iter().any(|item| item.uri == uri))
+	}
+
+	pub(super) fn playlists(&mut self) -> spotify::Result<Vec<Playlist>> {
+		if self.roots.as_ref().is_none_or(|(at, _)| at.elapsed() >= TTL) {
+			let playlists = self.shared.block_on(rootlist(self.shared.session())).map_err(network)?;
+			self.roots = Some((Instant::now(), playlists));
+		}
+		Ok(self.roots.as_ref().map_or_else(Vec::new, |(_, playlists)| playlists.clone()))
+	}
+
+	pub(super) fn playlist(&self, id: &str, offset: u32, rows: bool) -> spotify::Result<(Playlist, bool, Option<Page<Track>>)> {
+		self.shared
+			.block_on(async {
+				let length = if rows { PAGE } else { 0 };
+				let endpoint = format!("/playlist/v2/playlist/{id}?from={offset}&length={length}");
+				let bytes = self.shared.session().spclient().request(&http::Method::GET, &endpoint, None, None).await?;
+				let raw = SelectedListContent::parse_from_bytes(&bytes)?;
+				let info = playlist(id, raw.owner_username(), raw.attributes.get_or_default(), raw.length());
+				let editable = raw.capabilities.get_or_default().can_edit_items();
+				let page = if rows {
+					let contents = raw.contents.get_or_default();
+					let uris: Vec<_> = contents.items.iter().map(|item| item.uri().to_owned()).collect();
+					let items = tracks(self.shared.session(), &uris, None).await?;
+					Some(page(items, offset, PAGE, u32::try_from(raw.length()).unwrap_or_default()))
+				} else {
+					None
+				};
+				Ok((info, editable, page))
+			})
+			.map_err(network)
+	}
+
+	pub(super) fn liked(&mut self, offset: u32) -> spotify::Result<Page<Track>> {
+		let items = self.collection(CollectionSet::Saved)?;
+		let total = u32::try_from(items.iter().filter(|item| item.uri.starts_with("spotify:track:")).count()).unwrap_or(u32::MAX);
+		let uris: Vec<_> = items
+			.iter()
+			.filter(|item| item.uri.starts_with("spotify:track:"))
+			.skip(usize::try_from(offset).unwrap_or(usize::MAX))
+			.take(PAGE as usize)
+			.map(|item| item.uri.clone())
+			.collect();
+		let tracks = self.shared.block_on(tracks(self.shared.session(), &uris, None)).map_err(network)?;
+		Ok(page(tracks, offset, PAGE, total))
+	}
+
+	fn album_data(&mut self, id: &str) -> spotify::Result<Arc<AlbumData>> {
+		let entity = format!("spotify:album:{id}");
+		if let Some(known) = self.albums.get(&entity) {
+			return Ok(known);
+		}
+		let raw = self
+			.shared
+			.block_on(metadata::<metadata::Album>(self.shared.session(), std::slice::from_ref(&entity), ExtensionKind::ALBUM_V4))
+			.map_err(network)?
+			.remove(&entity)
+			.ok_or_else(|| spotify::Error::Parse("Spotify returned no album metadata".into()))?;
+		let album = album(&raw).map_err(network)?;
+		let tracks = raw.disc.iter().flat_map(|d| &d.track).map(|t| uri("track", t.gid())).collect::<Result<_, _>>().map_err(network)?;
+		let data = Arc::new(AlbumData { album, tracks });
+		self.albums.insert(entity, data.clone());
+		Ok(data)
+	}
+
+	pub(super) fn album(&mut self, id: &str, offset: u32) -> spotify::Result<(Album, Page<Track>)> {
+		let data = self.album_data(id)?;
+		let items =
+			self.shared.block_on(tracks(self.shared.session(), window(&data.tracks, offset, PAGE), Some(&data.album))).map_err(network)?;
+		Ok((data.album.clone(), page(items, offset, PAGE, data.album.total_tracks)))
+	}
+
+	fn artist_data(&mut self, id: &str) -> spotify::Result<Arc<ArtistData>> {
+		let entity = format!("spotify:artist:{id}");
+		if let Some(known) = self.artists.get(&entity) {
+			return Ok(known);
+		}
+		let raw = self
+			.shared
+			.block_on(metadata::<metadata::Artist>(self.shared.session(), std::slice::from_ref(&entity), ExtensionKind::ARTIST_V4))
+			.map_err(network)?
+			.remove(&entity)
+			.ok_or_else(|| spotify::Error::Parse("Spotify returned no artist metadata".into()))?;
+		let country = self.shared.session().country();
+		let top = raw.top_track.iter().find(|t| t.country() == country).or_else(|| raw.top_track.iter().find(|t| t.country().is_empty()));
+		let top = top
+			.into_iter()
+			.flat_map(|top| &top.track)
+			.take(10)
+			.map(|t| uri("track", t.gid()))
+			.collect::<Result<_, _>>()
+			.map_err(network)?;
+		let groups = [("Albums", &raw.album_group), ("Singles and EPs", &raw.single_group), ("Compilations", &raw.compilation_group)]
+			.into_iter()
+			.map(|(title, groups)| releases(groups).map(|uris| (title, uris)))
+			.collect::<Result<_, _>>()
+			.map_err(network)?;
+		let data = Arc::new(ArtistData {
+			artist: artist(&raw).map_err(network)?,
+			top,
+			groups,
+			appears: releases(&raw.appears_on_group).map_err(network)?,
+		});
+		self.artists.insert(entity, data.clone());
+		Ok(data)
+	}
+
+	pub(super) fn artist(&mut self, id: &str) -> spotify::Result<Artist> {
+		Ok(self.artist_data(id)?.artist.clone())
+	}
+
+	pub(super) fn artist_header(&mut self, id: &str) -> spotify::Result<Listing> {
+		let data = self.artist_data(id)?;
+		let uris: Vec<_> = data.groups.iter().flat_map(|(_, uris)| uris.iter()).chain(&data.appears).collect();
+		let albums =
+			self.shared.block_on(metadata::<metadata::Album>(self.shared.session(), &uris, ExtensionKind::ALBUM_V4)).map_err(network)?;
+		let mut discography = Vec::new();
+		for (title, uris) in &data.groups {
+			let mut releases = release_models(uris, &albums).map_err(network)?;
+			releases.sort_by(|a, b| b.release_date.cmp(&a.release_date));
+			if !releases.is_empty() {
+				discography.push((*title, releases.iter().map(Tile::release).collect()));
+			}
+		}
+		let appears_on = release_models(&data.appears, &albums).map_err(network)?.iter().map(Tile::album).collect();
+		let a = &data.artist;
+		let followed = self.contains(&a.uri).ok();
+		Ok(Listing {
+			kicker: "Artist".into(),
+			title: a.name.clone(),
+			cover_url: spotify::pick_image(&a.images, 300).map(|i| i.url.clone()),
+			context_uri: Some(a.uri.clone()),
+			followed,
+			discography,
+			appears_on,
+			artist: Some(a.clone()),
+			..Listing::default()
+		})
+	}
+
+	pub(super) fn popularity(&mut self, id: &str) -> spotify::Result<Popularity> {
+		let data = self.artist_data(id)?;
+		let tracks = self.shared.block_on(tracks(self.shared.session(), &data.top, None)).map_err(network)?;
+		Ok(Popularity { tracks, ..Popularity::default() })
+	}
+
+	pub(super) fn albums(&mut self, limit: usize) -> spotify::Result<Vec<Album>> {
+		let uris: Vec<_> = self
+			.collection(CollectionSet::Saved)?
+			.iter()
+			.filter(|i| i.uri.starts_with("spotify:album:"))
+			.take(limit)
+			.map(|i| i.uri.clone())
+			.collect();
+		let raw =
+			self.shared.block_on(metadata::<metadata::Album>(self.shared.session(), &uris, ExtensionKind::ALBUM_V4)).map_err(network)?;
+		release_models(&uris, &raw).map_err(network)
+	}
+
+	pub(super) fn followed(&mut self, limit: usize) -> spotify::Result<Vec<Artist>> {
+		let uris: Vec<_> = self
+			.collection(CollectionSet::Artists)?
+			.iter()
+			.filter(|i| i.uri.starts_with("spotify:artist:"))
+			.take(limit)
+			.map(|i| i.uri.clone())
+			.collect();
+		self.artists(&uris)
+	}
+
+	pub(super) fn artists(&self, uris: &[String]) -> spotify::Result<Vec<Artist>> {
+		let mut raw =
+			self.shared.block_on(metadata::<metadata::Artist>(self.shared.session(), uris, ExtensionKind::ARTIST_V4)).map_err(network)?;
+		uris.iter().filter_map(|uri| raw.remove(uri)).map(|raw| artist(&raw)).collect::<Result<_, _>>().map_err(network)
+	}
+}
+
+fn liked_snapshot(items: &[CollectionItem], cached: &mut Option<Arc<[TrackId]>>, changed: &mut bool) -> Option<Arc<[TrackId]>> {
+	if !std::mem::take(changed) {
+		return None;
+	}
+	let tracks = cached.get_or_insert_with(|| {
+		let mut ids: Vec<_> = items.iter().filter_map(|item| TrackId::from_uri(&item.uri).ok()).collect();
+		ids.sort_unstable();
+		ids.dedup();
+		ids.into()
+	});
+	Some(tracks.clone())
+}
+
+#[expect(clippy::needless_pass_by_value, reason = "map_err consumes the session error at every request boundary")]
+fn network(error: librespot_core::Error) -> spotify::Error {
+	spotify::Error::Network(error.to_string())
+}
+
+fn page<T>(items: Vec<T>, offset: u32, limit: u32, total: u32) -> Page<T> {
+	Page { items, offset, limit, total, next: (offset.saturating_add(limit) < total).then(|| "session".to_owned()) }
+}
+
+fn window<T>(items: &[T], offset: u32, limit: u32) -> &[T] {
+	let start = usize::try_from(offset).unwrap_or(usize::MAX).min(items.len());
+	let end = start.saturating_add(usize::try_from(limit).unwrap_or(usize::MAX)).min(items.len());
+	items.get(start..end).unwrap_or_default()
+}
+
+async fn metadata<M: Message>(
+	session: &Session,
+	uris: &[impl AsRef<str>],
+	kind: ExtensionKind,
+) -> Result<HashMap<String, M>, librespot_core::Error> {
+	let mut unique = HashSet::with_capacity(uris.len());
+	let uris: Vec<_> = uris.iter().map(AsRef::as_ref).filter(|uri| unique.insert(*uri)).collect();
+	let mut out = HashMap::with_capacity(uris.len());
+	for batch in uris.chunks(BATCH) {
+		let request = BatchedEntityRequest {
+			entity_request: batch
+				.iter()
+				.map(|uri| EntityRequest {
+					entity_uri: (*uri).to_owned(),
+					query: vec![ExtensionQuery { extension_kind: EnumOrUnknown::new(kind), ..ExtensionQuery::default() }],
+					..EntityRequest::default()
+				})
+				.collect(),
+			..BatchedEntityRequest::default()
+		};
+		let span = trace::start();
+		let reply = session.spclient().get_extended_metadata(request).await?;
+		span.done("session", "POST", "https://spclient.spotify.com/extended-metadata/v0/extended-metadata", trace::Reply {
+			status: 200,
+			bytes: usize::try_from(reply.compute_size()).unwrap_or(usize::MAX),
+			..trace::Reply::default()
+		});
+		for array in reply.extended_metadata {
+			if array.extension_kind.enum_value_or_default() != kind {
+				continue;
+			}
+			for data in array.extension_data {
+				if data.header.get_or_default().status_code == 200
+					&& let Some(bytes) = data.extension_data.into_option()
+				{
+					out.insert(data.entity_uri, M::parse_from_bytes(&bytes.value)?);
+				}
+			}
+		}
+	}
+	Ok(out)
+}
+
+async fn tracks(session: &Session, uris: &[String], known_album: Option<&Album>) -> Result<Vec<Track>, librespot_core::Error> {
+	let track_uris: Vec<_> = uris.iter().filter(|u| u.starts_with("spotify:track:")).collect();
+	let episode_uris: Vec<_> = uris.iter().filter(|u| u.starts_with("spotify:episode:")).collect();
+	let raw = metadata::<metadata::Track>(session, &track_uris, ExtensionKind::TRACK_V4).await?;
+	let episodes = metadata::<metadata::Episode>(session, &episode_uris, ExtensionKind::EPISODE_V4).await?;
+	resolve_rows(uris, &raw, &episodes, known_album)
+}
+
+fn resolve_rows(
+	uris: &[String],
+	raw: &HashMap<String, metadata::Track>,
+	episodes: &HashMap<String, metadata::Episode>,
+	known_album: Option<&Album>,
+) -> Result<Vec<Track>, librespot_core::Error> {
+	let mut out = Vec::with_capacity(uris.len());
+	for entity in uris {
+		let row = if let Some(t) = raw.get(entity) {
+			Some(track(entity, t, known_album)?)
+		} else if let Some(e) = episodes.get(entity) {
+			Some(episode(entity, e)?)
+		} else {
+			local(entity)
+		};
+		if let Some(row) = row {
+			out.push(row);
+		}
+	}
+	Ok(out)
+}
+
+fn uri(kind: &str, gid: &[u8]) -> Result<String, librespot_core::Error> {
+	Ok(format!("spotify:{kind}:{}", SpotifyId::from_raw(gid)?.to_base62()?))
+}
+
+fn artist(raw: &metadata::Artist) -> Result<Artist, librespot_core::Error> {
+	let images = if raw.portrait_group.is_some() { &raw.portrait_group.get_or_default().image } else { &raw.portrait };
+	Ok(Artist { name: raw.name().to_owned(), uri: uri("artist", raw.gid())?, images: image_models(images), genres: Vec::new() })
+}
+
+fn album(raw: &metadata::Album) -> Result<Album, librespot_core::Error> {
+	let images = if raw.cover_group.is_some() { &raw.cover_group.get_or_default().image } else { &raw.cover };
+	let date = raw.date.as_ref().filter(|date| date.year() > 0).map(|date| {
+		if date.has_day() {
+			format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day())
+		} else if date.has_month() {
+			format!("{:04}-{:02}", date.year(), date.month())
+		} else {
+			format!("{:04}", date.year())
+		}
+	});
+	Ok(Album {
+		name:         raw.name().to_owned(),
+		uri:          uri("album", raw.gid())?,
+		images:       image_models(images),
+		artists:      raw.artist.iter().map(artist).collect::<Result<_, _>>()?,
+		total_tracks: u32::try_from(raw.disc.iter().map(|d| d.track.len()).sum::<usize>()).unwrap_or(u32::MAX),
+		release_date: date,
+		album_type:   match raw.type_() {
+			metadata::album::Type::SINGLE | metadata::album::Type::EP => "single",
+			metadata::album::Type::COMPILATION => "compilation",
+			_ => "album",
+		}
+		.into(),
+		copyrights:   raw
+			.copyright
+			.iter()
+			.map(|c| spotify::Copyright {
+				text: c.text().to_owned(),
+				kind: if c.type_() == metadata::copyright::Type::P { "P" } else { "C" }.into(),
+			})
+			.collect(),
+	})
+}
+
+fn image_models(images: &[metadata::Image]) -> Vec<Image> {
+	images
+		.iter()
+		.filter(|image| image.file_id().len() == 20)
+		.map(|image| {
+			let id = FileId::from_raw(image.file_id());
+			let width = u32::try_from(image.width()).ok().filter(|w| *w > 0).or(Some(match image.size() {
+				metadata::image::Size::SMALL => 64,
+				metadata::image::Size::LARGE => 640,
+				metadata::image::Size::XLARGE => 1024,
+				metadata::image::Size::DEFAULT => 300,
+			}));
+			Image {
+				url: format!("https://i.scdn.co/image/{id}"),
+				width,
+				height: u32::try_from(image.height()).ok().filter(|h| *h > 0).or(width),
+			}
+		})
+		.collect()
+}
+
+fn track(entity: &str, raw: &metadata::Track, known_album: Option<&Album>) -> Result<Track, librespot_core::Error> {
+	Ok(Track {
+		uri:         entity.to_owned(),
+		name:        raw.name().to_owned(),
+		duration_ms: u32::try_from(raw.duration()).unwrap_or_default(),
+		explicit:    raw.explicit(),
+		artists:     raw.artist.iter().map(artist).collect::<Result<_, _>>()?,
+		album:       match known_album {
+			Some(album) => Some(album.clone()),
+			None => raw.album.as_ref().map(album).transpose()?,
+		},
+		is_local:    false,
+		is_episode:  false,
+	})
+}
+
+fn episode(entity: &str, raw: &metadata::Episode) -> Result<Track, librespot_core::Error> {
+	let show = raw.show.get_or_default();
+	Ok(Track {
+		uri:         entity.to_owned(),
+		name:        raw.name().to_owned(),
+		duration_ms: u32::try_from(raw.duration()).unwrap_or_default(),
+		explicit:    raw.explicit(),
+		artists:     Vec::new(),
+		album:       Some(Album {
+			name:         show.name().to_owned(),
+			uri:          uri("show", show.gid())?,
+			images:       image_models(&raw.cover_image.get_or_default().image),
+			artists:      Vec::new(),
+			total_tracks: 0,
+			release_date: None,
+			album_type:   String::new(),
+			copyrights:   Vec::new(),
+		}),
+		is_local:    false,
+		is_episode:  true,
+	})
+}
+
+fn local(entity: &str) -> Option<Track> {
+	let SpotifyUri::Local { artist, album_title, track_title, duration } = SpotifyUri::from_uri(entity).ok()? else { return None };
+	Some(Track {
+		uri:         entity.to_owned(),
+		name:        track_title,
+		duration_ms: u32::try_from(duration.as_millis()).unwrap_or(u32::MAX),
+		explicit:    false,
+		artists:     vec![Artist { name: artist, uri: String::new(), images: Vec::new(), genres: Vec::new() }],
+		album:       Some(Album {
+			name:         album_title,
+			uri:          String::new(),
+			images:       Vec::new(),
+			artists:      Vec::new(),
+			total_tracks: 0,
+			release_date: None,
+			album_type:   String::new(),
+			copyrights:   Vec::new(),
+		}),
+		is_local:    true,
+		is_episode:  false,
+	})
+}
+
+fn releases(groups: &[metadata::AlbumGroup]) -> Result<Vec<String>, librespot_core::Error> {
+	groups
+		.iter()
+		.filter_map(|group| group.album.first())
+		.take(spotify::MAX_ARTIST_ALBUMS as usize)
+		.map(|album| uri("album", album.gid()))
+		.collect()
+}
+
+fn release_models(uris: &[String], raw: &HashMap<String, metadata::Album>) -> Result<Vec<Album>, librespot_core::Error> {
+	uris.iter().filter_map(|uri| raw.get(uri)).map(album).collect()
+}
+
+fn playlist(id: &str, owner: &str, attributes: &ListAttributes, length: i32) -> Playlist {
+	let mut images: Vec<_> =
+		attributes.picture_size.iter().map(|picture| Image { url: picture.url().to_owned(), width: None, height: None }).collect();
+	if images.is_empty()
+		&& let Ok(url) = std::str::from_utf8(attributes.picture())
+		&& url.starts_with("https://")
+	{
+		images.push(Image { url: url.to_owned(), width: None, height: None });
+	}
+	Playlist {
+		id: id.to_owned(),
+		uri: format!("spotify:playlist:{id}"),
+		name: attributes.name().to_owned(),
+		description: (!attributes.description().is_empty()).then(|| attributes.description().to_owned()),
+		public: None,
+		owner: User { id: owner.to_owned(), display_name: None },
+		images,
+		collaborative: attributes.collaborative(),
+		track_count: u32::try_from(length).ok(),
+	}
+}
+
+fn root_playlist(entity: &str, meta: &MetaItem) -> Option<Playlist> {
+	let SpotifyUri::Playlist { id, .. } = SpotifyUri::from_uri(entity).ok()? else { return None };
+	if meta.has_status_code() && !matches!(meta.status_code(), 0 | 200) {
+		return None;
+	}
+	Some(playlist(&id.to_base62().ok()?, meta.owner_username(), meta.attributes.get_or_default(), meta.length()))
+}
+
+async fn rootlist(session: &Session) -> Result<Vec<Playlist>, librespot_core::Error> {
+	let mut out = Vec::new();
+	let mut seen = HashSet::new();
+	let mut from = 0;
+	loop {
+		let bytes = session.spclient().get_rootlist(from, Some(120)).await?;
+		let raw = SelectedListContent::parse_from_bytes(&bytes)?;
+		let contents = raw.contents.get_or_default();
+		for (item, meta) in contents.items.iter().zip(&contents.meta_items) {
+			if let Some(playlist) = root_playlist(item.uri(), meta)
+				&& seen.insert(playlist.id.clone())
+			{
+				out.push(playlist);
+			}
+		}
+		from += contents.items.len();
+		if contents.items.is_empty()
+			|| !contents.truncated()
+			|| from >= usize::try_from(raw.length()).unwrap_or_default()
+			|| out.len() >= LIBRARY_ITEMS
+		{
+			break;
+		}
+	}
+	Ok(out)
+}
+
+async fn collection(session: &Session, set: CollectionSet) -> Result<Vec<CollectionItem>, librespot_core::Error> {
+	let mut token = String::new();
+	let mut items = HashMap::new();
+	loop {
+		let body = collection::request(&session.username(), set, &token)?;
+		let mut headers = http::HeaderMap::new();
+		headers.insert(http::header::CONTENT_TYPE, http::HeaderValue::from_static("application/vnd.collection-v2.spotify.proto"));
+		headers.insert(http::header::ACCEPT, http::HeaderValue::from_static("application/vnd.collection-v2.spotify.proto"));
+		let span = trace::start();
+		let bytes = session.spclient().request(&http::Method::POST, "/collection/v2/paging", Some(headers), Some(&body)).await?;
+		span.done("session", "POST", "https://spclient.spotify.com/collection/v2/paging", trace::Reply {
+			status: 200,
+			bytes: bytes.len(),
+			..trace::Reply::default()
+		});
+		let response = PageResponse::parse_from_bytes(&bytes)?;
+		for item in response.items {
+			if item.is_removed {
+				items.remove(&item.uri);
+			} else {
+				items.insert(item.uri.clone(), item);
+			}
+		}
+		if response.next_page_token.is_empty() {
+			break;
+		}
+		if token == response.next_page_token {
+			return Err(librespot_core::Error::failed_precondition("collection pagination did not advance"));
+		}
+		token = response.next_page_token;
+	}
+	let mut items: Vec<_> = items.into_values().collect();
+	items.sort_by(|a, b| b.added_at.cmp(&a.added_at).then_with(|| a.uri.cmp(&b.uri)));
+	Ok(items)
+}

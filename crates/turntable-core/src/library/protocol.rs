@@ -1,8 +1,11 @@
 //! Requests to the Web API worker and the responses it delivers to the application.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
-use super::{Home, Listing, Popularity, Route};
+use super::{
+	Home, Listing, Popularity, Route,
+	added::{RefreshStats, TrackId},
+};
 use crate::{
 	sources::external,
 	spotify::{self, Album, Artist, Playlist, SearchResults, User},
@@ -81,6 +84,8 @@ impl Response {
 			Self::Albums(albums) => format!("Albums({})", albums.len()),
 			Self::Following(artists) => format!("Following({})", artists.len()),
 			Self::Playlists(playlists) => format!("Playlists({})", playlists.len()),
+			Self::Added { tracks, stats } => format!("Added({}, {stats:?})", tracks.len()),
+			Self::LikedTracks(tracks) => format!("LikedTracks({})", tracks.len()),
 			Self::Listing { route, offset, .. } => format!("Listing({route:?}@{offset})"),
 			Self::Search { query, .. } => format!("Search({query})"),
 			Self::ArtistPopular(id, _) => format!("ArtistPopular({id})"),
@@ -124,6 +129,14 @@ pub enum Response {
 	Done(String),
 	/// `uri` is (or isn't) in Liked Songs.
 	Liked(String, bool),
+	/// Sorted, duplicate-free track membership in the user's owned playlists.
+	/// `stats` is absent for a disk/local-edit answer and present after a refresh.
+	Added {
+		tracks: Arc<[TrackId]>,
+		stats:  Option<RefreshStats>,
+	},
+	/// Complete, sorted Liked Songs membership from the playback Session's collection.
+	LikedTracks(Arc<[TrackId]>),
 	Listing {
 		route:   Route,
 		offset:  u32,

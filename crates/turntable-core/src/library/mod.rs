@@ -1,14 +1,16 @@
-//! Web API library state and the worker that loads it without blocking the UI.
+//! Library state and the session/Web API worker that loads it without blocking the UI.
 //!
 //! `model` and `state` describe what the views know; `pages`, `home` and `artist` load it.
 //! `protocol` carries requests and responses between the application and `worker`.
 
+pub mod added;
 mod artist;
 pub mod covers;
 mod home;
 mod model;
 mod pages;
 mod protocol;
+mod session;
 pub(crate) mod snapshot;
 mod state;
 mod worker;

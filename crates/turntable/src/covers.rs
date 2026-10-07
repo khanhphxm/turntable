@@ -446,7 +446,7 @@ mod tests {
 		for format in [ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::WebP] {
 			let source = RgbaImage::from_pixel(640, 320, image::Rgba([210, 80, 30, 255]));
 			let mut bytes = std::io::Cursor::new(Vec::new());
-			image::DynamicImage::ImageRgba8(source).into_rgb8().write_to(&mut bytes, format)?;
+			DynamicImage::ImageRgba8(source).into_rgb8().write_to(&mut bytes, format)?;
 			let cover = Cover { bytes: bytes.into_inner(), mime: format.to_mime_type().into() };
 			let decoded = decode(&cover, 64);
 			assert!(decoded.is_some());

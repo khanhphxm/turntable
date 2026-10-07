@@ -19,6 +19,9 @@ mod widgets;
 
 use std::sync::Arc;
 
+#[cfg(all(test, target_os = "macos"))]
+use gpui_platform as _; // The macOS-only snapshot example consumes this dev dependency.
+
 use gpui_kit::{
 	AppContext as _, Bounds, IntoElement, ParentElement as _, Render, SharedString, Styled as _, TitlebarOptions, WindowBounds,
 	WindowOptions, div, point, px, size,

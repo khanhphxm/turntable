@@ -19,7 +19,7 @@ use turntable_core::{
 use crate::{
 	shell::Shell,
 	theme,
-	widgets::{Icon, cover, icon, icon_button, play_disc, section_title},
+	widgets::{Icon, added_badge, cover, icon, icon_button, play_disc, section_title},
 };
 
 pub fn clock(ms: u64) -> String {
@@ -126,6 +126,8 @@ impl Shell {
 		let playing = current && st.playing();
 		let selected = st.library.show_selection && st.library.selected == Some(i);
 		let blocked = t.explicit && !st.prefs.playback.explicit;
+		let added = st.added(&t.uri);
+		let uri = t.uri.clone();
 		let album = t.album.as_ref();
 		let thumb = album.and_then(|a| pick_image(&a.images, 64)).map(|im| im.url.clone());
 		let editable = st.library.listing.as_ref().is_some_and(|l| l.editable) && matches!(st.library.route, Route::Playlist(_));
@@ -234,13 +236,15 @@ impl Shell {
 						div()
 							.id(("row-add", i))
 							.cursor_pointer()
-							.invisible()
-							.group_hover("row", |s| s.visible())
+							// Spotify's ✓: in Liked Songs or any of the user's playlists. Shown always
+							// once added; the ⊕ only on hover. ⊕ saves to Liked Songs; ✓ opens the
+							// playlist picker (where it can be taken out again).
+							.when(!added, |s| s.invisible().group_hover("row", |s| s.visible()))
 							.on_click(cx.listener(move |this, _, _, cx| {
 								cx.stop_propagation();
-								this.send(Msg::AddRowToPlaylist(i), cx);
+								this.send(if added { Msg::AddRowToPlaylist(i) } else { Msg::AddToLiked(uri.clone()) }, cx);
 							}))
-							.child(icon(Icon::Save, px(16.), theme::subdued())),
+							.child(added_badge(added, px(16.))),
 					)
 					.child(div().w(px(40.)).flex().justify_end().child(clock(u64::from(t.duration_ms))))
 					.child(div().invisible().group_hover("row", |s| s.visible()).child(icon(Icon::Ellipsis, px(16.), theme::subdued()))),

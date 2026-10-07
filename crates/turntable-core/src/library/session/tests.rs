@@ -1,0 +1,213 @@
+use std::{collections::HashMap, sync::Arc};
+
+use librespot_core::{Error, SpotifyId};
+use librespot_protocol::{
+	metadata,
+	playlist4_external::{ListAttributes, MetaItem},
+};
+use protobuf::MessageField;
+
+use super::{
+	CollectionItem, album, episode, image_models, liked_snapshot, local, page, releases, resolve_rows, root_playlist, track, window,
+};
+
+fn album_proto() -> metadata::Album {
+	let mut artist = metadata::Artist::new();
+	artist.set_gid(SpotifyId { id: 3 }.to_raw().to_vec());
+	artist.set_name("Artist".into());
+	let mut album = metadata::Album::new();
+	album.set_gid(SpotifyId { id: 2 }.to_raw().to_vec());
+	album.set_name("Album".into());
+	album.artist.push(artist);
+	album
+}
+
+#[test]
+fn album_keeps_release_precision_discs_ep_and_copyrights() -> Result<(), Error> {
+	let mut raw = album_proto();
+	raw.set_type(metadata::album::Type::EP);
+	let mut date = metadata::Date::new();
+	date.set_year(2020);
+	raw.date = MessageField::some(date);
+	let mut disc = metadata::Disc::new();
+	disc.track = vec![metadata::Track::new(), metadata::Track::new()];
+	raw.disc.push(disc.clone());
+	raw.disc.push(disc);
+	let mut copyright = metadata::Copyright::new();
+	copyright.set_type(metadata::copyright::Type::P);
+	copyright.set_text("Label".into());
+	raw.copyright.push(copyright);
+	let converted = album(&raw)?;
+	assert_eq!(converted.total_tracks, 4);
+	assert_eq!(converted.album_type, "single");
+	assert_eq!(converted.release_date.as_deref(), Some("2020"));
+	assert_eq!(converted.copyrights.first().map(|c| c.line()), Some("℗ Label".into()));
+	if let Some(date) = raw.date.as_mut() {
+		date.set_month(4);
+	}
+	assert_eq!(album(&raw)?.release_date.as_deref(), Some("2020-04"));
+	if let Some(date) = raw.date.as_mut() {
+		date.set_day(9);
+	}
+	assert_eq!(album(&raw)?.release_date.as_deref(), Some("2020-04-09"));
+	Ok(())
+}
+
+#[test]
+fn track_preserves_original_uri_and_complete_row_metadata() -> Result<(), Error> {
+	let mut raw = metadata::Track::new();
+	raw.set_gid(SpotifyId { id: 7 }.to_raw().to_vec());
+	raw.set_name("Song".into());
+	raw.set_duration(180_000);
+	raw.set_explicit(true);
+	let album = album_proto();
+	raw.artist = album.artist.clone();
+	raw.album = MessageField::some(album);
+	let original = "spotify:track:0000000000000000000001";
+	let row = track(original, &raw, None)?;
+	assert_eq!(row.uri, original);
+	assert_eq!(row.name, "Song");
+	assert_eq!(row.duration_ms, 180_000);
+	assert!(row.explicit);
+	assert_eq!(row.artists.first().map(|a| a.name.as_str()), Some("Artist"));
+	assert_eq!(row.album.as_ref().map(|a| a.name.as_str()), Some("Album"));
+	assert!(!row.is_episode && !row.is_local);
+	raw.set_duration(-1);
+	assert_eq!(track(original, &raw, None)?.duration_ms, 0);
+	Ok(())
+}
+
+#[test]
+fn local_files_and_episodes_stay_distinct_from_spotify_tracks() -> Result<(), Error> {
+	let local = local("spotify:local:Artist:Album:Song:123");
+	assert!(local.is_some());
+	if let Some(row) = local {
+		assert!(row.is_local && !row.is_episode);
+		assert_eq!(row.duration_ms, 123_000);
+		assert_eq!(row.name, "Song");
+	}
+	let mut raw = metadata::Episode::new();
+	raw.set_name("Episode".into());
+	raw.set_duration(120_000);
+	let mut show = metadata::Show::new();
+	show.set_gid(SpotifyId { id: 5 }.to_raw().to_vec());
+	show.set_name("Show".into());
+	raw.show = MessageField::some(show);
+	let row = episode("spotify:episode:0000000000000000000001", &raw)?;
+	assert!(row.is_episode && !row.is_local);
+	assert!(row.artists.is_empty());
+	assert_eq!(row.album.as_ref().map(|a| a.name.as_str()), Some("Show"));
+	Ok(())
+}
+
+#[test]
+fn metadata_images_use_spotify_file_id_and_expected_sizes() {
+	let mut small = metadata::Image::new();
+	small.set_file_id(vec![0xab; 20]);
+	small.set_size(metadata::image::Size::SMALL);
+	let mut sized = small.clone();
+	sized.set_width(500);
+	sized.set_height(400);
+	let images = image_models(&[small, sized, metadata::Image::new()]);
+	assert_eq!(images.len(), 2);
+	assert_eq!(images.first().and_then(|image| image.width), Some(64));
+	assert_eq!(images.first().map(|image| image.url.as_str()), Some("https://i.scdn.co/image/abababababababababababababababababababab"));
+	assert_eq!(images.last().and_then(|image| image.height), Some(400));
+}
+
+#[test]
+fn rootlist_keeps_followed_and_owned_playlists_but_not_folders_or_errors() {
+	let mut attrs = ListAttributes::new();
+	attrs.set_name("Playlist".into());
+	attrs.set_collaborative(true);
+	let mut meta = MetaItem::new();
+	meta.attributes = MessageField::some(attrs);
+	meta.set_owner_username("alice".into());
+	meta.set_length(123);
+	let uri = "spotify:user:alice:playlist:0000000000000000000001";
+	let playlist = root_playlist(uri, &meta);
+	assert!(playlist.is_some());
+	if let Some(playlist) = playlist {
+		assert_eq!(playlist.uri, "spotify:playlist:0000000000000000000001");
+		assert_eq!(playlist.track_count, Some(123));
+		assert!(playlist.collaborative);
+	}
+	assert!(root_playlist("spotify:start-group:folder", &meta).is_none());
+	meta.set_status_code(404);
+	assert!(root_playlist(uri, &meta).is_none());
+}
+
+#[test]
+fn page_offsets_count_raw_entries_not_resolved_metadata_rows() {
+	let raw: Vec<_> = (0..121).collect();
+	assert_eq!(window(&raw, 100, 50).len(), 21);
+	assert!(window(&raw, u32::MAX, 50).is_empty());
+	let filtered = page(vec![1, 2], 50, 50, 121);
+	assert_eq!(filtered.next_offset(), Some(100));
+	assert_eq!(page(vec![1], 100, 50, 121).next_offset(), None);
+}
+
+#[test]
+fn artist_discography_chooses_one_variant_per_release_in_server_order() -> Result<(), Error> {
+	let album = album_proto();
+	let mut variant = album.clone();
+	variant.set_gid(SpotifyId { id: 9 }.to_raw().to_vec());
+	let groups = [metadata::AlbumGroup { album: vec![album, variant], ..metadata::AlbumGroup::default() }, metadata::AlbumGroup::new()];
+	assert_eq!(releases(&groups)?, ["spotify:album:0000000000000000000002"]);
+	Ok(())
+}
+
+#[test]
+fn metadata_answers_restore_playlist_order_keep_duplicates_and_drop_missing_entries() -> Result<(), Error> {
+	let a = "spotify:track:0000000000000000000001";
+	let b = "spotify:track:0000000000000000000002";
+	let missing = "spotify:track:0000000000000000000003";
+	let mut alpha = metadata::Track::new();
+	alpha.set_name("Alpha".into());
+	let mut beta = metadata::Track::new();
+	beta.set_name("Beta".into());
+	let raw = HashMap::from([(b.to_owned(), beta), (a.to_owned(), alpha)]);
+	let uris = [a, missing, b, a].map(str::to_owned);
+	let rows = resolve_rows(&uris, &raw, &HashMap::new(), None)?;
+	assert_eq!(rows.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Alpha", "Beta", "Alpha"]);
+	assert_eq!(rows.iter().map(|t| t.uri.as_str()).collect::<Vec<_>>(), [a, b, a]);
+	Ok(())
+}
+
+#[test]
+fn album_rows_use_the_full_page_album_without_parsing_sparse_embedded_albums() -> Result<(), Error> {
+	let entity = "spotify:track:0000000000000000000001";
+	let mut raw = metadata::Track::new();
+	raw.set_name("Song".into());
+	raw.album = MessageField::some(metadata::Album::new());
+	let known = album(&album_proto())?;
+	let row = track(entity, &raw, Some(&known))?;
+	assert_eq!(row.album.as_ref(), Some(&known));
+	Ok(())
+}
+
+#[test]
+fn liked_snapshots_publish_changes_once_and_reconcile_removed_tracks() -> Result<(), Box<dyn std::error::Error>> {
+	let one = "spotify:track:0000000000000000000001";
+	let two = "spotify:track:0000000000000000000002";
+	let items: Vec<_> = [two, one, one, "spotify:album:0000000000000000000003"]
+		.into_iter()
+		.map(|uri| CollectionItem { uri: uri.into(), ..CollectionItem::default() })
+		.collect();
+	let (mut cached, mut changed) = (None, true);
+	let first = liked_snapshot(&items, &mut cached, &mut changed).ok_or("changed collection did not publish")?;
+	assert_eq!(first.len(), 2);
+	assert!(first.windows(2).all(|pair| pair.first() < pair.get(1)));
+	assert!(liked_snapshot(&items, &mut cached, &mut changed).is_none());
+	changed = true;
+	let reused = liked_snapshot(&items, &mut cached, &mut changed).ok_or("cached snapshot did not publish")?;
+	assert!(Arc::ptr_eq(&first, &reused));
+	// A successful collection TTL refresh invalidates the old ID array, even if no
+	// corresponding track happened to occur in the visible Liked Songs page.
+	cached = None;
+	changed = true;
+	let empty = liked_snapshot(&[], &mut cached, &mut changed).ok_or("refreshed empty collection did not publish")?;
+	assert!(empty.is_empty());
+	assert!(liked_snapshot(&[], &mut cached, &mut changed).is_none());
+	Ok(())
+}

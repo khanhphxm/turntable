@@ -148,7 +148,7 @@ pub struct State {
 	pub lyrics:              Option<(String, LyricsState)>,
 	/// The last error worth showing (cleared by the next good event).
 	pub notice:              Option<String>,
-	/// The user's library (Web API side).
+	/// The user's library, delivered by the Session/Web API worker.
 	pub library:             Library,
 	/// The side panel opened by hand (queue, lyrics, equalizer or settings); when none
 	/// is, the now-playing view shows if it's on (see [`State::side_panel`]).
@@ -254,8 +254,16 @@ impl State {
 	pub fn liked(&self) -> Option<bool> {
 		match &self.library.liked {
 			Some((uri, liked)) if *uri == self.item.uri => Some(*liked),
-			_ => None,
+			_ => library::added::TrackId::from_uri(&self.item.uri).ok().and_then(|track| self.library.track_liked(&self.item.uri, &track)),
 		}
+	}
+
+	/// Whether a Spotify track is in Liked Songs or any playlist owned by the user.
+	/// Uses worker-delivered caches only: no I/O or allocation. Unknown tracks return
+	/// false until the Session's membership answer arrives and wakes the host.
+	pub fn added(&self, track_uri: &str) -> bool {
+		let Ok(track) = library::added::TrackId::from_uri(track_uri) else { return false };
+		self.library.owned_tracks.binary_search(&track).is_ok() || self.library.track_liked(track_uri, &track).unwrap_or(false)
 	}
 
 	/// The requested side panel, or the enabled now-playing view when a track is loaded.

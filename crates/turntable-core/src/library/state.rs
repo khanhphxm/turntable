@@ -1,49 +1,82 @@
 //! Library navigation, selection, filtering and application of worker responses.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
-use super::{Conn, Entry, Home, Kind, Listing, Request, Response, Route, Sort, View, model::fold};
+use super::{
+	Conn, Entry, Home, Kind, Listing, Request, Response, Route, Sort, View,
+	added::{RefreshStats, TrackId},
+	model::fold,
+};
 use crate::spotify::{self, Album, Artist, Playlist, SearchResults, Track, User, id_of};
 
 #[derive(Debug, Default)]
 pub struct Library {
-	pub conn:           Conn,
-	pub me:             Option<User>,
-	pub playlists:      Vec<Playlist>,
+	pub conn:                Conn,
+	pub me:                  Option<User>,
+	pub playlists:           Vec<Playlist>,
 	/// Albums saved to the library, most recently added first.
-	pub albums:         Vec<Album>,
+	pub albums:              Vec<Album>,
 	/// Artists the user follows.
-	pub followed:       Vec<Artist>,
+	pub followed:            Vec<Artist>,
 	/// What Your Library lists: the kind chips that are on (none: every kind), the order, the text
 	/// filter, and how the rows are laid out.
-	pub kinds:          Vec<Kind>,
-	pub sort:           Sort,
-	pub filter:         String,
-	pub view:           View,
-	pub route:          Route,
-	pub listing:        Option<Listing>,
-	pub query:          String,
-	pub search:         Option<SearchResults>,
-	pub home:           Home,
+	pub kinds:               Vec<Kind>,
+	pub sort:                Sort,
+	pub filter:              String,
+	pub view:                View,
+	pub route:               Route,
+	pub listing:             Option<Listing>,
+	pub query:               String,
+	pub search:              Option<SearchResults>,
+	pub home:                Home,
 	/// Artists fetched for the now-playing view, by id.
-	pub artists:        HashMap<String, Artist>,
+	pub artists:             HashMap<String, Artist>,
 	/// What the web player says about them, by id.
-	pub overviews:      HashMap<String, spotify::ArtistOverview>,
+	pub overviews:           HashMap<String, spotify::ArtistOverview>,
 	/// Who made the song that last asked: (track URI, credits).
-	pub credits:        Option<(String, Vec<spotify::Credit>)>,
+	pub credits:             Option<(String, Vec<spotify::Credit>)>,
 	/// Whether the URI last checked is in Liked Songs.
-	pub liked:          Option<(String, bool)>,
+	pub liked:               Option<(String, bool)>,
+	/// The most recent completed owned-playlist refresh for the current Session.
+	pub added_refresh:       Option<RefreshStats>,
+	/// Immutable, sorted owned-playlist membership delivered by the library worker.
+	pub(crate) owned_tracks: Arc<[TrackId]>,
+	/// Complete Liked Songs membership, when the playback Session has loaded it.
+	pub(crate) liked_tracks: Option<Arc<[TrackId]>>,
+	/// Per-track answers and loaded Liked Songs pages, retained across navigation.
+	pub(crate) liked_cache:  HashMap<TrackId, bool>,
 	/// Selected row in the content area, if any.
-	pub selected:       Option<usize>,
+	pub selected:            Option<usize>,
 	/// Whether the selection is drawn: only after keyboard navigation or a
 	/// click, never just because a list loaded.
-	pub show_selection: bool,
+	pub show_selection:      bool,
 	/// A track to select once the page being opened lists it (a song card opens its album there).
-	pub reveal:         Option<String>,
-	pub error:          Option<String>,
+	pub reveal:              Option<String>,
+	pub error:               Option<String>,
 }
 
 impl Library {
+	/// What is already known about Liked Songs, without network work or allocation.
+	pub(crate) fn track_liked(&self, uri: &str, track: &TrackId) -> Option<bool> {
+		if let Some((known_uri, liked)) = &self.liked
+			&& known_uri == uri
+		{
+			return Some(*liked);
+		}
+		self.liked_cache.get(track).copied().or_else(|| self.liked_tracks.as_ref().map(|tracks| tracks.binary_search(track).is_ok()))
+	}
+
+	pub(crate) fn cache_liked(&mut self, uri: &str, liked: bool) -> bool {
+		let Ok(track) = TrackId::from_uri(uri) else { return false };
+		self.liked_cache.insert(track, liked);
+		if let Some((known_uri, known_liked)) = &mut self.liked
+			&& known_uri == uri
+		{
+			*known_liked = liked;
+		}
+		true
+	}
+
 	/// Tracks currently listed in the content area (for selection and playback).
 	pub fn rows(&self) -> &[Track] {
 		match self.route {
@@ -220,14 +253,7 @@ impl Library {
 
 	pub fn apply(&mut self, response: Response) {
 		match response {
-			Response::Connected { me, playlists } => {
-				self.conn = Conn::Ready;
-				self.me = Some(me);
-				self.playlists = playlists;
-				// The albums and artists load next: none of a previous account's meanwhile.
-				self.albums.clear();
-				self.followed.clear();
-			},
+			Response::Connected { me, playlists } => self.apply_connected(me, playlists),
 			Response::NeedsLogin => {
 				self.conn = Conn::NeedsLogin;
 				if let Some(l) = &mut self.listing {
@@ -240,7 +266,14 @@ impl Library {
 				}
 			},
 			Response::NeedsClientId => self.conn = Conn::NeedsClientId,
-			Response::Liked(uri, liked) => self.liked = Some((uri, liked)),
+			Response::Liked(uri, liked) => self.apply_liked(uri, liked),
+			Response::Added { tracks, stats } => {
+				self.owned_tracks = tracks;
+				if stats.is_some() || self.owned_tracks.is_empty() {
+					self.added_refresh = stats;
+				}
+			},
+			Response::LikedTracks(tracks) => self.apply_liked_tracks(tracks),
 			Response::Home(home) => self.home = home,
 			Response::Artist(artist) => {
 				self.artists.insert(id_of(&artist.uri).to_owned(), artist);
@@ -318,6 +351,32 @@ impl Library {
 		}
 	}
 
+	fn apply_connected(&mut self, me: User, playlists: Vec<Playlist>) {
+		if self.me.as_ref().is_some_and(|old| old.id != me.id) {
+			self.liked = None;
+			self.liked_cache.clear();
+		}
+		self.conn = Conn::Ready;
+		self.me = Some(me);
+		self.playlists = playlists;
+		// The albums and artists load next: none of a previous account's meanwhile.
+		self.albums.clear();
+		self.followed.clear();
+	}
+
+	fn apply_liked(&mut self, uri: String, liked: bool) {
+		self.cache_liked(&uri, liked);
+		self.liked = Some((uri, liked));
+	}
+
+	fn apply_liked_tracks(&mut self, tracks: Arc<[TrackId]>) {
+		self.liked_cache.clear();
+		if let Some((uri, liked)) = &mut self.liked {
+			*liked = TrackId::from_uri(uri).is_ok_and(|track| tracks.binary_search(&track).is_ok());
+		}
+		self.liked_tracks = Some(tracks);
+	}
+
 	fn apply_error(&mut self, route: Option<&Route>, message: String) {
 		// An error from a page the user already left isn't about this one.
 		if route.is_some_and(|r| *r != self.route) {
@@ -330,6 +389,15 @@ impl Library {
 	}
 
 	fn apply_listing(&mut self, route: &Route, offset: u32, mut listing: Listing) {
+		if *route == Route::Liked {
+			for track in &listing.tracks {
+				if let Ok(id) = TrackId::from_uri(&track.uri)
+					&& self.liked_tracks.as_ref().is_none_or(|tracks| tracks.binary_search(&id).is_err())
+				{
+					self.liked_cache.entry(id).or_insert(true);
+				}
+			}
+		}
 		if *route != self.route {
 			return;
 		}

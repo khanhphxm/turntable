@@ -467,3 +467,131 @@ fn encoded_covers_keep_identity_and_missing_lookups_are_deduplicated() {
 	assert!(Arc::ptr_eq(state.image(Some("https://cover")).unwrap(), &cover));
 	assert!(state.take_missing_images().is_empty());
 }
+
+fn owned_tracks(uris: &[&str]) -> Result<library::Response, library::added::IndexError> {
+	let mut tracks: Vec<_> = uris.iter().map(|uri| library::added::TrackId::from_uri(uri)).collect::<Result<_, _>>()?;
+	tracks.sort_unstable();
+	tracks.dedup();
+	Ok(library::Response::Added { tracks: tracks.into(), stats: None })
+}
+
+#[test]
+fn added_merges_owned_playlists_liked_collection_and_now_playing() -> Result<(), library::added::IndexError> {
+	let owned = "spotify:track:0000000000000000000001";
+	let saved = "spotify:track:0000000000000000000002";
+	let playing = "spotify:track:0000000000000000000003";
+	let checked = "spotify:track:0000000000000000000004";
+	let mut s = State::default();
+	s.library.apply(owned_tracks(&[owned])?);
+	s.library.apply(library::Response::LikedTracks(vec![library::added::TrackId::from_uri(saved)?].into()));
+	s.library.apply(library::Response::Liked(checked.into(), true));
+	s.item.uri = playing.into();
+	s.library.liked = Some((playing.into(), true));
+	for uri in [owned, saved, playing, checked] {
+		assert!(s.added(uri), "membership source for {uri}");
+	}
+	assert!(!s.added("spotify:track:0000000000000000000005"));
+	Ok(())
+}
+
+#[test]
+fn added_keeps_owned_membership_after_unlike_and_drops_removed_playlists() -> Result<(), library::added::IndexError> {
+	let uri = "spotify:track:0000000000000000000001";
+	let mut s = State::default();
+	s.item.uri = uri.into();
+	s.library.apply(owned_tracks(&[uri])?);
+	s.library.apply(library::Response::Liked(uri.into(), true));
+	assert!(s.added(uri));
+	s.library.apply(library::Response::Liked(uri.into(), false));
+	assert_eq!(s.liked(), Some(false));
+	assert!(s.added(uri), "unliking does not remove owned-playlist membership");
+	s.library.apply(owned_tracks(&[])?);
+	assert!(!s.added(uri));
+	Ok(())
+}
+
+#[test]
+fn added_retains_liked_page_knowledge_after_navigation_and_respects_unlike() -> Result<(), serde_json::Error> {
+	let uri = "spotify:track:0000000000000000000001";
+	let track = serde_json::from_value(serde_json::json!({ "uri": uri }))?;
+	let mut s = State::default();
+	s.library.apply(library::Response::Listing {
+		route:   Route::Liked,
+		offset:  0,
+		listing: library::Listing { tracks: vec![track], ..library::Listing::default() },
+	});
+	s.library.navigate(Route::Library);
+	assert!(s.added(uri));
+	s.library.apply(library::Response::Liked(uri.into(), false));
+	assert!(!s.added(uri), "an explicit unlike wins over an older Liked Songs page");
+	Ok(())
+}
+
+#[test]
+fn added_replaces_full_liked_membership_and_rejects_nontrack_uris() {
+	let uri = "spotify:track:0000000000000000000001";
+	let mut s = State::default();
+	s.library.apply(library::Response::Liked(uri.into(), true));
+	s.library.apply(library::Response::LikedTracks(std::sync::Arc::from([])));
+	assert!(!s.added(uri), "a fresh full collection replaces older contains answers");
+	for uri in ["", "not a URI", "spotify:episode:0000000000000000000001", "spotify:local:artist:album:track:180"] {
+		s.item.uri = uri.into();
+		s.library.liked = Some((uri.into(), true));
+		assert!(!s.added(uri), "only canonical Spotify tracks have added membership");
+	}
+}
+
+#[test]
+fn added_respects_optimistic_unlike_over_full_liked_collection() -> Result<(), library::added::IndexError> {
+	let uri = "spotify:track:0000000000000000000001";
+	let mut s = State::default();
+	s.library.apply(library::Response::LikedTracks(vec![library::added::TrackId::from_uri(uri)?].into()));
+	assert!(s.added(uri));
+	s.item.uri = uri.into();
+	assert_eq!(s.liked(), Some(true), "now playing can reuse full collection membership without a contains request");
+	s.update(Msg::RemoveFromLiked(uri.into()));
+	assert!(!s.added(uri), "optimistic removal wins while the worker's cached full collection still contains the URI");
+	assert_eq!(s.liked(), Some(false));
+	s.library.apply(owned_tracks(&[uri])?);
+	assert!(s.added(uri), "playlist membership still wins over the cached unlike");
+	Ok(())
+}
+
+#[test]
+fn toggle_like_still_toggles_only_liked_songs_when_track_is_in_owned_playlist() -> Result<(), library::added::IndexError> {
+	let uri = "spotify:track:0000000000000000000001";
+	let mut s = State::default();
+	s.item.uri = uri.into();
+	s.library.apply(owned_tracks(&[uri])?);
+	s.library.apply(library::Response::Liked(uri.into(), false));
+	assert!(s.added(uri));
+	assert!(matches!(s.update(Msg::ToggleLike).as_slice(), [Effect::Library(library::Request::SetLiked(track, true))] if track == uri));
+	assert_eq!(s.liked(), Some(true));
+	assert!(matches!(s.update(Msg::ToggleLike).as_slice(), [Effect::Library(library::Request::SetLiked(track, false))] if track == uri));
+	assert_eq!(s.liked(), Some(false));
+	assert!(s.added(uri));
+	Ok(())
+}
+
+#[test]
+fn row_liked_actions_are_explicit_and_optimistic_without_changing_now_playing() {
+	let row = "spotify:track:0000000000000000000001";
+	let now = "spotify:track:0000000000000000000002";
+	let mut s = State::default();
+	s.item.uri = now.into();
+	s.library.apply(library::Response::Liked(now.into(), true));
+	assert!(
+		matches!(s.update(Msg::AddToLiked(row.into())).as_slice(), [Effect::Library(library::Request::SetLiked(track, true))] if track == row)
+	);
+	assert!(s.added(row));
+	assert_eq!(s.liked(), Some(true));
+	s.library.apply(library::Response::Liked(row.into(), true));
+	assert_eq!(s.liked(), Some(true), "a row's reply retains cached now-playing membership");
+	assert!(
+		matches!(s.update(Msg::RemoveFromLiked(row.into())).as_slice(), [Effect::Library(library::Request::SetLiked(track, false))] if track == row)
+	);
+	assert!(!s.added(row));
+	assert_eq!(s.liked(), Some(true));
+	s.library.apply(library::Response::Liked(row.into(), false));
+	assert_eq!(s.liked(), Some(true));
+}

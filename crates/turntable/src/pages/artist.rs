@@ -142,7 +142,7 @@ impl Shell {
 							.overflow_hidden()
 							.bg(theme::raised())
 							.child(match img {
-								Some(src) => div().h(px(320.)).child(gpui_kit::img(src).size_full()),
+								Some(src) => div().h(px(320.)).child(gpui_kit::img(src).size_full().rounded_t(px(8.))),
 								None => div().h(px(120.)).bg(linear_gradient(
 									180.,
 									linear_color_stop(theme::alpha(rgb(tint), 0.6), 0.),
@@ -170,8 +170,11 @@ impl Shell {
 			})
 	}
 
-	/// Cards for `tiles`, ids prefixed with `key`.
+	/// Cards for `tiles`, ids prefixed with `key`: only as many as fit one row of the main view
+	/// (shelves don't scroll sideways, so the rest would be built and laid out for nothing).
 	pub fn cards(&self, key: &'static str, tiles: &[Tile], cx: &mut Context<'_, Self>) -> Vec<gpui_kit::Stateful<Div>> {
-		tiles.iter().enumerate().map(|(i, t)| self.card(gpui_kit::ElementId::NamedInteger(key.into(), i as u64), t, cx)).collect()
+		#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a small positive card count (max(1.) floors it at one)")]
+		let fit = ((self.main_w - 24.) / theme::CARD_W).floor().max(1.) as usize;
+		tiles.iter().take(fit).enumerate().map(|(i, t)| self.card(gpui_kit::ElementId::NamedInteger(key.into(), i as u64), t, cx)).collect()
 	}
 }

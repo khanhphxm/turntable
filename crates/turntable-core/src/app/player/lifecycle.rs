@@ -226,6 +226,7 @@ impl Controller {
 	fn detach_engine(&mut self) -> Detached {
 		self.retry_start_at = None;
 		self.client = None;
+		self.library.set_session(None);
 		self.state.has_audio = false;
 		self.state.sys.running = None;
 		self.state.sys.launching = None;

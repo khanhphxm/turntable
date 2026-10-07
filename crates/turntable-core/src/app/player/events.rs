@@ -137,6 +137,7 @@ impl Controller {
 		self.start_failures = 0;
 		self.state.notice = None;
 		self.state.signed_in = true;
+		self.library.set_session(engine.session_reader());
 		self.engine = Some(engine);
 		self.on_engine_started();
 		self.connect();

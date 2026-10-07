@@ -20,6 +20,13 @@ pub struct Popularity {
 const ARTISTS_KEPT: usize = 128;
 /// An artist's header: the artist, their releases by kind, where they appear, and whether they are followed.
 pub(super) fn artist_header(s: &mut Session, id: &str) -> spotify::Result<Listing> {
+	if let Some(player) = &mut s.player {
+		let listing = player.artist_header(id)?;
+		if let Some(artist) = &listing.artist {
+			s.artists.insert(id.to_owned(), artist.clone());
+		}
+		return Ok(listing);
+	}
 	let uri = format!("spotify:artist:{id}");
 	let known = s.artists.get(id).cloned();
 	let client = &s.client;
@@ -75,6 +82,22 @@ pub(super) fn popularity(s: &mut Session, id: &str) -> spotify::Result<Popularit
 	if let Some(p) = s.popular.get(&id.to_owned()) {
 		return Ok(p);
 	}
+	if let Some(player) = &mut s.player {
+		let mut popular = player.popularity(id)?;
+		// Play counts and monthly listeners aren't in ARTIST_V4. The web overview enriches
+		// session tracks without replacing Spotify's market-specific top-track order.
+		if let Ok(page) = s.web.artist(id) {
+			let counts: std::collections::HashMap<_, _> =
+				page.popular.iter().filter_map(|t| t.plays.map(|plays| (t.track.uri.as_str(), plays))).collect();
+			if let Some(plays) = popular.tracks.iter().map(|t| counts.get(t.uri.as_str()).copied()).collect::<Option<Vec<_>>>() {
+				popular.plays = plays;
+			}
+			popular.accent.clone_from(&page.overview.color);
+			popular.overview = Some(page.overview);
+		}
+		s.popular.insert(id.to_owned(), popular.clone());
+		return Ok(popular);
+	}
 	let page = s.web.artist(id).ok().filter(|p| !p.popular.is_empty());
 	let p = match page {
 		Some(page) => {
@@ -116,7 +139,10 @@ pub(super) fn artist(s: &mut Session, id: &str) -> spotify::Result<Artist> {
 	if let Some(a) = s.artists.get(id) {
 		return Ok(a.clone());
 	}
-	let a = s.client.artist(id)?;
+	let a = match &mut s.player {
+		Some(player) => player.artist(id)?,
+		None => s.client.artist(id)?,
+	};
 	s.artists.insert(id.to_owned(), a.clone());
 	Ok(a)
 }

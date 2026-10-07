@@ -27,6 +27,7 @@ pub(super) fn home(s: &mut Session) -> spotify::Result<Home> {
 		return Ok(h.clone());
 	}
 	let client = &s.client;
+	let player = &mut s.player;
 	// Nothing on the page waits for anything else on it: all of it is asked for together. The first
 	// pages of the followed artists and the saved albums are the ones Your Library starts from, so
 	// they are asked for whole and the shelves take their first items.
@@ -38,7 +39,16 @@ pub(super) fn home(s: &mut Session) -> spotify::Result<Home> {
 				|| {
 					par::join(
 						|| optional(client.top_tracks(SHELF)),
-						|| par::join(|| optional(client.followed_artists(None, 50)), || client.saved_albums(0, 50)),
+						|| match player {
+							Some(player) => {
+								let followed = player.followed(50).map(Some);
+								(followed, player.albums(50))
+							},
+							None => par::join(
+								|| optional(client.followed_artists(None, 50)).map(|p| p.map(|p| p.items)),
+								|| client.saved_albums(0, 50).map(|p| p.items),
+							),
+						},
 					)
 				},
 			)
@@ -47,8 +57,8 @@ pub(super) fn home(s: &mut Session) -> spotify::Result<Home> {
 	let played = played?;
 	let top_artists = top_artists?.map(|a| a.iter().map(Tile::artist).collect());
 	let top_tracks = top_tracks?;
-	let followed = followed?.map(|p| p.items.iter().take(SHELF_ITEMS).map(Tile::artist).collect());
-	let albums = albums?.items.iter().take(SHELF_ITEMS).map(Tile::album).collect();
+	let followed = followed?.map(|artists| artists.iter().take(SHELF_ITEMS).map(Tile::artist).collect());
+	let albums = albums?.iter().take(SHELF_ITEMS).map(Tile::album).collect();
 	learn_contexts(s, &played);
 	let (mut recents, mut seen) = (Vec::new(), HashSet::new());
 	let (mut recent_tracks, mut seen_tracks) = (Vec::new(), HashSet::new());
@@ -90,9 +100,32 @@ fn learn_contexts(s: &mut Session, played: &[(Track, Option<PlayContext>)]) {
 		}
 	}
 	let client = &s.client;
+	let player = s.player.as_ref();
 	let (artists, playlists) = par::join(
-		|| par::map(artists, 4, |id| (client.artist(&id).ok(), id)),
-		|| par::map(playlists, 4, |id| (client.playlist(&id).ok(), id)),
+		|| match player {
+			Some(player) => {
+				let uris: Vec<_> = artists.iter().map(|id| format!("spotify:artist:{id}")).collect();
+				player
+					.artists(&uris)
+					.unwrap_or_default()
+					.into_iter()
+					.map(|artist| {
+						let id = id_of(&artist.uri).to_owned();
+						(Some(artist), id)
+					})
+					.collect()
+			},
+			None => par::map(artists, 4, |id| (client.artist(&id).ok(), id)),
+		},
+		|| {
+			par::map(playlists, 4, |id| {
+				let playlist = match player {
+					Some(player) => player.playlist(&id, 0, false).map(|(p, _, _)| p),
+					None => client.playlist(&id),
+				};
+				(playlist.ok(), id)
+			})
+		},
 	);
 	for (artist, id) in artists {
 		if let Some(artist) = artist {
@@ -116,10 +149,13 @@ fn context_tile(s: &mut Session, context: &PlayContext, track: &Track) -> Option
 			if let Some(p) = s.playlists.iter().find(|p| p.id == id) {
 				return Some(Tile::playlist(p));
 			}
-			// Someone else's playlist: its metadata, asked once. Development Mode
-			// refuses Spotify's own editorial ones; those are left out.
+			// Someone else's playlist: its session metadata, asked once (Web API before playback connects).
 			if !s.others.contains_key(id) {
-				let p = s.client.playlist(id).ok();
+				let p = match &s.player {
+					Some(player) => player.playlist(id, 0, false).map(|(p, _, _)| p),
+					None => s.client.playlist(id),
+				}
+				.ok();
 				s.others.insert(id.to_owned(), p);
 			}
 			// Spotify also plays Liked Songs as a generated playlist of its own (a `37i9dQZF1F…`

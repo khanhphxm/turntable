@@ -90,6 +90,8 @@ impl State {
 			Msg::QueueContext(route) => effects.push(Effect::Library(library::Request::QueueContext(route))),
 			Msg::Discography(i) => self.discography = i,
 			Msg::ToggleLike => self.toggle_like(&mut effects),
+			Msg::AddToLiked(uri) => self.set_row_liked(uri, true, &mut effects),
+			Msg::RemoveFromLiked(uri) => self.set_row_liked(uri, false, &mut effects),
 			Msg::QueueRemove(i) => {
 				self.queue_edit.remove(&self.upcoming, i, Instant::now());
 			},
@@ -362,9 +364,20 @@ impl State {
 		if !self.item.uri.is_empty() {
 			let liked = self.liked() == Some(true);
 			self.library.liked = Some((self.item.uri.clone(), !liked));
+			self.library.cache_liked(&self.item.uri, !liked);
 			effects.push(Effect::Library(library::Request::SetLiked(self.item.uri.clone(), !liked)));
 			self.dialog = None;
 		}
+	}
+
+	fn set_row_liked(&mut self, uri: String, liked: bool, effects: &mut Vec<Effect>) {
+		if !self.library.cache_liked(&uri, liked) {
+			return;
+		}
+		if uri == self.item.uri {
+			self.library.liked = Some((uri.clone(), liked));
+		}
+		effects.push(Effect::Library(library::Request::SetLiked(uri, liked)));
 	}
 
 	fn queue_jump(&mut self, index: usize, cmds: &mut Vec<Command>) {

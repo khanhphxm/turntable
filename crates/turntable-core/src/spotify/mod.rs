@@ -23,7 +23,7 @@ pub use client::{Client, MAX_ARTIST_ALBUMS, PlayStart, PlayerCommand};
 pub use error::{Error, Result};
 pub use http::{Priority, priority, set_priority};
 pub use model::{
-	Album, Artist, Device, DeviceKind, Image, Page, PlayContext, Playback, Playlist, PlaylistChanges, RepeatMode, SearchResults, Track,
-	User, id_of, pick_image,
+	Album, Artist, Copyright, Device, DeviceKind, Image, Page, PlayContext, Playback, Playlist, PlaylistChanges, RepeatMode, SearchResults,
+	Track, User, id_of, pick_image,
 };
 pub use web_player::{ArtistOverview, Credit, Pick, WebPlayer, WebPlaylist};

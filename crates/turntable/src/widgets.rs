@@ -124,7 +124,8 @@ pub fn chip(
 pub fn cover(image: Option<gpui_kit::ImageSource>, color: u32, size: Pixels, radius: Pixels) -> Div {
 	let frame = div().size(size).flex_none().rounded(radius).overflow_hidden().bg(rgb(color));
 	match image {
-		Some(src) => frame.child(gpui_kit::img(src).size_full()),
+		// GPUI clips children to rectangles: the image rounds its own corners.
+		Some(src) => frame.child(gpui_kit::img(src).size_full().rounded(radius)),
 		None => frame,
 	}
 }

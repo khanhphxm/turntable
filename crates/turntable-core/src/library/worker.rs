@@ -9,44 +9,92 @@ use std::{
 };
 
 use super::{
-	Home, Listing, PAGE, Popularity, Request, Response, Route,
+	Home, Listing, Popularity, Request, Response, Route,
+	added::Membership,
 	artist::{about, artist, popularity},
 	home::home,
-	pages::{accent, all_albums, all_followed, all_playlists, header, open},
+	pages::{accent, all_albums, all_followed, all_playlists, open},
+	session::Reader,
 	snapshot::{self, Store},
 };
 use crate::{
+	engine::SessionReader,
 	net::{cache::Cache, par, trace},
 	sources::external,
 	spotify::{self, Artist, Client, Playlist, id_of},
 };
 
 pub struct Worker {
-	tx:        mpsc::Sender<Request>,
+	tx:        mpsc::Sender<Inbox>,
 	snapshots: Arc<Mutex<Store>>,
 	deliver:   Arc<dyn Fn(Response) + Send + Sync>,
+}
+
+enum Inbox {
+	Request(Request),
+	Session(Option<SessionReader>),
 }
 
 impl Worker {
 	/// Starts the worker. Disk listings can also be delivered by `send`, without waiting for
 	/// an in-flight network request; every snapshot is followed by the worker's fresh answer.
 	pub fn spawn(config_dir: PathBuf, cache_dir: &Path, deliver: impl Fn(Response) + Send + Sync + 'static) -> Self {
-		let (tx, rx) = mpsc::channel::<Request>();
+		let (tx, rx) = mpsc::channel::<Inbox>();
 		let snapshots = Arc::new(Mutex::new(Store::new(cache_dir)));
 		let deliver: Arc<dyn Fn(Response) + Send + Sync> = Arc::new(deliver);
+		let mut added = Membership::new(cache_dir);
 		let worker = Self { tx, snapshots: snapshots.clone(), deliver: deliver.clone() };
 		let _ = thread::Builder::new().name("library".into()).stack_size(512 * 1024).spawn(move || {
 			let mut session: Option<Session> = None;
+			let mut player: Option<Reader> = None;
+			let mut refresh_added = false;
 			let mut waiting = None;
 			while let Some(request) = waiting.take().or_else(|| rx.recv().ok()) {
-				serve(&config_dir, &snapshots, &mut session, request, deliver.as_ref());
+				match request {
+					Inbox::Session(reader) => {
+						added.attach(reader.clone(), deliver.as_ref());
+						refresh_added = reader.is_some();
+						player = reader.map(Reader::new);
+						deliver(Response::LikedTracks(Arc::from([])));
+						if let Some(s) = &mut session {
+							let matched = player.as_ref().is_some_and(|p| p.matches(&s.me));
+							s.attach(if matched { player.take() } else { None }, deliver.as_ref());
+						}
+						if let Some(reader) = &mut player
+							&& let Ok(Some(tracks)) = reader.liked_update()
+						{
+							deliver(Response::LikedTracks(tracks));
+						}
+					},
+					Inbox::Request(request) => {
+						if matches!(request, Request::Connect | Request::Login)
+							&& let Some(s) = &mut session
+							&& s.player.is_some()
+						{
+							player = s.player.take();
+						}
+						serve(
+							&config_dir,
+							&snapshots,
+							&mut session,
+							&mut player,
+							&mut added,
+							&mut refresh_added,
+							request,
+							deliver.as_ref(),
+						);
+					},
+				}
 				// At the end of a request burst, drop shared answers and stale listings.
 				waiting = rx.try_recv().ok();
-				if waiting.is_none()
-					&& let Some(s) = &mut session
-				{
-					s.client.forget_recent();
-					s.pages.evict_expired();
+				if waiting.is_none() {
+					if let Some(s) = &mut session {
+						s.client.forget_recent();
+						s.pages.evict_expired();
+					}
+					if std::mem::take(&mut refresh_added) {
+						added.refresh(deliver.as_ref());
+					}
 				}
 			}
 		});
@@ -64,13 +112,19 @@ impl Worker {
 		} else if matches!(request, Request::Logout | Request::ForgetSnapshot | Request::Login) {
 			self.snapshots.lock().unwrap_or_else(PoisonError::into_inner).clear();
 		}
-		let _ = self.tx.send(request);
+		let _ = self.tx.send(Inbox::Request(request));
+	}
+
+	/// Shares the player's authenticated session; before it arrives reads use the Web API.
+	pub fn set_session(&self, session: Option<SessionReader>) {
+		let _ = self.tx.send(Inbox::Session(session));
 	}
 }
 
-/// A connected Web API session and what's worth not asking twice.
+/// Library state, its fallback Web API client and its optional player session.
 pub(super) struct Session {
 	pub(super) client:    Client,
+	pub(super) player:    Option<Reader>,
 	pub(super) me:        String,
 	pub(super) snapshots: Arc<Mutex<Store>>,
 	/// The user's playlists, to name recently played ones without a request.
@@ -98,6 +152,7 @@ impl Session {
 	fn new(client: Client, me: String, playlists: Vec<Playlist>, snapshots: Arc<Mutex<Store>>) -> Self {
 		Self {
 			client,
+			player: None,
 			me,
 			snapshots,
 			playlists,
@@ -113,13 +168,66 @@ impl Session {
 		}
 	}
 
+	fn attach(&mut self, player: Option<Reader>, deliver: &dyn Fn(Response)) {
+		self.player = player;
+		self.pages.clear();
+		self.popular.clear();
+		if self.player.is_some()
+			&& let Ok(playlists) = self.load_playlists()
+		{
+			self.playlists = playlists.clone();
+			let response = Response::Playlists(playlists);
+			let mut snapshots = self.snapshots.lock().unwrap_or_else(PoisonError::into_inner);
+			snapshots.record(&response);
+			deliver(response);
+			let _ = snapshots.save();
+		}
+		self.publish_liked(deliver);
+	}
+
+	fn publish_liked(&mut self, deliver: &dyn Fn(Response)) {
+		if let Some(reader) = &mut self.player
+			&& let Ok(Some(tracks)) = reader.liked_update()
+		{
+			deliver(Response::LikedTracks(tracks));
+		}
+	}
+
+	fn load_playlists(&mut self) -> spotify::Result<Vec<Playlist>> {
+		let Some(reader) = &mut self.player else { return all_playlists(&self.client) };
+		let mut playlists = reader.playlists()?;
+		for playlist in &mut playlists {
+			if let Some(known) = self.playlists.iter().find(|known| known.id == playlist.id) {
+				playlist.public = known.public;
+				playlist.owner.display_name.clone_from(&known.owner.display_name);
+				if playlist.images.is_empty() {
+					playlist.images.clone_from(&known.images);
+				}
+			}
+		}
+		Ok(playlists)
+	}
+
 	/// Forgets the listing of `route` (after a write that changed it).
 	fn forget(&mut self, route: &Route) {
 		self.pages.remove(route);
+		if let Some(player) = &mut self.player {
+			player.forget(route);
+		}
 		self.snapshots.lock().unwrap_or_else(PoisonError::into_inner).forget(route);
 	}
 }
-fn serve(config: &Path, snapshots: &Arc<Mutex<Store>>, session: &mut Option<Session>, request: Request, deliver: &dyn Fn(Response)) {
+#[expect(clippy::too_many_arguments, reason = "the worker owns session, snapshot and membership lifecycles separately")]
+fn serve(
+	config: &Path,
+	snapshots: &Arc<Mutex<Store>>,
+	session: &mut Option<Session>,
+	player: &mut Option<Reader>,
+	added: &mut Membership,
+	refresh_added: &mut bool,
+	request: Request,
+	deliver: &dyn Fn(Response),
+) {
 	let output = |response| {
 		let changed = snapshots.lock().unwrap_or_else(PoisonError::into_inner).record(&response);
 		deliver(response);
@@ -128,9 +236,9 @@ fn serve(config: &Path, snapshots: &Arc<Mutex<Store>>, session: &mut Option<Sess
 		}
 	};
 	match request {
-		Request::Connect => connect(config, snapshots, session, &output),
+		Request::Connect => connect(config, snapshots, session, player, &output),
 		Request::Login => match spotify::login(config, |url| deliver(Response::LoginUrl(url.to_owned()))) {
-			Ok(()) => connect(config, snapshots, session, &output),
+			Ok(()) => connect(config, snapshots, session, player, &output),
 			Err(e) => deliver(Response::LoginFailed(e.user_message())),
 		},
 		Request::Logout => {
@@ -160,7 +268,7 @@ fn serve(config: &Path, snapshots: &Arc<Mutex<Store>>, session: &mut Option<Sess
 					| Request::AddToPlaylist(..)
 					| Request::RemoveFromPlaylist(..)
 			);
-			match run(s, other) {
+			match run(s, added, refresh_added, other, deliver) {
 				Ok(Some(response)) => {
 					// What the Web API lacks of a page follows it, so nothing waits for it: an album's play
 					// counts, and the cover's tint (all the page's tracks share the first page's).
@@ -201,7 +309,13 @@ fn serve(config: &Path, snapshots: &Arc<Mutex<Store>>, session: &mut Option<Sess
 	}
 }
 
-fn connect(config: &Path, snapshots: &Arc<Mutex<Store>>, session: &mut Option<Session>, deliver: &dyn Fn(Response)) {
+fn connect(
+	config: &Path,
+	snapshots: &Arc<Mutex<Store>>,
+	session: &mut Option<Session>,
+	player: &mut Option<Reader>,
+	deliver: &dyn Fn(Response),
+) {
 	if !config.join("client_id").is_file() {
 		deliver(Response::NeedsClientId);
 		return;
@@ -240,7 +354,13 @@ fn connect(config: &Path, snapshots: &Arc<Mutex<Store>>, session: &mut Option<Se
 	let Some(s) = session.as_mut() else { return };
 	let client = &s.client;
 	// The profile and the playlists don't wait for each other, nor do the playlists' later pages.
-	let (profile, playlists) = par::join(|| client.me_with_plan(), || all_playlists(client));
+	let (profile, playlists) = par::join(
+		|| client.me_with_plan(),
+		|| match player {
+			Some(player) if user_id.as_deref().is_some_and(|id| player.matches(id)) => player.playlists(),
+			_ => all_playlists(client),
+		},
+	);
 	let loaded = profile.and_then(|(me, plan)| {
 		let playlists = if is_free(plan.as_deref()) { Vec::new() } else { playlists? };
 		Ok((me, plan, playlists))
@@ -252,11 +372,19 @@ fn connect(config: &Path, snapshots: &Arc<Mutex<Store>>, session: &mut Option<Se
 			*session = None;
 			deliver(Response::LoginFailed(spotify::Error::PremiumRequired.user_message()));
 		},
-		Ok((me, _, playlists)) => {
+		Ok((me, _, mut playlists)) => {
 			let _ = account.remember_user(&me.id);
 			s.me = me.id.clone();
+			for playlist in &mut playlists {
+				if playlist.owner.id == me.id {
+					playlist.owner.display_name.clone_from(&me.display_name);
+				}
+			}
 			s.playlists = playlists.clone();
 			deliver(Response::Connected { me, playlists });
+			if player.as_ref().is_some_and(|p| p.matches(&s.me)) {
+				s.attach(player.take(), deliver);
+			}
 		},
 		Err(spotify::Error::AuthRequired | spotify::Error::AuthExpired) => {
 			snapshots.lock().unwrap_or_else(PoisonError::into_inner).clear();
@@ -288,11 +416,23 @@ fn is_free(plan: Option<&str>) -> bool {
 	matches!(plan, Some("free" | "open"))
 }
 
-fn run(s: &mut Session, request: Request) -> spotify::Result<Option<Response>> {
+fn run(
+	s: &mut Session,
+	added: &mut Membership,
+	refresh_added: &mut bool,
+	request: Request,
+	deliver: &dyn Fn(Response),
+) -> spotify::Result<Option<Response>> {
 	Ok(Some(match request {
 		Request::Home => Response::Home(home(s)?),
-		Request::Albums => Response::Albums(all_albums(&s.client)?),
-		Request::Following => Response::Following(all_followed(&mut s.client)?),
+		Request::Albums => Response::Albums(match &mut s.player {
+			Some(player) => player.albums(500)?,
+			None => all_albums(&s.client)?,
+		}),
+		Request::Following => Response::Following(match &mut s.player {
+			Some(player) => player.followed(500)?,
+			None => all_followed(&mut s.client)?,
+		}),
 		Request::Artist(id) => Response::Artist(artist(s, &id)?),
 		Request::ArtistPopular(id) => Response::ArtistPopular(id.clone(), popularity(s, &id)?),
 		Request::ArtistAbout(id) => Response::ArtistAbout(id.clone(), about(s, &id)),
@@ -304,50 +444,61 @@ fn run(s: &mut Session, request: Request) -> spotify::Result<Option<Response>> {
 			Ok(credits) => Response::Credits(uri, credits),
 			Err(_) => return Ok(None),
 		},
-		Request::SetFollowed(uri, follow) => set_followed(s, &uri, follow)?,
-		Request::CreatePlaylist(name, uris) => create_playlist(s, &name, &uris)?,
+		Request::SetFollowed(uri, follow) => {
+			let response = set_followed(s, &uri, follow)?;
+			*refresh_added |= uri.starts_with("spotify:playlist:");
+			response
+		},
+		Request::CreatePlaylist(name, uris) => {
+			let response = create_playlist(s, &name, &uris)?;
+			*refresh_added = true;
+			response
+		},
 		Request::RenamePlaylist(id, changes) => {
 			s.client.rename_playlist(&id, &changes)?;
+			if let Some(public) = changes.public
+				&& let Some(playlist) = s.playlists.iter_mut().find(|playlist| playlist.id == id)
+			{
+				playlist.public = Some(public);
+			}
+			*refresh_added = true;
 			s.forget(&Route::Playlist(id));
-			s.playlists = all_playlists(&s.client)?;
+			s.playlists = s.load_playlists()?;
 			Response::Playlists(s.playlists.clone())
 		},
 		Request::AddToPlaylist(id, name, uris) => {
-			let uris: Vec<&str> = uris.iter().map(String::as_str).collect();
-			s.client.add_to_playlist(&id, &uris)?;
+			let borrowed: Vec<&str> = uris.iter().map(String::as_str).collect();
+			s.client.add_to_playlist(&id, &borrowed)?;
+			added.edited(&format!("spotify:playlist:{id}"), &uris, &[], deliver);
+			*refresh_added = true;
 			s.forget(&Route::Playlist(id));
 			Response::Done(format!("Added to {name}"))
 		},
 		Request::RemoveFromPlaylist(id, uri) => {
 			s.client.remove_from_playlist(&id, &[&uri])?;
+			added.edited(&format!("spotify:playlist:{id}"), &[], std::slice::from_ref(&uri), deliver);
+			*refresh_added = true;
 			s.forget(&Route::Playlist(id.clone()));
 			Response::Removed(id, uri)
 		},
 		Request::QueueContext(route) => {
-			let tracks = match &route {
-				Route::Album(id) => s.client.album_tracks(id, 0, PAGE)?.items,
-				Route::Playlist(id) => s.client.playlist_items(id, 0, PAGE)?.items,
-				Route::Liked => s.client.saved_tracks(0, PAGE)?.items,
-				_ => Vec::new(),
-			};
-			let title = header(s, &route).map(|h| h.title).unwrap_or_default();
-			Response::Queue(tracks.into_iter().filter(|t| !t.is_local).map(|t| t.uri).collect(), title)
+			let listing = open(s, &route, 0)?;
+			Response::Queue(listing.tracks.into_iter().filter(|t| !t.is_local).map(|t| t.uri).collect(), listing.title)
 		},
 		Request::CheckLiked(uri) => {
-			let liked = s.client.library_contains(&[&uri])?.first().copied().unwrap_or(false);
+			let liked = match &mut s.player {
+				Some(player) => player.contains(&uri)?,
+				None => s.client.library_contains(&[&uri])?.first().copied().unwrap_or(false),
+			};
+			s.publish_liked(deliver);
 			Response::Liked(uri, liked)
 		},
-		Request::SetLiked(uri, liked) => {
-			if liked {
-				s.client.save(&[&uri])?;
-			} else {
-				s.client.unsave(&[&uri])?;
-			}
-			s.forget(&Route::Liked);
-			Response::Liked(uri, liked)
-		},
+		Request::SetLiked(uri, liked) => set_liked(s, &uri, liked, deliver)?,
 		Request::Open(route, offset) => {
 			let listing = open(s, &route, offset)?;
+			if route == Route::Liked {
+				s.publish_liked(deliver);
+			}
 			Response::Listing { route, offset, listing }
 		},
 		Request::Search(query) => {
@@ -368,6 +519,21 @@ fn run(s: &mut Session, request: Request) -> spotify::Result<Option<Response>> {
 	}))
 }
 
+fn set_liked(s: &mut Session, uri: &str, liked: bool, deliver: &dyn Fn(Response)) -> spotify::Result<Response> {
+	if liked {
+		s.client.save(&[uri])?;
+	} else {
+		s.client.unsave(&[uri])?;
+	}
+	s.pages.remove(&Route::Liked);
+	s.snapshots.lock().unwrap_or_else(PoisonError::into_inner).forget(&Route::Liked);
+	if let Some(player) = &mut s.player {
+		player.saved(uri, liked);
+	}
+	s.publish_liked(deliver);
+	Ok(Response::Liked(uri.to_owned(), liked))
+}
+
 fn set_followed(s: &mut Session, uri: &str, follow: bool) -> spotify::Result<Response> {
 	if follow {
 		s.client.save(&[uri])?;
@@ -375,17 +541,26 @@ fn set_followed(s: &mut Session, uri: &str, follow: bool) -> spotify::Result<Res
 		s.client.unsave(&[uri])?;
 	}
 	s.pages.clear();
+	if let Some(player) = &mut s.player {
+		player.saved(uri, follow);
+	}
 	s.snapshots.lock().unwrap_or_else(PoisonError::into_inner).forget_listings();
 	Ok(if uri.starts_with("spotify:playlist:") {
-		s.playlists = all_playlists(&s.client)?;
+		s.playlists = s.load_playlists()?;
 		Response::Playlists(s.playlists.clone())
 	} else if uri.starts_with("spotify:album:") {
 		s.home = None;
-		Response::Albums(all_albums(&s.client)?)
+		Response::Albums(match &mut s.player {
+			Some(player) => player.albums(500)?,
+			None => all_albums(&s.client)?,
+		})
 	} else {
 		// Following an artist changes Your Library and its home shelf.
 		s.home = None;
-		Response::Following(all_followed(&mut s.client)?)
+		Response::Following(match &mut s.player {
+			Some(player) => player.followed(500)?,
+			None => all_followed(&mut s.client)?,
+		})
 	})
 }
 

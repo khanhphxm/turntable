@@ -7,6 +7,8 @@
 //! `librespot-connect` sends after every change.
 
 mod model;
+#[cfg(test)]
+mod session_tests;
 
 use std::{
 	collections::HashMap,
@@ -100,8 +102,44 @@ pub struct Engine {
 	streams: Option<Streams>,
 	/// Spirc's task has ended (signed out elsewhere, the session dropped).
 	done:    Arc<AtomicBool>,
+	stop:    tokio::sync::watch::Sender<bool>,
 	name:    String,
 	volume:  u8,
+}
+
+/// A read-only connection to the player's authenticated session and runtime.
+/// Library workers share this handle; it neither creates another session nor controls playback.
+#[derive(Clone)]
+pub struct SessionReader {
+	session: Session,
+	runtime: tokio::runtime::Handle,
+	stop:    tokio::sync::watch::Receiver<bool>,
+}
+
+impl SessionReader {
+	pub fn session(&self) -> &Session {
+		&self.session
+	}
+
+	/// Runs session I/O on a blocking worker. Engine shutdown cancels reads before
+	/// its runtime stops, so reconnecting never leaves a worker polling dead timers.
+	pub fn block_on<F, T, E>(&self, future: F) -> Result<T, E>
+	where
+		F: Future<Output = Result<T, E>>,
+		E: From<librespot_core::Error>,
+	{
+		let mut stop = self.stop.clone();
+		if *stop.borrow() {
+			return Err(librespot_core::Error::unavailable("player session stopped").into());
+		}
+		self.runtime.block_on(async {
+			tokio::select! {
+				biased;
+				_ = stop.changed() => Err(librespot_core::Error::unavailable("player session stopped").into()),
+				result = future => result,
+			}
+		})
+	}
 }
 
 /// What the engine reports, until a client takes it.
@@ -118,7 +156,8 @@ impl Engine {
 		let runtime = tokio::runtime::Builder::new_multi_thread()
 			.worker_threads(1)
 			.thread_name("librespot")
-			.thread_stack_size(256 << 10)
+			// Login/Connect's protobuf state can exceed 256 KiB, even before playback starts.
+			.thread_stack_size(512 << 10)
 			.enable_all()
 			.build()?;
 		let audio = (config.cache_mb > 0).then(|| config.cache_dir.join("files"));
@@ -151,9 +190,12 @@ impl Engine {
 			runtime.block_on(Spirc::new(connect, session.clone(), credentials, decoder, mixer, Some(snap_tx))).map_err(io::Error::other)?;
 		let done = Arc::new(AtomicBool::new(false));
 		let ended = done.clone();
+		let (stop, _) = tokio::sync::watch::channel(false);
+		let stopped = stop.clone();
 		runtime.spawn(async move {
 			task.await;
 			ended.store(true, Ordering::Release);
+			stopped.send_replace(true);
 		});
 		Ok(Self {
 			runtime: Some(runtime),
@@ -161,6 +203,7 @@ impl Engine {
 			spirc: Arc::new(spirc),
 			streams: Some(Streams { player, snapshots }),
 			done,
+			stop,
 			name: config.device_name.clone(),
 			volume: config.volume,
 		})
@@ -188,6 +231,15 @@ impl Engine {
 		Some(Client { spirc: self.spirc.clone(), requests: tx, activating })
 	}
 
+	/// Shares session reads with a worker; stopping the engine cancels its in-flight I/O.
+	pub fn session_reader(&self) -> Option<SessionReader> {
+		Some(SessionReader {
+			session: self.session.clone(),
+			runtime: self.runtime.as_ref()?.handle().clone(),
+			stop:    self.stop.subscribe(),
+		})
+	}
+
 	/// Whether the player still runs and its session remains valid.
 	pub fn alive(&mut self) -> bool {
 		!self.done.load(Ordering::Acquire) && !self.session.is_invalid()
@@ -196,6 +248,7 @@ impl Engine {
 
 impl Drop for Engine {
 	fn drop(&mut self) {
+		self.stop.send_replace(true);
 		let _ = self.spirc.shutdown();
 		// Give the shutdown a moment to tell Spotify the device left.
 		if let Some(runtime) = self.runtime.take() {

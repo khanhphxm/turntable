@@ -82,6 +82,12 @@ pub(super) fn open(s: &mut Session, route: &Route, offset: u32) -> spotify::Resu
 		trace::hit("page", &format!("{route:?}"), "mem");
 		return Ok(listing.clone());
 	}
+	if let Some(listing) = session_open(s, route, offset)? {
+		if offset == 0 {
+			s.pages.insert(route.clone(), listing.clone());
+		}
+		return Ok(listing);
+	}
 	let header = match cached {
 		Some(listing) => listing,
 		None => header(s, route)?,
@@ -121,6 +127,64 @@ pub(super) fn open(s: &mut Session, route: &Route, offset: u32) -> spotify::Resu
 		s.pages.insert(route.clone(), listing.clone());
 	}
 	Ok(listing)
+}
+
+/// Session-backed pages don't inherit Web API ownership restrictions or web-player cursors.
+fn session_open(s: &mut Session, route: &Route, offset: u32) -> spotify::Result<Option<Listing>> {
+	let Some(player) = &mut s.player else { return Ok(None) };
+	let listing = match route {
+		Route::Liked => {
+			let page = player.liked(offset)?;
+			Listing {
+				kicker: "Playlist".into(),
+				title: "Liked Songs".into(),
+				subtitle: songs(u64::from(page.total)),
+				next_offset: page.next_offset(),
+				total: page.total,
+				tracks: page.items,
+				..Listing::default()
+			}
+		},
+		Route::Playlist(id) => {
+			let (mut p, editable, page) = player.playlist(id, offset, true)?;
+			if let Some(known) = s.playlists.iter().find(|known| known.id == *id) {
+				p.public = known.public;
+				p.owner.display_name.clone_from(&known.owner.display_name);
+				if p.images.is_empty() {
+					p.images.clone_from(&known.images);
+				}
+			}
+			let owned = p.owner.id == s.me;
+			let followed = if owned { None } else { player.contains(&p.uri).ok() };
+			let owner = p.owner.display_name.as_deref().unwrap_or(&p.owner.id);
+			let mut listing = Listing {
+				kicker: "Playlist".into(),
+				title: p.name,
+				description: p.description,
+				public: p.public,
+				owned,
+				subtitle: format!("{owner} • {}", songs(u64::from(p.track_count.unwrap_or_default()))),
+				cover_url: spotify::pick_image(&p.images, 300).map(|i| i.url.clone()),
+				context_uri: Some(p.uri),
+				editable: editable || p.collaborative || owned,
+				followed,
+				..Listing::default()
+			};
+			if let Some(page) = page {
+				listing.next_offset = page.next_offset();
+				listing.total = page.total;
+				listing.tracks = page.items;
+			}
+			listing
+		},
+		Route::Album(id) => {
+			let (album, page) = player.album(id, offset)?;
+			let followed = player.contains(&album.uri).ok();
+			album_listing(album, Some(page), followed)
+		},
+		Route::Artist(_) | Route::Home | Route::Search | Route::Library => return Ok(None),
+	};
+	Ok(Some(listing))
 }
 
 /// A listing's header: everything but its tracks.
@@ -196,6 +260,10 @@ fn album_header(s: &Session, id: &str) -> spotify::Result<Listing> {
 	let (full, followed) = par::join(|| client.album_full(id), || part(client.library_contains(&[&uri])));
 	let (album, page) = full?;
 	let followed = followed?.and_then(|f| f.first().copied());
+	Ok(album_listing(album, page, followed))
+}
+
+fn album_listing(album: Album, page: Option<Page<spotify::Track>>, followed: Option<bool>) -> Listing {
 	let by = album.artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ");
 	let year = album.release_date.as_deref().and_then(|d| d.get(..4)).unwrap_or_default();
 	let songs = songs(u64::from(album.total_tracks));
@@ -205,7 +273,7 @@ fn album_header(s: &Session, id: &str) -> spotify::Result<Listing> {
 		title: album.name.clone(),
 		subtitle,
 		cover_url: spotify::pick_image(&album.images, 300).map(|i| i.url.clone()),
-		context_uri: Some(uri),
+		context_uri: Some(album.uri.clone()),
 		followed,
 		album: Some(album),
 		..Listing::default()
@@ -215,7 +283,7 @@ fn album_header(s: &Session, id: &str) -> spotify::Result<Listing> {
 		listing.total = page.total;
 		listing.tracks = page.items;
 	}
-	Ok(listing)
+	listing
 }
 /// The tint of a cover (`#rrggbb`) from the web player, asked once a day for each cover.
 pub(super) fn accent(s: &mut Session, url: &str) -> Option<String> {
