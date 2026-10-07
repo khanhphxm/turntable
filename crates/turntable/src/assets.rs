@@ -24,6 +24,7 @@ macro_rules! icons {
 }
 
 icons! {
+	App => "app",
 	Back => "back",
 	Bell => "bell",
 	Check => "check",

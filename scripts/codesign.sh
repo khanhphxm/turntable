@@ -1,5 +1,5 @@
 #!/bin/sh
-# Signs a terntable binary with the hardened runtime. macOS only.
+# Signs a turntable binary with the hardened runtime. macOS only.
 #
 #   scripts/codesign.sh <binary>
 #
@@ -9,7 +9,7 @@
 #                    the Spotify sign-in lives in the Keychain, which trusts a
 #                    binary by its signature. A certificate signature survives
 #                    rebuilds; an ad-hoc one changes with every build, and macOS
-#                    then asks again whether terntable may read its own item.
+#                    then asks again whether turntable may read its own item.
 #                    For distribution use "Developer ID Application: ..." and
 #                    notarize the result.
 set -eu
@@ -25,10 +25,10 @@ fi
 identity=${CODESIGN_IDENTITY:--}
 
 if [ "$identity" = "-" ]; then
-	set -- --force --sign - --identifier dev.terntable --options runtime
+	set -- --force --sign - --identifier dev.turntable --options runtime
 else
 	# A secure timestamp only for distribution builds (it needs the network).
 	case $identity in "Developer ID Application"*) stamp=--timestamp ;; *) stamp=--timestamp=none ;; esac
-	set -- --force --sign "$identity" --identifier dev.terntable --options runtime $stamp
+	set -- --force --sign "$identity" --identifier dev.turntable --options runtime $stamp
 fi
 exec codesign "$@" "$bin"

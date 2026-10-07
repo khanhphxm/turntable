@@ -1,13 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/terntable"]
+members = ["crates/turntable-core", "crates/turntable"]
 
 [workspace.package]
 edition = "2024"
 version = "0.1.0"
 rust-version = "1.90"
 license = "MIT"
-repository = "https://github.com/khanhphxm/terntable"
+repository = "https://github.com/khanhphxm/turntable"
 
 # Lints for every crate (`[lints] workspace = true` in each manifest). `scripts/lint.sh` runs clippy
 # with `-D warnings`, so "warn" here means "fails the check" there, while an editor shows a squiggle.
@@ -15,8 +15,8 @@ repository = "https://github.com/khanhphxm/terntable"
 # expectation fails when the lint stops firing, so suppressions cannot outlive their reason.
 # What is deliberately OFF, and why: arithmetic_side_effects, float_arithmetic, as_conversions and
 # default_numeric_fallback (DSP and layout maths would drown in them), cast_precision_loss (usize
-# to f32 for display), unreachable_pub (a binary crate has no public API; dead_code already finds
-# unused items), let_underscore_must_use (best-effort cleanup is common; `.ok();` and
+# to f32 for display), unreachable_pub (the library intentionally exposes host-facing APIs),
+# let_underscore_must_use (best-effort cleanup is common; `.ok();` and
 # `map_err(|_|` are denied instead), missing_docs_in_private_items, min_ident_chars,
 # question_mark_used, implicit_return, single_call_fn, shadow_* and the other style-only lints.
 
@@ -53,8 +53,8 @@ let_underscore_future = "deny"
 let_underscore_lock = "deny"
 mem_forget = "deny"
 
-# Leftovers. stdout and stderr are the Tern pane (a stray line corrupts the TUI): only CLI
-# entry points and the log sink may print.
+# Leftovers: libraries must not write to stdout/stderr; only CLI entry points and
+# explicit log sinks may print.
 dbg_macro = "deny"
 print_stdout = "deny"
 print_stderr = "deny"
@@ -122,6 +122,10 @@ unnecessary_box_returns = "warn"
 range_plus_one = "warn"
 unreadable_literal = "warn"
 uninlined_format_args = "warn"
+
+# Optimize dependencies so debug desktop builds remain responsive.
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.release]
 opt-level = 3

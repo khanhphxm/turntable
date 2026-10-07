@@ -6,7 +6,7 @@ set -eu
 exe=${1:?usage: run-signed.sh <executable> [args...]}
 here=$(cd "$(dirname "$0")" && pwd)
 
-if ! codesign -d "$exe" 2>&1 | grep -q '^Identifier=dev\.terntable$'; then
+if ! codesign -d "$exe" 2>&1 | grep -q '^Identifier=dev\.turntable$'; then
 	"$here/codesign.sh" "$exe" >/dev/null 2>&1
 fi
 exec "$@"

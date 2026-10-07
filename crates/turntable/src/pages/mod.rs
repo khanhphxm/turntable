@@ -6,3 +6,4 @@ pub mod eq;
 mod home;
 mod search;
 mod settings;
+mod welcome;

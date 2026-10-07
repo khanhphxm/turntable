@@ -514,7 +514,7 @@ impl Player {
 
             // While PlayerInternal is written as a future, it still contains blocking code.
             // It must be run by using block_on() in a dedicated thread.
-            // terntable: one worker, not one per core (each is a thread with its own stack).
+            // turntable: one worker, not one per core (each is a thread with its own stack).
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(1)
                 .thread_name("librespot-player")

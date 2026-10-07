@@ -128,6 +128,8 @@ pub struct Shell {
 	/// The main view's width as of this frame (titles size themselves to it).
 	pub main_w:            f32,
 	pub toast:             Option<&'static str>,
+	pub signed_in:         bool,
+	pub signing_in:        bool,
 	pub toast_gen:         usize,
 	pub lyrics_scroll:     gpui_kit::ScrollHandle,
 	/// The lyric line last scrolled to.
@@ -216,6 +218,8 @@ impl Shell {
 			focus: cx.focus_handle(),
 			main_w: 600.,
 			toast: None,
+			signed_in: std::env::var_os("TURNTABLE_WELCOME").is_none(),
+			signing_in: false,
 			toast_gen: 0,
 			lyrics_scroll: gpui_kit::ScrollHandle::new(),
 			lyrics_line: None,
@@ -406,6 +410,9 @@ impl Render for Shell {
 		let side = if self.sidebar_collapsed { theme::SIDEBAR_COLLAPSED_W } else { theme::SIDEBAR_W };
 		let right = if self.panel.is_some() { theme::RIGHT_W + theme::GAP } else { px(0.) };
 		self.main_w = f32::from(window.viewport_size().width - side - right - theme::GAP * 3.);
+		if !self.signed_in {
+			return self.welcome_page(cx).into_any_element();
+		}
 		let main = match self.route {
 			Route::Home => self.home_page(cx).into_any_element(),
 			Route::Search => self.search_page(cx).into_any_element(),
@@ -463,6 +470,7 @@ impl Render for Shell {
 					.when_some(self.panel, |row, panel| row.child(self.right_panel(panel, cx))),
 			)
 			.child(self.player_bar(cx))
+			.into_any_element()
 	}
 }
 

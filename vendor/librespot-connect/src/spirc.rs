@@ -133,11 +133,11 @@ enum SpircCommand {
     Activate,
     Transfer(Option<TransferRequest>),
     Load(LoadRequest),
-    // terntable: queue a track the way a remote's "add to queue" does.
+    // turntable: queue a track the way a remote's "add to queue" does.
     AddToQueue(String),
 }
 
-/// terntable: what the connect state holds besides the player events, sent after every change.
+/// turntable: what the connect state holds besides the player events, sent after every change.
 #[derive(Debug, Clone, Default)]
 pub struct StateSnapshot {
     /// This device is the active one.
@@ -401,7 +401,7 @@ impl Spirc {
         Ok(self.commands.send(SpircCommand::SetPosition(position_ms))?)
     }
 
-    /// terntable: adds a track (`spotify:track:…`) to the queue.
+    /// turntable: adds a track (`spotify:track:…`) to the queue.
     pub fn add_to_queue(&self, uri: String) -> Result<(), Error> {
         Ok(self.commands.send(SpircCommand::AddToQueue(uri))?)
     }
@@ -1838,7 +1838,7 @@ impl SpircTask {
             .map(|_| ())
     }
 
-    /// terntable: hands the listener the queue, context and options.
+    /// turntable: hands the listener the queue, context and options.
     fn send_snapshot(&self) {
         let Some(tx) = &self.snapshots else { return };
         let state = &self.connect_state;

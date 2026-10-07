@@ -78,7 +78,7 @@ run_clippy() {
 run_docs() {
 	RUSTDOCFLAGS="-D warnings"
 	export RUSTDOCFLAGS
-	step docs cargo doc --no-deps --document-private-items -p terntable
+	step docs cargo doc --workspace --no-deps --document-private-items
 }
 
 run_deps() {

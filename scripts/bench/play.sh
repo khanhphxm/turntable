@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 
 parser = argparse.ArgumentParser(description='Control a Spotify Connect device through the Web API using SPOTIFY_ACCESS_TOKEN.')
-parser.add_argument('--device-name', default='terntable')
+parser.add_argument('--device-name', default='turntable')
 parser.add_argument('--list', action='store_true', help='List devices; do not transfer or start playback.')
 parser.add_argument('--pause', action='store_true', help='Pause playback on the device.')
 parser.add_argument('--resume', action='store_true', help='Resume playback on the device.')

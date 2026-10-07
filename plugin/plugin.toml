@@ -1,7 +1,0 @@
-schema = 1
-id = "terntable"
-name = "terntable"
-version = "0.1.0"
-description = "A lightweight Spotify player: open it as a tab, pin it to the side, or float it as a turntable."
-icon = "wave"
-window = "window.luau"

@@ -1,0 +1,20 @@
+//! Web API library state and the worker that loads it without blocking the UI.
+//!
+//! `model` and `state` describe what the views know; `pages`, `home` and `artist` load it.
+//! `protocol` carries requests and responses between the application and `worker`.
+
+mod artist;
+pub mod covers;
+mod home;
+mod model;
+mod pages;
+mod protocol;
+pub(crate) mod snapshot;
+mod state;
+mod worker;
+
+pub use artist::Popularity;
+pub use model::{Conn, Entry, Home, Kind, Listing, PAGE, Route, Sort, Tile, View};
+pub use protocol::{Request, Response};
+pub use state::Library;
+pub use worker::Worker;
