@@ -1,0 +1,79 @@
+//! Colours, sizes and type: one dark theme modelled on Spotify's desktop app.
+
+use gpui_kit::{Hsla, Pixels, Rgba, px, rgb, rgba};
+
+/// The window behind the panels.
+pub fn base() -> Rgba {
+	rgb(0x000000)
+}
+/// A panel (library, main view, right-hand panel).
+pub fn panel() -> Rgba {
+	rgb(0x121212)
+}
+/// A control's resting fill (search field, round buttons).
+pub fn raised() -> Rgba {
+	rgb(0x1f1f1f)
+}
+/// The same, hovered.
+pub fn raised_hover() -> Rgba {
+	rgb(0x2a2a2a)
+}
+/// A row or card under the pointer.
+pub fn hover() -> Rgba {
+	rgba(0xffffff12)
+}
+/// A selected row.
+pub fn selected() -> Rgba {
+	rgba(0xffffff26)
+}
+pub fn text() -> Rgba {
+	rgb(0xffffff)
+}
+pub fn subdued() -> Rgba {
+	rgb(0xb3b3b3)
+}
+pub fn faint() -> Rgba {
+	rgb(0x7c7c7c)
+}
+/// Spotify's green: playing, saved, active toggles.
+pub fn accent() -> Rgba {
+	rgb(0x1ed760)
+}
+/// A seek or volume bar's track.
+pub fn track() -> Rgba {
+	rgba(0xffffff4d)
+}
+pub fn divider() -> Rgba {
+	rgba(0xffffff1a)
+}
+
+/// The gap between panels and around the window's edge.
+pub const GAP: Pixels = px(8.);
+/// Panel corner radius.
+pub const RADIUS: Pixels = px(8.);
+pub const BAR_H: Pixels = px(72.);
+pub const TOP_H: Pixels = px(64.);
+pub const SIDEBAR_W: Pixels = px(320.);
+pub const SIDEBAR_COLLAPSED_W: Pixels = px(72.);
+pub const RIGHT_W: Pixels = px(340.);
+pub const ROW_H: Pixels = px(56.);
+
+/// `c` at `alpha` (0..=1).
+pub fn alpha(c: Rgba, alpha: f32) -> Hsla {
+	let mut h: Hsla = c.into();
+	h.a *= alpha;
+	h
+}
+
+/// Card width on shelves (cover + 12 px padding each side).
+pub const CARD_W: f32 = 188.;
+
+pub fn accent_hover() -> Rgba {
+	rgb(0x3be477)
+}
+
+/// `c` mixed towards black by `amount` (0..=1).
+pub fn darken(c: Rgba, amount: f32) -> Rgba {
+	let k = 1. - amount;
+	Rgba { r: c.r * k, g: c.g * k, b: c.b * k, a: c.a }
+}

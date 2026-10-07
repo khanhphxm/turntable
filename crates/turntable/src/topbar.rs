@@ -1,0 +1,138 @@
+//! The top bar: back/forward, home and search in the middle, settings on the right. It's also
+//! the window's title bar (drag to move, double-click to zoom).
+
+use gpui_kit::{
+	Context, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, StatefulInteractiveElement as _,
+	Styled as _, component::input::Input, div, prelude::FluentBuilder as _, px,
+};
+
+use crate::{
+	shell::{Route, Shell},
+	theme,
+	widgets::{Icon, icon, round_button},
+};
+
+/// Room for the macOS traffic lights.
+const TRAFFIC_LIGHTS_W: f32 = 80.;
+
+impl Shell {
+	pub fn top_bar(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+		let can_back = !self.back.is_empty();
+		let can_forward = !self.forward.is_empty();
+		div()
+			.relative()
+			.h(theme::TOP_H)
+			.flex_none()
+			.flex()
+			.items_center()
+			.px(theme::GAP)
+			.child(div().absolute().inset_0().on_mouse_down(MouseButton::Left, |e: &MouseDownEvent, window, _| {
+				if e.click_count >= 2 {
+					window.titlebar_double_click();
+				} else {
+					window.start_window_move();
+				}
+			}))
+			.child(
+				div()
+					.flex_1()
+					.flex()
+					.items_center()
+					.gap_2()
+					.when(cfg!(target_os = "macos"), |s| s.pl(px(TRAFFIC_LIGHTS_W)))
+					.child(
+						round_button("back", Icon::Back, px(32.), px(16.), can_back, cx.listener(|this, _, _, cx| this.go_back(cx)))
+							.when(!can_back, |s| s.opacity(0.5)),
+					)
+					.child(
+						round_button(
+							"forward",
+							Icon::Forward,
+							px(32.),
+							px(16.),
+							can_forward,
+							cx.listener(|this, _, _, cx| this.go_forward(cx)),
+						)
+						.when(!can_forward, |s| s.opacity(0.5)),
+					),
+			)
+			.child(
+				div()
+					.flex()
+					.items_center()
+					.gap_2()
+					.child(round_button(
+						"home",
+						Icon::Home,
+						px(48.),
+						px(24.),
+						self.route == Route::Home,
+						cx.listener(|this, _, _, cx| this.open(Route::Home, cx)),
+					))
+					.child(self.search_field(cx)),
+			)
+			.child(
+				div()
+					.flex_1()
+					.flex()
+					.items_center()
+					.justify_end()
+					.gap_2()
+					.child(round_button(
+						"eq",
+						Icon::Sliders,
+						px(32.),
+						px(16.),
+						self.route == Route::Equalizer,
+						cx.listener(|this, _, _, cx| this.open(Route::Equalizer, cx)),
+					))
+					.child(round_button(
+						"settings",
+						Icon::Gear,
+						px(32.),
+						px(16.),
+						self.route == Route::Settings,
+						cx.listener(|this, _, _, cx| this.open(Route::Settings, cx)),
+					))
+					.child(
+						div().size(px(48.)).flex().items_center().justify_center().rounded_full().bg(theme::raised()).child(
+							div()
+								.size(px(32.))
+								.rounded_full()
+								.bg(gpui_kit::rgb(0xe8a33d))
+								.flex()
+								.items_center()
+								.justify_center()
+								.text_size(px(14.))
+								.font_weight(gpui_kit::FontWeight::BOLD)
+								.text_color(theme::base())
+								.child("K"),
+						),
+					),
+			)
+	}
+
+	fn search_field(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+		let on = self.route == Route::Search;
+		div()
+			.id("search")
+			.group("search")
+			.h(px(48.))
+			.w(px(474.))
+			.flex()
+			.items_center()
+			.gap_3()
+			.px_3()
+			.rounded_full()
+			.bg(theme::raised())
+			.border_2()
+			.border_color(if on { theme::text() } else { gpui_kit::transparent_black().into() })
+			.hover(|s| s.bg(theme::raised_hover()))
+			.on_click(cx.listener(|this, _, window, cx| {
+				this.search.update(cx, |s, cx| s.focus(window, cx));
+				this.open(Route::Search, cx);
+			}))
+			.child(icon(Icon::Search, px(24.), if on { theme::text() } else { theme::subdued() }))
+			.child(div().flex_1().text_size(px(16.)).child(Input::new(&self.search).appearance(false).cleanable(true)))
+	}
+}
