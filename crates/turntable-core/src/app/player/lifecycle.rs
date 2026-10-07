@@ -1,8 +1,11 @@
 //! Playback engine and audio-output lifecycle, preferences and machine facts for Settings.
 
-use std::{thread, time::Instant};
+use std::{
+	thread,
+	time::{Instant, SystemTime},
+};
 
-use super::{AUDIO_RETRY, AppEvent, Controller, MAX_RESTARTS, NO_AUDIO, SYSTEM_EVERY};
+use super::{AUDIO_RETRY, AppEvent, Controller, HEALTH_EVERY, NO_AUDIO, SYSTEM_EVERY, retry_wait};
 use crate::{
 	app::{Panel, config::Paths, queue},
 	engine::{Command, Engine, EngineConfig},
@@ -130,7 +133,6 @@ impl Controller {
 		}
 		self.discard_start = self.state.starting;
 		self.stop_engine();
-		self.restarts = 0;
 		self.start_failures = 0;
 		let name = self.engine_name();
 		self.state.disconnected(format!("Restarting the player as “{name}”…"));
@@ -172,6 +174,7 @@ impl Controller {
 		let sys = &mut self.state.sys;
 		sys.running = sys.launching.take();
 		self.refresh_memory();
+		self.health_at = Instant::now() + HEALTH_EVERY;
 	}
 
 	pub(super) fn start_engine(&mut self) {
@@ -180,6 +183,7 @@ impl Controller {
 		}
 		self.state.starting = true;
 		self.state.notice = Some("Starting the player…".into());
+		self.retry_start_at = None;
 		let launch =
 			Launch { name: self.engine_name(), volume: self.state.prefs.device.volume, cache_mb: self.state.prefs.device.cache_mb };
 		self.state.sys.launching = Some(crate::app::system::Running { name: launch.name.clone(), cache_mb: launch.cache_mb });
@@ -253,15 +257,41 @@ impl Controller {
 		if self.client.is_some() && engine.alive() {
 			return false;
 		}
-		self.stop_engine();
-		self.restarts += 1;
-		if self.restarts > MAX_RESTARTS {
-			self.state.disconnected("The player keeps stopping. Restart turntable to try again.".into());
-			return true;
-		}
-		self.state.disconnected("The player stopped; restarting it…".into());
-		self.start_engine();
+		self.network_disconnected("Spotify disconnected; reconnecting…");
+		self.start_failures = self.start_failures.saturating_add(1);
+		self.retry_start_at = Some(Instant::now() + retry_wait(self.start_failures));
 		true
+	}
+
+	/// Call on a host wake notification. The periodic pump also detects long sleep gaps.
+	/// Re-authenticates with saved credentials; never starts playback automatically.
+	pub fn resume(&mut self) {
+		if !self.state.signed_in || self.state.sys.clearing_cache {
+			return;
+		}
+		self.last_tick = (Instant::now(), SystemTime::now());
+		self.discard_start = self.state.starting;
+		self.network_disconnected("Reconnecting to Spotify after wake…");
+		self.start_engine();
+	}
+
+	pub(super) fn network_disconnected(&mut self, reason: &str) {
+		self.playback_interrupted |= self.state.playing() && self.state.active;
+		self.stop_engine();
+		self.player_offline = true;
+		self.refresh_network_notice();
+		self.state.disconnected(reason.into());
+	}
+
+	pub(super) fn refresh_network_notice(&mut self) {
+		self.state.offline = self.player_offline || self.library_offline;
+		self.state.network_notice = if self.state.offline {
+			Some("Can't reach Spotify. Showing saved library data; reconnecting…".into())
+		} else if self.playback_interrupted {
+			Some("Reconnected to Spotify. Playback stopped; press Play to resume.".into())
+		} else {
+			None
+		};
 	}
 
 	pub(super) fn connect(&mut self) {
@@ -286,6 +316,11 @@ impl Controller {
 			self.state.notice = Some(format!("Couldn't forget the sign-in: {e}"));
 		}
 		self.state.signed_in = false;
+		self.player_offline = false;
+		self.library_offline = false;
+		self.library_retry_at = None;
+		self.playback_interrupted = false;
+		self.refresh_network_notice();
 		self.state.disconnected("Signed out.".into());
 	}
 

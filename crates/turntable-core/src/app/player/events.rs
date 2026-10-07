@@ -1,11 +1,8 @@
 //! Incoming worker events and execution of the effects returned by application updates.
 
-use std::{
-	thread,
-	time::{Duration, Instant},
-};
+use std::{thread, time::Instant};
 
-use super::{AppEvent, CONTROL_POLL, Controller, RETRY_START, SEARCH_DEBOUNCE, debug_log};
+use super::{AppEvent, CONTROL_POLL, Controller, HEALTH_EVERY, SEARCH_DEBOUNCE, debug_log, retry_wait};
 use crate::{
 	app::{Effect, Msg, Panel, config},
 	engine::{Command, Event, Incoming},
@@ -91,9 +88,10 @@ impl Controller {
 				self.state.notice = Some(e);
 				// Transient failures (offline, Spotify unreachable) recover on their
 				// own: try again later, backing off.
-				self.start_failures += 1;
-				let wait = RETRY_START.saturating_mul(1 << self.start_failures.min(5)).min(Duration::from_secs(300));
-				self.retry_start_at = Some(Instant::now() + wait);
+				self.player_offline = true;
+				self.refresh_network_notice();
+				self.start_failures = self.start_failures.saturating_add(1);
+				self.retry_start_at = Some(Instant::now() + retry_wait(self.start_failures));
 			},
 			AppEvent::Player(Incoming::Event(event)) => return self.on_player_event(event),
 			AppEvent::Player(Incoming::Closed(reason)) => {
@@ -135,9 +133,14 @@ impl Controller {
 			return true;
 		}
 		self.start_failures = 0;
+		self.player_offline = false;
+		self.refresh_network_notice();
 		self.state.notice = None;
 		self.state.signed_in = true;
 		self.library.set_session(engine.session_reader());
+		if self.library_offline && self.library_retry_at.take().is_some() {
+			self.library.send(library::Request::Connect);
+		}
 		self.engine = Some(engine);
 		self.on_engine_started();
 		self.connect();
@@ -152,6 +155,10 @@ impl Controller {
 		let queue_event = matches!(event, Event::QueueChanged { .. });
 		let before = self.state.rules_before();
 		let changed = self.state.apply(event);
+		if self.state.playing() && self.playback_interrupted {
+			self.playback_interrupted = false;
+			self.refresh_network_notice();
+		}
 		if let Some(audio) = &self.audio {
 			audio.set_volume(self.state.volume);
 		}
@@ -187,6 +194,16 @@ impl Controller {
 			return self.on_player_response(response);
 		}
 		match &response {
+			library::Response::Offline(offline) => {
+				self.library_offline = *offline;
+				self.library_retry_at = offline.then(|| Instant::now() + HEALTH_EVERY);
+				self.refresh_network_notice();
+			},
+			library::Response::NeedsLogin | library::Response::NeedsClientId => {
+				self.library_offline = false;
+				self.library_retry_at = None;
+				self.refresh_network_notice();
+			},
 			library::Response::Done(text) => self.state.show_toast(text.clone()),
 			library::Response::Created(playlist) => {
 				self.state.show_toast(format!("Created {}", playlist.name));

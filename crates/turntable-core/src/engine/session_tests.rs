@@ -61,3 +61,15 @@ fn stopping_cancels_an_in_flight_read_without_waiting_for_network() -> Result<()
 	})?;
 	Ok(())
 }
+
+#[test]
+fn a_dead_network_times_out_and_a_later_read_can_succeed() -> Result<(), Box<dyn StdError>> {
+	let runtime = runtime()?;
+	let result: Result<(), Error> =
+		runtime.block_on(super::network_timeout(Duration::from_millis(5), std::future::pending::<Result<(), Error>>()));
+	assert!(result.is_err());
+	let (_stop, rx) = watch::channel(false);
+	let reader = reader(&runtime, rx);
+	assert_eq!(reader.block_on(async { Ok::<_, Error>(42) })?, 42);
+	Ok(())
+}

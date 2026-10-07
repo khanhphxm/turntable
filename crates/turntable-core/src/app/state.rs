@@ -148,6 +148,14 @@ pub struct State {
 	pub lyrics:              Option<(String, LyricsState)>,
 	/// The last error worth showing (cleared by the next good event).
 	pub notice:              Option<String>,
+	/// The player or library could not reach Spotify; cached data remains usable.
+	/// This reports Spotify reachability, not OS interface status. A disk snapshot
+	/// is not an online answer and does not clear it; player/library recover separately.
+	pub offline:             bool,
+	/// Persistent connection/recovery text, independent of transient player notices.
+	/// Render this even after `offline` clears: it can ask the user to resume stopped
+	/// playback. Unrelated volume/queue events do not dismiss it.
+	pub network_notice:      Option<String>,
 	/// The user's library, delivered by the Session/Web API worker.
 	pub library:             Library,
 	/// The side panel opened by hand (queue, lyrics, equalizer or settings); when none
@@ -335,8 +343,9 @@ impl State {
 	}
 
 	/// Whether the player is on its way up (the setup page shows progress instead of the button).
+	/// Offline retries run in the background without showing setup progress again.
 	pub fn starting_player(&self) -> bool {
-		self.starting
+		self.starting && !self.offline
 	}
 
 	/// Whether the setup steps still have something for the user to do.

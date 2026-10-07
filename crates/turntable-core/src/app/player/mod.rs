@@ -5,11 +5,13 @@ mod connect;
 mod events;
 mod lifecycle;
 mod metadata;
+#[cfg(test)]
+mod network_tests;
 mod queue;
 
 use std::{
 	sync::{Arc, mpsc},
-	time::{Duration, Instant},
+	time::{Duration, Instant, SystemTime},
 };
 
 use crate::{
@@ -40,7 +42,6 @@ enum AppEvent {
 }
 
 const RETRY_START: Duration = Duration::from_secs(5);
-const MAX_RESTARTS: u32 = 5;
 const HEALTH_EVERY: Duration = Duration::from_secs(30);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(350);
 const AUDIO_RETRY: Duration = Duration::from_secs(5);
@@ -61,40 +62,44 @@ const SYSTEM_EVERY: Duration = Duration::from_secs(5);
 /// Dropping the controller tears playback down in dependency order: client, audio, engine.
 /// Dropping it does not sign the user out.
 pub struct Controller {
-	paths:           Paths,
-	state:           State,
-	tx:              mpsc::Sender<AppEvent>,
-	rx:              mpsc::Receiver<AppEvent>,
-	wake:            Arc<dyn Fn() + Send + Sync>,
-	engine:          Option<Engine>,
-	audio:           Option<crate::audio::Player>,
-	settings:        crate::app::settings::Settings,
-	client:          Option<Client>,
-	library:         library::Worker,
-	images:          covers::Fetcher,
-	lyrics:          Option<lyrics::Fetcher>,
-	health_at:       Instant,
-	search_at:       Option<Instant>,
-	retry_start_at:  Option<Instant>,
-	pending_feed:    Option<crate::audio::Feed>,
-	audio_retry_at:  Option<Instant>,
-	start_failures:  u32,
-	asked_artists:   std::collections::HashSet<String>,
-	discard_start:   bool,
-	restarts:        u32,
+	paths:                Paths,
+	state:                State,
+	tx:                   mpsc::Sender<AppEvent>,
+	rx:                   mpsc::Receiver<AppEvent>,
+	wake:                 Arc<dyn Fn() + Send + Sync>,
+	engine:               Option<Engine>,
+	audio:                Option<crate::audio::Player>,
+	settings:             crate::app::settings::Settings,
+	client:               Option<Client>,
+	library:              library::Worker,
+	images:               covers::Fetcher,
+	lyrics:               Option<lyrics::Fetcher>,
+	health_at:            Instant,
+	search_at:            Option<Instant>,
+	retry_start_at:       Option<Instant>,
+	pending_feed:         Option<crate::audio::Feed>,
+	audio_retry_at:       Option<Instant>,
+	start_failures:       u32,
+	player_offline:       bool,
+	library_offline:      bool,
+	library_retry_at:     Option<Instant>,
+	playback_interrupted: bool,
+	last_tick:            (Instant, SystemTime),
+	asked_artists:        std::collections::HashSet<String>,
+	discard_start:        bool,
 	/// Last presented lyrics: a changed line invalidates the host's view.
-	followed:        Option<(String, Option<usize>)>,
-	last_item:       String,
-	queue_reply:     bool,
-	visible:         bool,
-	poll_at:         Option<Instant>,
-	poll_inflight:   bool,
-	poll_forced:     bool,
-	force_poll:      bool,
-	poll_failures:   u32,
-	output_retry_at: Option<Instant>,
-	system_at:       Option<Instant>,
-	_devices:        Option<crate::audio::DeviceWatch>,
+	followed:             Option<(String, Option<usize>)>,
+	last_item:            String,
+	queue_reply:          bool,
+	visible:              bool,
+	poll_at:              Option<Instant>,
+	poll_inflight:        bool,
+	poll_forced:          bool,
+	force_poll:           bool,
+	poll_failures:        u32,
+	output_retry_at:      Option<Instant>,
+	system_at:            Option<Instant>,
+	_devices:             Option<crate::audio::DeviceWatch>,
 }
 
 impl Controller {
@@ -152,9 +157,13 @@ impl Controller {
 			pending_feed: None,
 			audio_retry_at: None,
 			start_failures: 0,
+			player_offline: false,
+			library_offline: false,
+			library_retry_at: None,
+			playback_interrupted: false,
+			last_tick: (Instant::now(), SystemTime::now()),
 			asked_artists: std::collections::HashSet::new(),
 			discard_start: false,
-			restarts: 0,
 			followed: None,
 			last_item: String::new(),
 			queue_reply: false,
@@ -186,6 +195,15 @@ impl Controller {
 	/// This never reads host input, blocks waiting for an event or renders a view.
 	pub fn pump(&mut self) -> bool {
 		let mut changed = false;
+		// A suspended machine (or a host stalled beyond its health deadline) needs a
+		// fresh authenticated Session: don't wait on pre-sleep sockets/tokens.
+		let now = (Instant::now(), SystemTime::now());
+		let resumed = wake_gap(self.last_tick, now);
+		self.last_tick = now;
+		if resumed && self.engine.is_some() {
+			self.resume();
+			changed = true;
+		}
 		while let Ok(event) = self.rx.try_recv() {
 			changed |= self.on_event(event);
 		}
@@ -218,6 +236,7 @@ impl Controller {
 			self.engine.as_ref().map(|_| self.health_at),
 			self.search_at,
 			self.retry_start_at,
+			self.library_retry_at,
 			self.audio_retry_at,
 			self.visible.then(|| self.state.next_lyric_at()).flatten(),
 			self.poll_at,
@@ -234,6 +253,10 @@ impl Controller {
 	fn run_timers(&mut self) -> bool {
 		let now = Instant::now();
 		let mut changed = false;
+		if self.library_retry_at.is_some_and(|at| now >= at) {
+			self.library_retry_at = None;
+			self.library.send(library::Request::Connect);
+		}
 		if self.audio_retry_at.is_some_and(|at| now >= at) {
 			self.audio_retry_at = None;
 			if let Some(feed) = self.pending_feed.take() {
@@ -312,6 +335,16 @@ fn spawn_covers(paths: &Paths, tx: mpsc::Sender<AppEvent>, wake: Arc<dyn Fn() + 
 			wake();
 		}
 	})
+}
+
+fn retry_wait(failures: u32) -> Duration {
+	RETRY_START.saturating_mul(1 << failures.min(5)).min(Duration::from_secs(300))
+}
+
+fn wake_gap(before: (Instant, SystemTime), after: (Instant, SystemTime)) -> bool {
+	let elapsed = after.0.saturating_duration_since(before.0);
+	elapsed > HEALTH_EVERY + Duration::from_secs(10)
+		|| after.1.duration_since(before.1).is_ok_and(|wall| wall > elapsed + Duration::from_secs(2))
 }
 
 #[cfg(test)]

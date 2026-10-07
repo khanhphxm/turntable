@@ -303,7 +303,12 @@ fn serve(
 					route,
 					message: "Spotify needs one more permission for that: reconnect your account in Settings.".into(),
 				}),
-				Err(e) => deliver(Response::Error { route, message: e.user_message() }),
+				Err(e) => {
+					if matches!(e, spotify::Error::Network(_)) {
+						deliver(Response::Offline(true));
+					}
+					deliver(Response::Error { route, message: e.user_message() });
+				},
 			}
 		},
 	}
@@ -373,6 +378,7 @@ fn connect(
 			deliver(Response::LoginFailed(spotify::Error::PremiumRequired.user_message()));
 		},
 		Ok((me, _, mut playlists)) => {
+			deliver(Response::Offline(false));
 			let _ = account.remember_user(&me.id);
 			s.me = me.id.clone();
 			for playlist in &mut playlists {
@@ -392,7 +398,10 @@ fn connect(
 			deliver(Response::NeedsLogin);
 		},
 		Err(e) => {
-			if !has_snapshot {
+			if matches!(e, spotify::Error::Network(_)) {
+				deliver(Response::Offline(true));
+			}
+			if !has_snapshot && !matches!(e, spotify::Error::Network(_)) {
 				*session = None;
 			}
 			deliver(Response::Error { route: None, message: e.user_message() });

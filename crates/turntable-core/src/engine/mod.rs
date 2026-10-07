@@ -93,6 +93,8 @@ const OAUTH_SCOPES: &[&str] = &[
 const TAKEOVER_WAIT: Duration = Duration::from_secs(4);
 /// Entities kept for queue rows and context names, so a queue change looks up only what's new.
 const ENTITY_CACHE: usize = 256;
+/// Bounds connection and session reads even while librespot is retrying a dead network.
+const NETWORK_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct Engine {
 	/// Taken only by `Drop`, to shut it down by value.
@@ -136,7 +138,7 @@ impl SessionReader {
 			tokio::select! {
 				biased;
 				_ = stop.changed() => Err(librespot_core::Error::unavailable("player session stopped").into()),
-				result = future => result,
+				result = network_timeout(NETWORK_TIMEOUT, future) => result,
 			}
 		})
 	}
@@ -186,8 +188,9 @@ impl Engine {
 			initial_volume: to_u16(config.volume),
 			..ConnectConfig::default()
 		};
-		let (spirc, task) =
-			runtime.block_on(Spirc::new(connect, session.clone(), credentials, decoder, mixer, Some(snap_tx))).map_err(io::Error::other)?;
+		let (spirc, task) = runtime
+			.block_on(network_timeout(NETWORK_TIMEOUT, Spirc::new(connect, session.clone(), credentials, decoder, mixer, Some(snap_tx))))
+			.map_err(io::Error::other)?;
 		let done = Arc::new(AtomicBool::new(false));
 		let ended = done.clone();
 		let (stop, _) = tokio::sync::watch::channel(false);
@@ -244,6 +247,17 @@ impl Engine {
 	pub fn alive(&mut self) -> bool {
 		!self.done.load(Ordering::Acquire) && !self.session.is_invalid()
 	}
+}
+
+/// Dropping a timed-out future cancels its I/O; the caller may establish a fresh session.
+async fn network_timeout<F, T, E>(timeout: Duration, future: F) -> Result<T, E>
+where
+	F: Future<Output = Result<T, E>>,
+	E: From<librespot_core::Error>,
+{
+	tokio::time::timeout(timeout, future)
+		.await
+		.unwrap_or_else(|_| Err(librespot_core::Error::unavailable("Spotify connection timed out; check your network").into()))
 }
 
 impl Drop for Engine {

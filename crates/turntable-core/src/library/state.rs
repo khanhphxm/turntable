@@ -266,6 +266,7 @@ impl Library {
 				}
 			},
 			Response::NeedsClientId => self.conn = Conn::NeedsClientId,
+			Response::Offline(_) => {},
 			Response::Liked(uri, liked) => self.apply_liked(uri, liked),
 			Response::Added { tracks, stats } => {
 				self.owned_tracks = tracks;
@@ -384,6 +385,9 @@ impl Library {
 		}
 		if let Some(l) = &mut self.listing {
 			l.loading = false;
+		}
+		if self.route == Route::Home {
+			self.home.loaded = true;
 		}
 		self.error = Some(message);
 	}

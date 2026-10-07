@@ -103,6 +103,8 @@ pub enum Response {
 		me:        User,
 		playlists: Vec<Playlist>,
 	},
+	/// A network failure, or a successful online account refresh (never a disk snapshot).
+	Offline(bool),
 	NeedsClientId,
 	NeedsLogin,
 	LoginFailed(String),

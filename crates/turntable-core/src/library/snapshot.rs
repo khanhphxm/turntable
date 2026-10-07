@@ -360,4 +360,38 @@ mod tests {
 		assert!(store.connected().is_none());
 		fs::remove_dir_all(dir).unwrap();
 	}
+
+	#[test]
+	fn offline_errors_finish_loading_without_losing_disk_data() {
+		let dir = scratch("offline");
+		let mut store = Store::new(&dir);
+		connect(&mut store, "alex");
+		store.record(&Response::Home(Home { recents: vec![Tile::liked()], loaded: true, ..Home::default() }));
+		store.record(&Response::Listing {
+			route:   Route::Liked,
+			offset:  0,
+			listing: Listing { title: "Saved liked songs".into(), total: 51, ..Listing::default() },
+		});
+		store.save().unwrap();
+		let mut restored = Store::new(&dir);
+		restored.load(Some("alex"));
+		let mut library = crate::library::Library::default();
+		library.apply(restored.connected().unwrap());
+		library.apply(Response::Home(restored.home().unwrap()));
+		library.apply(Response::Error { route: None, message: "simulated offline".into() });
+		assert_eq!(library.conn, crate::library::Conn::Ready);
+		assert!(library.home.loaded);
+		assert_eq!(library.home.recents, [Tile::liked()]);
+		library.navigate(Route::Liked);
+		library.apply(Response::Listing { route: Route::Liked, offset: 0, listing: restored.listing(&Route::Liked).unwrap() });
+		library.apply(Response::Error { route: Some(Route::Liked), message: "simulated offline".into() });
+		let listing = library.listing.unwrap();
+		assert!(!listing.loading);
+		assert_eq!((listing.title.as_str(), listing.total), ("Saved liked songs", 51));
+		let mut empty = crate::library::Library::default();
+		empty.navigate(Route::Home);
+		empty.apply(Response::Error { route: None, message: "simulated offline".into() });
+		assert!(empty.home.loaded, "even an uncached Home must stop spinning");
+		fs::remove_dir_all(dir).unwrap();
+	}
 }
