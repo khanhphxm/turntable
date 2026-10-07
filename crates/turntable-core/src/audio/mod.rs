@@ -31,7 +31,7 @@ use std::{
 	time::Duration,
 };
 
-pub use eq::{BANDS_HZ, EqSettings};
+pub use eq::{BANDS_HZ, EqSettings, PRESETS};
 use eq::{Equalizer, Mailbox};
 use ring::Ring;
 use stage::OutputStage;

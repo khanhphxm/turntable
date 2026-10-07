@@ -1,27 +1,26 @@
-//! The window's root view: state, navigation and the layout (top bar, library, main view,
-//! right-hand panel, player bar). Pages and panels live in their own modules as `impl Shell`.
+//! The window's root view: the core controller, navigation and the layout (top bar, library,
+//! main view, right-hand panel, player bar). Pages and panels live in their own modules as
+//! `impl Shell` blocks and read `self.st()`.
 
-use std::time::{Duration, Instant};
+use std::{sync::Arc, time::Instant};
 
 use gpui_kit::{
-	AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListState,
-	ParentElement as _, Render, Styled as _, Window, actions,
+	AppContext as _, Context, Entity, FocusHandle, Focusable, ImageSource, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment,
+	ListState, ParentElement as _, Render, Styled as _, Window, actions,
 	component::input::{InputEvent, InputState},
 	div,
 	prelude::FluentBuilder as _,
 	px,
 };
+use turntable_core::{Controller, Field, Msg, Panel, Route, State};
 
 use crate::{
-	mock::{Collection, Library},
+	covers::CoverCache,
 	theme,
 	widgets::{Slider, SliderEvent},
 };
 
 actions!(turntable, [TogglePlay, Next, Previous, Back, Forward, FocusSearch, ToggleLibrary, ToggleQueue, ToggleLyrics, ToggleNowPlaying]);
-
-/// How long a toast stays up.
-const TOAST_FOR: Duration = Duration::from_millis(2600);
 
 pub fn bind_keys(cx: &mut gpui_kit::App) {
 	cx.bind_keys([
@@ -39,101 +38,43 @@ pub fn bind_keys(cx: &mut gpui_kit::App) {
 	]);
 }
 
-/// A page of the main view.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Route {
-	Home,
-	Search,
-	Collection(Collection),
-	Artist(usize),
-	Settings,
+/// A page of the main view: one of the core's routes, or one of the app's own pages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Page {
+	Core(Route),
 	Equalizer,
+	Settings,
 }
 
 /// What the right-hand panel shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Panel {
-	NowPlaying,
-	Queue,
-	Lyrics,
+pub enum Side {
+	Core(Panel),
 	Devices,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Repeat {
-	Off,
-	All,
-	One,
-}
-
-/// Your Library's filter chips.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LibraryFilter {
-	Playlists,
-	Albums,
-	Artists,
-}
-
-/// What plays: a position in a collection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NowPlaying {
-	pub from: Collection,
-	pub pos:  usize,
-}
-
-pub struct Prefs {
-	pub normalize:  bool,
-	pub autoplay:   bool,
-	pub crossfade:  bool,
-	pub lyrics_bar: bool,
-	pub quality:    usize,
-}
-
 pub struct Shell {
-	pub lib:               Library,
-	pub route:             Route,
-	pub back:              Vec<Route>,
-	pub forward:           Vec<Route>,
-	pub panel:             Option<Panel>,
-	/// Bumped on every panel change so the panel's entrance animation runs again.
-	pub panel_gen:         usize,
-	pub sidebar_collapsed: bool,
-	pub library_filter:    Option<LibraryFilter>,
-	pub now:               Option<NowPlaying>,
-	/// Tracks the user queued ("Add to queue"): they play before the collection continues.
-	pub queue:             Vec<usize>,
-	pub playing:           bool,
-	/// Where the track was at `anchor`.
-	pub position_ms:       u64,
-	pub anchor:            Instant,
-	pub shuffle:           bool,
-	pub repeat:            Repeat,
-	pub volume:            f32,
-	/// The volume to go back to on unmute.
-	pub unmute_to:         f32,
-	pub seek:              Entity<Slider>,
-	pub volume_slider:     Entity<Slider>,
-	/// The main view's virtual list (collection pages).
-	pub list:              ListState,
-	/// The selected row of the open track table.
-	pub selected:          Option<usize>,
-	pub search:            Entity<InputState>,
-	pub query:             String,
-	pub device:            usize,
-	pub eq_on:             bool,
-	pub eq_preset:         Option<&'static str>,
-	pub eq:                Vec<Entity<Slider>>,
-	pub prefs:             Prefs,
-	pub focus:             FocusHandle,
+	pub core:          Controller,
+	pub page:          Page,
+	pub back:          Vec<Page>,
+	pub forward:       Vec<Page>,
+	/// Bumped whenever the right-hand panel changes, so its entrance animation runs again.
+	pub panel_gen:     usize,
+	pub seek:          Entity<Slider>,
+	pub volume_slider: Entity<Slider>,
+	/// The main view's virtual list (listing pages), and what it was built for.
+	pub list:          ListState,
+	pub list_for:      Option<(Route, usize)>,
+	pub search:        Entity<InputState>,
+	pub eq:            Vec<Entity<Slider>>,
+	pub focus:         FocusHandle,
 	/// The main view's width as of this frame (titles size themselves to it).
-	pub main_w:            f32,
-	pub toast:             Option<&'static str>,
-	pub signed_in:         bool,
-	pub signing_in:        bool,
-	pub toast_gen:         usize,
-	pub lyrics_scroll:     gpui_kit::ScrollHandle,
+	pub main_w:        f32,
+	/// The window's scale factor as of this frame (covers decode to it).
+	pub scale:         f32,
+	pub lyrics_scroll: gpui_kit::ScrollHandle,
 	/// The lyric line last scrolled to.
-	pub lyrics_line:       Option<usize>,
+	pub lyrics_line:   Option<usize>,
 }
 
 impl Focusable for Shell {
@@ -143,303 +84,259 @@ impl Focusable for Shell {
 }
 
 impl Shell {
-	pub fn new(window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
+	pub fn new(core: Controller, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
 		let seek = Slider::new(cx, 0.);
-		let volume_slider = Slider::new(cx, 0.7);
+		let volume_slider = Slider::new(cx, f32::from(core.state().volume) / 100.);
 		cx.subscribe(&seek, |this, _, e: &SliderEvent, cx| {
 			if let SliderEvent::Commit(v) = e {
-				let total = this.now_track().map_or(0, |t| t.ms);
-				this.position_ms = (f64::from(*v) * total as f64) as u64;
-				this.anchor = Instant::now();
-				cx.notify();
+				let ms = (f64::from(*v) * this.st().duration_ms() as f64) as u64;
+				this.send(Msg::Seek(ms), cx);
 			}
 		})
 		.detach();
 		cx.subscribe(&volume_slider, |this, _, e: &SliderEvent, cx| {
 			let (SliderEvent::Scrub(v) | SliderEvent::Commit(v)) = e;
-			this.volume = *v;
-			cx.notify();
+			this.send(Msg::Volume((v * 100.).round() as u8), cx);
 		})
 		.detach();
 		let search = cx.new(|cx| InputState::new(window, cx).placeholder("What do you want to play?"));
-		cx.subscribe(&search, |this, input, e: &InputEvent, cx| {
-			if matches!(e, InputEvent::Change) {
-				this.query = input.read(cx).value().trim().to_owned();
-				if this.route != Route::Search {
-					this.open(Route::Search, cx);
+		cx.subscribe(&search, |this, input, e: &InputEvent, cx| match e {
+			InputEvent::Change => {
+				let text = input.read(cx).value().to_string();
+				// The core owns the query (and debounces the search it sends).
+				this.send(Msg::Focus(Some(Field::Search)), cx);
+				let old = this.st().library.query.encode_utf16().count();
+				this.send(Msg::Edit { from: 0, to: old, text }, cx);
+				if this.page != Page::Core(Route::Search) {
+					this.open(Page::Core(Route::Search), cx);
 				}
-				cx.notify();
-			}
+			},
+			InputEvent::PressEnter { .. } => {
+				let text = input.read(cx).value().to_string();
+				this.send(Msg::SearchSubmit(text), cx);
+			},
+			_ => {},
 		})
 		.detach();
-		let eq: Vec<Entity<Slider>> = (0..10).map(|_| Slider::vertical(cx, crate::pages::eq::db_to_value(0.))).collect();
-		for band in &eq {
-			// A hand-set band is no longer the preset.
-			cx.subscribe(band, |this, _, e: &SliderEvent, cx| {
-				if matches!(e, SliderEvent::Commit(_)) {
-					this.eq_preset = None;
-					cx.notify();
+		let eq: Vec<Entity<Slider>> =
+			core.state().eq.gains_db.iter().map(|db| Slider::vertical(cx, crate::pages::eq::db_to_value(*db))).collect();
+		for (band, slider) in eq.iter().enumerate() {
+			cx.subscribe(slider, move |this, _, e: &SliderEvent, cx| {
+				if let SliderEvent::Commit(v) = e {
+					this.send(Msg::EqBand(band, crate::pages::eq::value_to_step(*v)), cx);
 				}
 			})
 			.detach();
 		}
-		let lib = Library::demo();
-		let first = Collection::Playlist(0);
-		let rows = lib.tracks_of(first).len();
+		let page = Page::Core(core.state().library.route.clone());
 		let mut shell = Self {
-			lib,
-			route: Route::Collection(first),
+			core,
+			page,
 			back: Vec::new(),
 			forward: Vec::new(),
-			panel: Some(Panel::NowPlaying),
 			panel_gen: 0,
-			sidebar_collapsed: false,
-			library_filter: None,
-			now: Some(NowPlaying { from: first, pos: 0 }),
-			queue: Vec::new(),
-			playing: false,
-			position_ms: 42_000,
-			anchor: Instant::now(),
-			shuffle: false,
-			repeat: Repeat::Off,
-			volume: 0.7,
-			unmute_to: 0.7,
 			seek,
 			volume_slider,
-			list: ListState::new(rows + 1, ListAlignment::Top, px(600.)),
-			selected: None,
+			list: ListState::new(0, ListAlignment::Top, px(600.)),
+			list_for: None,
 			search,
-			query: String::new(),
-			device: 0,
-			eq_on: true,
-			eq_preset: Some("Flat"),
 			eq,
-			prefs: Prefs { normalize: true, autoplay: true, crossfade: false, lyrics_bar: true, quality: 2 },
 			focus: cx.focus_handle(),
 			main_w: 600.,
-			toast: None,
-			signed_in: std::env::var_os("TURNTABLE_WELCOME").is_none(),
-			signing_in: false,
-			toast_gen: 0,
+			scale: window.scale_factor(),
 			lyrics_scroll: gpui_kit::ScrollHandle::new(),
 			lyrics_line: None,
 		};
-		shell.sync_seek(cx);
-		shell.start_clock(cx);
+		shell.send(Msg::Navigate(Route::Home), cx);
 		shell
 	}
 
-	// --- Playback -------------------------------------------------------------------------
-
-	/// Index into `lib.tracks` of what plays.
-	pub fn now_index(&self) -> Option<usize> {
-		let n = self.now?;
-		self.lib.tracks_of(n.from).get(n.pos).copied()
+	pub fn st(&self) -> &State {
+		self.core.state()
 	}
 
-	pub fn now_track(&self) -> Option<&crate::mock::Track> {
-		self.lib.tracks.get(self.now_index()?)
+	/// Hands `msg` to the core and redraws when it changed something.
+	pub fn send(&mut self, msg: Msg, cx: &mut Context<'_, Self>) {
+		let before = self.st().side_panel();
+		if self.core.dispatch(msg) {
+			self.after_change(before, cx);
+		}
 	}
 
-	/// Whether row `pos` of `from` is what plays (`track` = usize::MAX skips the track check).
-	pub fn is_current(&self, from: Collection, pos: usize, track: usize) -> bool {
-		self.now.is_some_and(|n| n.from == from && n.pos == pos) && (track == usize::MAX || self.now_index() == Some(track))
+	/// Workers published or a timer came due: take it in.
+	pub fn pump(&mut self, cx: &mut Context<'_, Self>) {
+		let before = self.st().side_panel();
+		// While something plays the clock and seek bar move on every tick.
+		if self.core.pump() || self.st().playing() {
+			self.after_change(before, cx);
+		}
 	}
 
-	pub fn position(&self) -> u64 {
-		let total = self.now_track().map_or(0, |t| t.ms);
-		let at = if self.playing { self.position_ms + self.anchor.elapsed().as_millis() as u64 } else { self.position_ms };
-		at.min(total)
+	/// When to wake next: the core's next timer, or the next whole second of playback.
+	pub fn next_wake(&self) -> Option<Instant> {
+		let tick = self.st().playing().then(|| {
+			let ms = self.st().position_ms();
+			self.st().anchor.instant_at(ms - ms % 1000 + 1000)
+		});
+		[self.core.deadline(), tick.flatten()].into_iter().flatten().min()
 	}
 
-	fn sync_seek(&self, cx: &mut Context<'_, Self>) {
-		let total = self.now_track().map_or(1, |t| t.ms).max(1);
-		let v = self.position() as f32 / total as f32;
-		self.seek.update(cx, |s, cx| s.set(v, cx));
-	}
-
-	/// Redraws once a second while something plays; nothing runs while paused.
-	fn start_clock(&mut self, cx: &mut Context<'_, Self>) {
-		cx.spawn(async move |this, cx| {
-			loop {
-				cx.background_executor().timer(Duration::from_secs(1)).await;
-				let alive = this.update(cx, |this, cx| {
-					if this.playing {
-						if this.position() >= this.now_track().map_or(0, |t| t.ms) {
-							this.skip(1, cx);
-						}
-						this.sync_seek(cx);
-						cx.notify();
-					}
-				});
-				if alive.is_err() {
-					break;
-				}
-			}
-		})
-		.detach();
-	}
-
-	pub fn toggle_play(&mut self, cx: &mut Context<'_, Self>) {
-		self.position_ms = self.position();
-		self.anchor = Instant::now();
-		self.playing = !self.playing;
+	fn after_change(&mut self, panel_before: Option<Panel>, cx: &mut Context<'_, Self>) {
+		if self.st().side_panel() != panel_before {
+			self.panel_gen += 1;
+		}
+		let st = self.core.state();
+		let total = st.duration_ms().max(1);
+		let (pos, vol) = (st.position_ms() as f32 / total as f32, f32::from(st.volume) / 100.);
+		self.seek.update(cx, |s, cx| s.set(pos, cx));
+		self.volume_slider.update(cx, |s, cx| s.set(vol, cx));
+		// The band sliders follow the core (a preset moves them all).
+		let gains = self.core.state().eq.gains_db;
+		for (slider, db) in self.eq.iter().zip(gains) {
+			slider.update(cx, |s, cx| s.set(crate::pages::eq::db_to_value(db), cx));
+		}
+		if self.st().quit {
+			cx.quit();
+		}
 		cx.notify();
 	}
 
-	pub fn play_from(&mut self, from: Collection, pos: usize, cx: &mut Context<'_, Self>) {
-		self.now = Some(NowPlaying { from, pos });
-		self.position_ms = 0;
-		self.anchor = Instant::now();
-		self.playing = true;
-		self.sync_seek(cx);
-		cx.notify();
-	}
-
-	/// Play/pause a collection: resumes it if it's what plays, else starts it from the top.
-	pub fn play_collection(&mut self, c: Collection, cx: &mut Context<'_, Self>) {
-		if self.now.is_some_and(|n| n.from == c) {
-			self.toggle_play(cx);
-		} else {
-			self.play_from(c, 0, cx);
-		}
-	}
-
-	pub fn skip(&mut self, by: isize, cx: &mut Context<'_, Self>) {
-		// Previous restarts the track after its first 3 seconds, like every player.
-		if by < 0 && self.position() > 3000 {
-			self.position_ms = 0;
-			self.anchor = Instant::now();
-			self.sync_seek(cx);
-			cx.notify();
-			return;
-		}
-		if let Some(n) = self.now {
-			let len = self.lib.tracks_of(n.from).len().max(1) as isize;
-			let next = (n.pos as isize + by).rem_euclid(len) as usize;
-			self.play_from(n.from, next, cx);
-		}
-	}
-
-	pub fn toggle_liked(&mut self, track: usize, cx: &mut Context<'_, Self>) {
-		if let Some(t) = self.lib.tracks.get_mut(track) {
-			t.liked = !t.liked;
-			let msg = if t.liked { "Added to Liked Songs" } else { "Removed from Liked Songs" };
-			self.toast(msg, cx);
-		}
-	}
-
-	pub fn add_to_queue(&mut self, track: usize, cx: &mut Context<'_, Self>) {
-		self.queue.push(track);
-		self.toast("Added to queue", cx);
-	}
-
-	/// A short message over the bottom of the main view, gone after a few seconds.
-	pub fn toast(&mut self, text: &'static str, cx: &mut Context<'_, Self>) {
-		self.toast_gen += 1;
-		let gen_ = self.toast_gen;
-		self.toast = Some(text);
-		cx.notify();
-		cx.spawn(async move |this, cx| {
-			cx.background_executor().timer(TOAST_FOR).await;
-			let _ = this.update(cx, |this, cx| {
-				// A newer toast keeps its own time.
-				if this.toast_gen == gen_ {
-					this.toast = None;
-					cx.notify();
-				}
-			});
-		})
-		.detach();
-	}
-
-	pub fn toggle_mute(&mut self, cx: &mut Context<'_, Self>) {
-		if self.volume > 0. {
-			self.unmute_to = self.volume;
-			self.volume = 0.;
-		} else {
-			self.volume = self.unmute_to.max(0.1);
-		}
-		let v = self.volume;
-		self.volume_slider.update(cx, |s, cx| s.set(v, cx));
-		cx.notify();
+	/// A cover at `logical` px, decoded off-thread: `None` until it's ready (the core fetches it).
+	pub fn image(&self, url: Option<&str>, logical: u32, cx: &mut Context<'_, Self>) -> Option<ImageSource> {
+		let cover = Arc::clone(self.st().image(url)?);
+		CoverCache::get(&cover, logical, self.scale, cx).map(ImageSource::Render)
 	}
 
 	// --- Navigation -----------------------------------------------------------------------
 
-	pub fn open(&mut self, route: Route, cx: &mut Context<'_, Self>) {
-		if self.route != route {
-			self.back.push(self.route);
+	pub fn open(&mut self, page: Page, cx: &mut Context<'_, Self>) {
+		if self.page != page {
+			let from = std::mem::replace(&mut self.page, page.clone());
+			self.back.push(from);
 			self.forward.clear();
-			self.show(route, cx);
+			self.show(page, cx);
 		}
 	}
 
+	pub fn go(&mut self, route: Route, cx: &mut Context<'_, Self>) {
+		self.open(Page::Core(route), cx);
+	}
+
 	pub fn go_back(&mut self, cx: &mut Context<'_, Self>) {
-		if let Some(r) = self.back.pop() {
-			self.forward.push(self.route);
-			self.show(r, cx);
+		if let Some(p) = self.back.pop() {
+			let from = std::mem::replace(&mut self.page, p.clone());
+			self.forward.push(from);
+			self.show(p, cx);
 		}
 	}
 
 	pub fn go_forward(&mut self, cx: &mut Context<'_, Self>) {
-		if let Some(r) = self.forward.pop() {
-			self.back.push(self.route);
-			self.show(r, cx);
+		if let Some(p) = self.forward.pop() {
+			let from = std::mem::replace(&mut self.page, p.clone());
+			self.back.push(from);
+			self.show(p, cx);
 		}
 	}
 
-	fn show(&mut self, route: Route, cx: &mut Context<'_, Self>) {
-		self.route = route;
-		if let Route::Collection(c) = route {
-			self.list.reset(self.lib.tracks_of(c).len() + 1);
+	fn show(&mut self, page: Page, cx: &mut Context<'_, Self>) {
+		self.page = page.clone();
+		if let Page::Core(route) = page {
+			self.send(Msg::Navigate(route), cx);
 		}
-		self.selected = None;
 		cx.notify();
 	}
 
-	pub fn toggle_panel(&mut self, panel: Panel, cx: &mut Context<'_, Self>) {
-		self.panel = if self.panel == Some(panel) { None } else { Some(panel) };
+	/// What the right-hand panel shows: the device list while it's open, else the core's panel
+	/// (only the panels that belong there; the equalizer and settings are pages here).
+	pub fn side(&self) -> Option<Side> {
+		if self.st().connect.menu {
+			return Some(Side::Devices);
+		}
+		match self.st().side_panel()? {
+			p @ (Panel::NowPlaying | Panel::Queue | Panel::Lyrics) => Some(Side::Core(p)),
+			Panel::Eq | Panel::Settings => None,
+		}
+	}
+
+	pub fn toggle_side(&mut self, side: Side, cx: &mut Context<'_, Self>) {
 		self.panel_gen += 1;
-		cx.notify();
+		match side {
+			Side::Devices => self.send(Msg::DevicesMenu, cx),
+			Side::Core(p) => {
+				if self.st().connect.menu {
+					self.send(Msg::DevicesMenu, cx);
+				}
+				self.send(Msg::TogglePanel(p), cx);
+			},
+		}
 	}
+}
+
+/// Drives the core: sleeps until a worker wakes it or its next timer is due, then pumps.
+pub fn run_core(shell: &Entity<Shell>, wake: smol::channel::Receiver<()>, cx: &mut gpui_kit::App) {
+	let shell = shell.downgrade();
+	cx.spawn(async move |cx| {
+		loop {
+			let deadline = shell.update(cx, |s, _| s.next_wake()).ok().flatten();
+			let woken = wake.recv();
+			match deadline {
+				Some(at) => {
+					let timer = cx.background_executor().timer(at.saturating_duration_since(Instant::now()));
+					smol::future::or(async { woken.await.map(|()| ()).ok() }, async {
+						timer.await;
+						Some(())
+					})
+					.await;
+				},
+				None => {
+					if woken.await.is_err() {
+						break;
+					}
+				},
+			}
+			if shell.update(cx, |s, cx| s.pump(cx)).is_err() {
+				break;
+			}
+		}
+	})
+	.detach();
 }
 
 impl Render for Shell {
 	fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-		let side = if self.sidebar_collapsed { theme::SIDEBAR_COLLAPSED_W } else { theme::SIDEBAR_W };
-		let right = if self.panel.is_some() { theme::RIGHT_W + theme::GAP } else { px(0.) };
-		self.main_w = f32::from(window.viewport_size().width - side - right - theme::GAP * 3.);
-		if !self.signed_in {
+		if !self.st().signed_in {
 			return self.welcome_page(cx).into_any_element();
 		}
-		let main = match self.route {
-			Route::Home => self.home_page(cx).into_any_element(),
-			Route::Search => self.search_page(cx).into_any_element(),
-			Route::Collection(c) => self.collection_page(c, cx).into_any_element(),
-			Route::Artist(a) => self.artist_page(a, cx).into_any_element(),
-			Route::Settings => self.settings_page(cx).into_any_element(),
-			Route::Equalizer => self.eq_page(cx).into_any_element(),
+		self.scale = window.scale_factor();
+		let side = self.side();
+		let left = if self.st().sidebar_collapsed() { theme::SIDEBAR_COLLAPSED_W } else { theme::SIDEBAR_W };
+		let right = if side.is_some() { theme::RIGHT_W + theme::GAP } else { px(0.) };
+		self.main_w = f32::from(window.viewport_size().width - left - right - theme::GAP * 3.);
+		let main = match self.page.clone() {
+			Page::Core(Route::Home | Route::Library) => self.home_page(cx).into_any_element(),
+			Page::Core(Route::Search) => self.search_page(cx).into_any_element(),
+			Page::Core(Route::Artist(_)) => self.artist_page(cx).into_any_element(),
+			Page::Core(route @ (Route::Liked | Route::Playlist(_) | Route::Album(_))) => self.listing_page(route, cx).into_any_element(),
+			Page::Settings => self.settings_page(cx).into_any_element(),
+			Page::Equalizer => self.eq_page(cx).into_any_element(),
 		};
+		let toast = self.st().toast.clone();
 		div()
 			.key_context("Shell")
 			.track_focus(&self.focus)
-			.on_action(cx.listener(|this, _: &TogglePlay, _, cx| this.toggle_play(cx)))
-			.on_action(cx.listener(|this, _: &Next, _, cx| this.skip(1, cx)))
-			.on_action(cx.listener(|this, _: &Previous, _, cx| this.skip(-1, cx)))
+			.on_action(cx.listener(|this, _: &TogglePlay, _, cx| this.send(Msg::TogglePlay, cx)))
+			.on_action(cx.listener(|this, _: &Next, _, cx| this.send(Msg::Next, cx)))
+			.on_action(cx.listener(|this, _: &Previous, _, cx| this.send(Msg::Prev, cx)))
 			.on_action(cx.listener(|this, _: &Back, _, cx| this.go_back(cx)))
 			.on_action(cx.listener(|this, _: &Forward, _, cx| this.go_forward(cx)))
 			.on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
 				this.search.update(cx, |s, cx| s.focus(window, cx));
-				this.open(Route::Search, cx);
+				this.go(Route::Search, cx);
 			}))
-			.on_action(cx.listener(|this, _: &ToggleLibrary, _, cx| {
-				this.sidebar_collapsed = !this.sidebar_collapsed;
-				cx.notify();
-			}))
-			.on_action(cx.listener(|this, _: &ToggleQueue, _, cx| this.toggle_panel(Panel::Queue, cx)))
-			.on_action(cx.listener(|this, _: &ToggleLyrics, _, cx| this.toggle_panel(Panel::Lyrics, cx)))
-			.on_action(cx.listener(|this, _: &ToggleNowPlaying, _, cx| this.toggle_panel(Panel::NowPlaying, cx)))
+			.on_action(cx.listener(|this, _: &ToggleLibrary, _, cx| this.send(Msg::ToggleSidebar, cx)))
+			.on_action(cx.listener(|this, _: &ToggleQueue, _, cx| this.toggle_side(Side::Core(Panel::Queue), cx)))
+			.on_action(cx.listener(|this, _: &ToggleLyrics, _, cx| this.toggle_side(Side::Core(Panel::Lyrics), cx)))
+			.on_action(cx.listener(|this, _: &ToggleNowPlaying, _, cx| this.toggle_side(Side::Core(Panel::NowPlaying), cx)))
 			.size_full()
 			.flex()
 			.flex_col()
@@ -465,9 +362,9 @@ impl Render for Shell {
 							.overflow_hidden()
 							.bg(theme::panel())
 							.child(main)
-							.when_some(self.toast, |s, text| s.child(toast_view(text, self.toast_gen))),
+							.when_some(toast, |s, (id, text)| s.child(toast_view(text, id))),
 					)
-					.when_some(self.panel, |row, panel| row.child(self.right_panel(panel, cx))),
+					.when_some(side, |row, side| row.child(self.right_panel(side, cx))),
 			)
 			.child(self.player_bar(cx))
 			.into_any_element()
@@ -475,7 +372,9 @@ impl Render for Shell {
 }
 
 /// Spotify's toast: a white pill centred near the bottom of the main view, rising in.
-fn toast_view(text: &'static str, gen_: usize) -> impl IntoElement {
+fn toast_view(text: String, id: u32) -> impl IntoElement {
+	use std::time::Duration;
+
 	use gpui_kit::{Animation, AnimationExt as _, ease_out_quint};
 	div().absolute().bottom(px(24.)).left_0().right_0().flex().justify_center().child(
 		div()
@@ -487,7 +386,7 @@ fn toast_view(text: &'static str, gen_: usize) -> impl IntoElement {
 			.text_size(px(14.))
 			.shadow_lg()
 			.child(text)
-			.with_animation(("toast", gen_), Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()), |el, d| {
+			.with_animation(("toast", id as usize), Animation::new(Duration::from_millis(220)).with_easing(ease_out_quint()), |el, d| {
 				el.opacity(d).mb(px(-12. * (1. - d)))
 			}),
 	)

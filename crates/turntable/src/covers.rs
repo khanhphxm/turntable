@@ -1,9 +1,14 @@
 //! Background-decoded, physical-pixel-bucketed cover artwork.
 //!
-//! During a view's render, call `CoverCache::get(cover, logical_side, window, cx)`
+//! During a view's render, call `CoverCache::get(cover, logical_side, scale, cx)`
 //! and render a hit with `img(ImageSource::Render(image)).size(px(logical_side))`.
 //! A miss returns `None`; render the normal placeholder. All requesting views are
 //! notified once decoding finishes, including views sharing the same artwork.
+//! Decoding is limited to two in-flight tasks. JPEG uses reduced IDCT (1/2,
+//! 1/4 or 1/8) before final resizing, so row artwork does not allocate full-size
+//! JPEG pixel buffers. PNG/WebP lack that decode-time reduction, but share the
+//! same concurrency limit. Decoder state and resize inputs are dropped before
+//! BGRA conversion; the host's allocator controls when freed pages are purged.
 //!
 //! The default budget is 24 MiB of decoded BGRA pixels, not compressed source
 //! bytes or GPU atlas overhead. Eviction also releases GPUI's atlas entry. Sources
@@ -12,24 +17,17 @@
 //! without a polling task or idle CPU cost.
 
 use std::{
-	collections::HashMap,
+	collections::{HashMap, VecDeque},
 	sync::{Arc, Weak},
 };
 
 use gpui_kit::{AnyWeakEntity, App, BorrowAppContext as _, Context, Global, RenderImage, Window};
-use image::{Frame, ImageFormat, RgbaImage};
-
-/// Temporary stand-in: replace this definition with `use turntable_core::Cover`
-/// when the core's host-facing artwork type is available. Arc identity must stay
-/// stable across snapshots; mutating artwork requires a new Arc.
-#[derive(Debug)]
-pub struct Cover {
-	pub bytes: Vec<u8>,
-	pub mime:  String,
-}
+use image::{DynamicImage, Frame, ImageFormat, RgbaImage};
+use turntable_core::Cover;
 
 const DEFAULT_BUDGET: usize = 24 * 1024 * 1024;
 const BUCKETS: [u32; 4] = [64, 128, 320, 640];
+const MAX_DECODES: usize = 2;
 
 /// Select the smallest physical-pixel bucket that covers the logical side.
 /// Large requests are capped at 640; small source images are never enlarged.
@@ -73,6 +71,8 @@ pub struct CoverCache {
 	budget:  usize,
 	bytes:   usize,
 	clock:   u64,
+	queue:   VecDeque<Key>,
+	running: usize,
 }
 
 impl Global for CoverCache {}
@@ -85,13 +85,14 @@ impl Default for CoverCache {
 
 impl CoverCache {
 	pub fn new(budget: usize) -> Self {
-		Self { entries: HashMap::new(), budget, bytes: 0, clock: 0 }
+		Self { entries: HashMap::new(), budget, bytes: 0, clock: 0, queue: VecDeque::new(), running: 0 }
 	}
 
-	/// `size_px` is the desired logical side; the window's scale factor selects
-	/// a physical bucket. Decode/resize/BGRA conversion run off the UI thread.
-	pub fn get<V: 'static>(cover: &Arc<Cover>, size_px: u32, window: &mut Window, cx: &mut Context<'_, V>) -> Option<Arc<RenderImage>> {
-		let key = Key::new(cover, bucket(size_px, window.scale_factor()));
+	/// `size_px` is the desired logical side; `scale_factor` is the window scale
+	/// cached by the host for this frame. Keep source Arc identities stable across
+	/// snapshots. Decode/resize/BGRA conversion run off the UI thread.
+	pub fn get<V: 'static>(cover: &Arc<Cover>, size_px: u32, scale_factor: f32, cx: &mut Context<'_, V>) -> Option<Arc<RenderImage>> {
+		let key = Key::new(cover, bucket(size_px, scale_factor));
 		let requester = cx.entity().into_any().downgrade();
 		if !cx.has_global::<Self>() {
 			cx.set_global(Self::default());
@@ -100,7 +101,9 @@ impl CoverCache {
 			if cache.entries.contains_key(&key) {
 				return (cache.lookup(key, requester), false);
 			}
-			cache.sweep(|image| cx.drop_image(image, Some(window)));
+			// Rendering temporarily removes the current window from App's map.
+			// Defer atlas release until it is restored, so every window is covered.
+			cache.sweep(|image| cx.defer(move |cx| cx.drop_image(image, None)));
 			cache.clock += 1;
 			cache.entries.insert(key, Entry {
 				source: Arc::downgrade(cover),
@@ -108,27 +111,56 @@ impl CoverCache {
 				bytes:  0,
 				used:   cache.clock,
 			});
+			cache.queue.push_back(key);
 			(None, true)
 		});
 		if start {
-			let source = Arc::clone(cover);
+			Self::pump(cx);
+		}
+		image
+	}
+
+	// Queue on the foreground, not a blocking semaphore on background workers.
+	// At most two tasks (including results awaiting foreground completion) own
+	// decoding buffers. Queued entries hold only weak references to sources.
+	fn pump(cx: &mut App) {
+		loop {
+			let next = cx.update_global::<Self, _>(|cache, _| cache.next_decode());
+			let Some((key, source)) = next else { break };
 			let work = cx.background_executor().spawn(async move { decode(&source, key.side) });
-			// App-scoped rather than window-scoped: a shared decode must still
-			// complete if its first requesting window closes.
-			App::spawn(cx, async move |cx| {
+			// App-scoped: shared artwork must finish if its first window closes.
+			cx.spawn(async move |cx| {
 				let decoded = work.await;
-				cx.update_global::<Self, _>(|cache, cx| {
-					let waiters = cache.complete(key, decoded, |image| cx.drop_image(image, None));
-					for waiter in waiters {
-						if waiter.is_upgradable() {
-							cx.notify(waiter.entity_id());
+				cx.update(|cx| {
+					cx.update_global::<Self, _>(|cache, cx| {
+						cache.running -= 1;
+						let waiters = cache.complete(key, decoded, |image| cx.drop_image(image, None));
+						for waiter in waiters {
+							if waiter.is_upgradable() {
+								cx.notify(waiter.entity_id());
+							}
 						}
-					}
+					});
+					Self::pump(cx);
 				});
 			})
 			.detach();
 		}
-		image
+	}
+
+	fn next_decode(&mut self) -> Option<(Key, Arc<Cover>)> {
+		if self.running >= MAX_DECODES {
+			return None;
+		}
+		while let Some(key) = self.queue.pop_front() {
+			let Some(entry) = self.entries.get(&key) else { continue };
+			if let Some(source) = entry.source.upgrade() {
+				self.running += 1;
+				return Some((key, source));
+			}
+			self.entries.remove(&key);
+		}
+		None
 	}
 
 	/// Reclaim artwork whose source Arcs were dropped, e.g. on library changes.
@@ -209,13 +241,54 @@ fn decode(cover: &Cover, side: u32) -> Option<Arc<RenderImage>> {
 	if !matches!(format, ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::WebP) {
 		return None;
 	}
-	let source = image::load_from_memory_with_format(&cover.bytes, format).ok()?;
-	let resized = if source.width() > side || source.height() > side { source.thumbnail(side, side) } else { source };
+	let resized = {
+		let source = if format == ImageFormat::Jpeg {
+			decode_jpeg(&cover.bytes, side)?
+		} else {
+			image::load_from_memory_with_format(&cover.bytes, format).ok()?
+		};
+		if source.width() > side || source.height() > side { source.thumbnail(side, side) } else { source }
+	};
 	let mut bgra: RgbaImage = resized.into_rgba8();
 	for pixel in bgra.pixels_mut() {
 		pixel.0.swap(0, 2);
 	}
 	Some(Arc::new(RenderImage::new([Frame::new(bgra)])))
+}
+
+fn decode_jpeg(bytes: &[u8], side: u32) -> Option<DynamicImage> {
+	let (info, pixels) = {
+		let mut decoder = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
+		let side = u16::try_from(side).ok()?;
+		decoder.scale(side, side).ok()?;
+		let pixels = decoder.decode().ok()?;
+		(decoder.info()?, pixels)
+	};
+	// Decoder coefficient/plane storage is gone before pixel conversion.
+	let (width, height) = (u32::from(info.width), u32::from(info.height));
+	match info.pixel_format {
+		jpeg_decoder::PixelFormat::RGB24 => image::RgbImage::from_raw(width, height, pixels).map(DynamicImage::ImageRgb8),
+		jpeg_decoder::PixelFormat::L8 => image::GrayImage::from_raw(width, height, pixels).map(DynamicImage::ImageLuma8),
+		jpeg_decoder::PixelFormat::L16 => {
+			let values = pixels.chunks_exact(2).map(|pair| Some(u16::from_ne_bytes(pair.try_into().ok()?))).collect::<Option<Vec<_>>>()?;
+			image::ImageBuffer::from_raw(width, height, values).map(DynamicImage::ImageLuma16)
+		},
+		jpeg_decoder::PixelFormat::CMYK32 => {
+			// jpeg-decoder normalizes Adobe's inverted samples to ordinary CMYK.
+			// Reuse its four-channel allocation for RGBA rather than allocate RGB.
+			let mut rgba = RgbaImage::from_raw(width, height, pixels)?;
+			for pixel in rgba.pixels_mut() {
+				let [c, m, y, k] = pixel.0;
+				pixel.0 = [cmyk_channel(c, k), cmyk_channel(m, k), cmyk_channel(y, k), 255];
+			}
+			Some(DynamicImage::ImageRgba8(rgba))
+		},
+	}
+}
+
+#[expect(clippy::cast_possible_truncation, reason = "CMYK channel product divided by 255 is bounded to 0..=255")]
+fn cmyk_channel(ink: u8, black: u8) -> u8 {
+	(u16::from(255 - ink) * u16::from(255 - black) / 255) as u8
 }
 
 #[cfg(test)]
@@ -260,6 +333,62 @@ mod tests {
 
 	fn image(side: u32) -> Arc<RenderImage> {
 		Arc::new(RenderImage::new([Frame::new(RgbaImage::new(side, side))]))
+	}
+
+	#[test]
+	fn only_two_decodes_can_be_in_flight() {
+		let mut cache = CoverCache::default();
+		let sources = [source(), source(), source()];
+		for source in &sources {
+			let key = pending(&mut cache, source, 64);
+			cache.queue.push_back(key);
+		}
+		let first = cache.next_decode();
+		let second = cache.next_decode();
+		assert!(first.is_some() && second.is_some());
+		assert_eq!(cache.running, MAX_DECODES);
+		assert!(cache.next_decode().is_none());
+		cache.running -= 1;
+		assert!(cache.next_decode().is_some());
+		assert_eq!(cache.running, MAX_DECODES);
+	}
+
+	#[test]
+	fn queued_decodes_do_not_retain_dropped_sources() {
+		let mut cache = CoverCache::default();
+		let dropped = source();
+		let key = pending(&mut cache, &dropped, 64);
+		cache.queue.push_back(key);
+		assert_eq!(Arc::strong_count(&dropped), 1);
+		drop(dropped);
+		assert!(cache.next_decode().is_none());
+		assert_eq!(cache.running, 0);
+		assert!(cache.entries.is_empty());
+	}
+
+	#[test]
+	fn jpeg_pixel_buffers_are_reduced_before_resizing() -> Result<(), image::ImageError> {
+		let source = image::RgbImage::from_pixel(640, 640, image::Rgb([210, 80, 30]));
+		let mut bytes = std::io::Cursor::new(Vec::new());
+		source.write_to(&mut bytes, ImageFormat::Jpeg)?;
+		for (requested, intermediate) in [(64, 80), (128, 160), (320, 320), (640, 640)] {
+			let decoded = decode_jpeg(bytes.get_ref(), requested);
+			assert!(decoded.is_some());
+			if let Some(decoded) = decoded {
+				assert_eq!(decoded.width(), intermediate);
+				assert_eq!(decoded.height(), intermediate);
+				assert_eq!(decoded.as_bytes().len(), (intermediate * intermediate * 3) as usize);
+			}
+		}
+		Ok(())
+	}
+
+	#[test]
+	fn cmyk_channels_use_subtractive_black() {
+		assert_eq!(cmyk_channel(0, 0), 255);
+		assert_eq!(cmyk_channel(255, 0), 0);
+		assert_eq!(cmyk_channel(0, 255), 0);
+		assert_eq!(cmyk_channel(128, 128), 63);
 	}
 
 	#[test]

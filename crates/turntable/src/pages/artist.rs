@@ -1,75 +1,158 @@
-//! An artist: banner, popular tracks, discography and about.
+//! An artist: banner, popular tracks, discography and the shelves around it, and about.
 
 use gpui_kit::{
-	Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, px,
+	Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _, Styled as _, div,
+	linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px, rgb,
 };
+use turntable_core::{Msg, Route, library::Tile};
 
 use crate::{
-	components::{Column, Row, grouped},
-	mock::Collection,
+	components::{Column, grouped},
 	shell::Shell,
 	theme,
-	widgets::{outline_button, section_title},
+	widgets::{chip, outline_button, section_title},
 };
 
+/// Popular shows this many rows until "See more".
+const POPULAR: usize = 5;
+
 impl Shell {
-	pub fn artist_page(&mut self, a: usize, cx: &mut Context<'_, Self>) -> impl IntoElement {
-		let c = Collection::Artist(a);
-		let Some(artist) = self.lib.artists.get(a) else {
-			return div().id("artist");
+	pub fn artist_page(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+		let page = div().id("artist").size_full().overflow_y_scroll();
+		let Some(l) = self.st().library.listing.clone() else {
+			return page;
 		};
-		let (name, listeners, about) = (artist.name, artist.listeners, artist.about);
-		let popular = self.lib.tracks_of(c);
-		let albums: Vec<usize> = self.lib.albums.iter().enumerate().filter(|(_, al)| al.artist == a).map(|(i, _)| i).collect();
-		let following = a % 2 == 0;
-		let meta = div().child(format!("{} monthly listeners", grouped(u64::from(listeners)))).into_any_element();
-		let follow = outline_button("follow", if following { "Following" } else { "Follow" });
-		let cards = albums
+		let route = self.st().library.route.clone();
+		let o = l.overview.as_ref();
+		let tint = Self::tint(l.accent.as_deref().or(o.and_then(|o| o.color.as_deref())));
+		let listeners = o.and_then(|o| o.monthly_listeners);
+		let avatar = o.and_then(|o| o.avatar.clone()).or(l.cover_url.clone());
+		let meta = div().when_some(listeners, |s, n| s.child(format!("{} monthly listeners", grouped(n)))).into_any_element();
+		let follow = outline_button("follow", if l.followed == Some(true) { "Following" } else { "Follow" })
+			.on_click(cx.listener(|this, _, _, cx| this.send(Msg::ToggleFollow, cx)));
+		let open = self.st().open_shelves.contains("popular");
+		let shown = if open { l.tracks.len() } else { l.tracks.len().min(POPULAR) };
+		let show_plays = self.st().prefs.display.play_counts;
+		let popular: Vec<_> = l
+			.tracks
 			.iter()
-			.map(|&i| {
-				let sub = self.lib.albums.get(i).map_or(String::new(), |al| format!("{} • {}", al.year, al.kind));
-				self.card(("disc", i), Collection::Album(i), sub, cx)
+			.take(shown)
+			.enumerate()
+			.map(|(i, t)| {
+				let plays = if show_plays { l.plays.get(i).copied() } else { None };
+				self.track_row(i, t, Column::Plays, plays, true, cx)
 			})
 			.collect();
-		div()
-			.id("artist")
-			.size_full()
-			.overflow_y_scroll()
-			.child(self.page_header(c, "Artist", name.into(), meta))
+		let mut shelves: Vec<Div> = Vec::new();
+		// Discography: one shelf, its kinds (albums, singles…) as chips like Spotify's.
+		if !l.discography.is_empty() {
+			let pick = self.st().discography.min(l.discography.len() - 1);
+			let chips = div().flex().gap_2().px(px(12.)).children(l.discography.iter().enumerate().map(|(i, (label, _))| {
+				chip(("disco", i), *label, i == pick, cx.listener(move |this, _, _, cx| this.send(Msg::Discography(i), cx)))
+			}));
+			let cards = l.discography.get(pick).map_or_else(Vec::new, |(_, tiles)| self.cards("disc", tiles, cx));
+			shelves.push(div().flex().flex_col().gap_3().child(div().px(px(12.)).child(section_title("Discography"))).child(chips).child(
+				div().h(px(theme::CARD_W + 70.)).overflow_hidden().flex().flex_wrap().children(cards),
+			));
+		}
+		if !l.appears_on.is_empty() {
+			let cards = self.cards("appears", &l.appears_on, cx);
+			shelves.push(self.shelf("Appears on", cards));
+		}
+		if let Some(o) = o {
+			let fans: Vec<Tile> = o
+				.related
+				.iter()
+				.map(|r| Tile {
+					route: Route::Artist(r.id.clone()),
+					play:  Some(format!("spotify:artist:{}", r.id)),
+					title: r.name.clone(),
+					sub:   "Artist".into(),
+					image: r.image.clone(),
+				})
+				.collect();
+			if !fans.is_empty() {
+				let cards = self.cards("fans", &fans, cx);
+				shelves.push(self.shelf("Fans also like", cards));
+			}
+			let found: Vec<Tile> = o
+				.discovered_on
+				.iter()
+				.map(|p| Tile {
+					route: Route::Playlist(p.id.clone()),
+					play:  Some(format!("spotify:playlist:{}", p.id)),
+					title: p.name.clone(),
+					sub:   if p.owner.is_empty() { "Playlist".into() } else { format!("By {}", p.owner) },
+					image: p.image.clone(),
+				})
+				.collect();
+			if !found.is_empty() {
+				let cards = self.cards("found", &found, cx);
+				shelves.push(self.shelf("Discovered on", cards));
+			}
+		}
+		let about = l.about.as_ref().and_then(|a| a.summary.clone().or(a.description.clone())).or(o.and_then(|o| o.biography.clone()));
+		let header_img = o.and_then(|o| o.header.clone().or(o.gallery.first().cloned()));
+		let more_than = l.tracks.len() > POPULAR;
+		page.child(self.page_header(&route, avatar.as_deref(), tint, "Artist".into(), l.title.clone().into(), meta, cx))
 			.child(
-				self.wash(c).child(self.action_bar(c, follow, cx)).child(
-					div().px_6().flex().flex_col().gap_2().child(section_title("Popular")).children(
-						popular.iter().take(5).enumerate().map(|(pos, &track)| {
-							self.track_row(Row { key: pos, from: c, pos, track, column: Column::Plays, cover: true }, cx)
-						}),
-					),
-				),
-			)
-			.child(div().px_3().pt_8().child(self.shelf("Discography", cards)))
-			.child(
-				div().px_6().pt_8().pb_8().flex().flex_col().gap_4().child(section_title("About")).child(
+				self.wash(tint).child(self.action_bar(l.context_uri.clone(), follow, cx)).child(
 					div()
-						.max_w(px(672.))
-						.h(px(240.))
-						.rounded(px(8.))
-						.p_6()
+						.px_6()
 						.flex()
 						.flex_col()
-						.justify_end()
 						.gap_2()
-						.bg(gpui_kit::linear_gradient(
-							180.,
-							gpui_kit::linear_color_stop(theme::alpha(gpui_kit::rgb(self.lib.color_of(c)), 0.6), 0.),
-							gpui_kit::linear_color_stop(theme::raised(), 1.),
-						))
-						.child(
-							div()
-								.text_size(px(16.))
-								.font_weight(FontWeight::BOLD)
-								.child(format!("{} monthly listeners", grouped(u64::from(listeners)))),
-						)
-						.child(div().text_size(px(16.)).text_color(theme::subdued()).line_clamp(3).child(about)),
+						.child(section_title("Popular"))
+						.when(l.tracks.is_empty() && !l.popular_loaded, |s| s.child(div().h(px(5. * 56.)).text_color(theme::subdued()).child("Loading…")))
+						.children(popular)
+						.when(more_than, |s| {
+							s.child(
+								div()
+									.id("see-more")
+									.pl(px(16.))
+									.pt_2()
+									.text_size(px(14.))
+									.font_weight(FontWeight::BOLD)
+									.text_color(theme::subdued())
+									.hover(|s| s.text_color(theme::text()))
+									.cursor_pointer()
+									.on_click(cx.listener(|this, _, _, cx| this.send(Msg::ToggleShelf("popular"), cx)))
+									.child(if open { "Show less" } else { "See more" }),
+							)
+						}),
 				),
 			)
+			.child(div().px_3().pt_8().flex().flex_col().gap_8().children(shelves))
+			.when_some(about, |s, text| {
+				let img = header_img.as_deref().and_then(|u| self.image(Some(u), 672, cx));
+				s.child(
+					div().px_6().pt_8().pb_10().flex().flex_col().gap_4().child(section_title("About")).child(
+						div()
+							.max_w(px(672.))
+							.rounded(px(8.))
+							.overflow_hidden()
+							.bg(theme::raised())
+							.child(match img {
+								Some(src) => div().h(px(320.)).child(gpui_kit::img(src).size_full()),
+								None => div().h(px(120.)).bg(linear_gradient(180., linear_color_stop(theme::alpha(rgb(tint), 0.6), 0.), linear_color_stop(theme::raised(), 1.))),
+							})
+							.child(
+								div()
+									.p_6()
+									.flex()
+									.flex_col()
+									.gap_2()
+									.when_some(listeners, |s, n| s.child(div().text_size(px(16.)).font_weight(FontWeight::BOLD).child(format!("{} monthly listeners", grouped(n)))))
+									.child(div().text_size(px(16.)).text_color(theme::subdued()).line_clamp(4).child(text)),
+							),
+					),
+				)
+			})
+	}
+
+	/// Cards for `tiles`, ids prefixed with `key`.
+	pub fn cards(&self, key: &'static str, tiles: &[Tile], cx: &mut Context<'_, Self>) -> Vec<gpui_kit::Stateful<Div>> {
+		tiles.iter().enumerate().map(|(i, t)| self.card(gpui_kit::ElementId::NamedInteger(key.into(), i as u64), t, cx)).collect()
 	}
 }
+

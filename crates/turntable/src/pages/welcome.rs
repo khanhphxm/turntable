@@ -9,7 +9,7 @@ use crate::{shell::Shell, theme};
 
 impl Shell {
 	pub fn welcome_page(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-		let waiting = self.signing_in;
+		let waiting = self.st().starting_player();
 		div()
 			.size_full()
 			.flex()
@@ -38,12 +38,10 @@ impl Shell {
 					.cursor_pointer()
 					.hover(|s| s.bg(theme::accent_hover()))
 					.when(waiting, |s| s.opacity(0.6))
-					.on_click(cx.listener(|this, _, _, cx| {
-						this.signing_in = !this.signing_in;
-						cx.notify();
-					}))
+					.on_click(cx.listener(|this, _, _, cx| this.send(turntable_core::Msg::SignIn, cx)))
 					.child(if waiting { "Waiting for your browser…" } else { "Sign in with Spotify" }),
 			)
+			.when_some(self.st().notice.clone(), |s, n| s.child(div().max_w(px(480.)).text_size(px(14.)).text_color(theme::subdued()).child(n)))
 			.when(waiting, |s| {
 				s.child(div().text_size(px(14.)).text_color(theme::subdued()).child("Finish signing in in the browser window that opened, then come back here."))
 			})

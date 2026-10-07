@@ -100,7 +100,7 @@ impl Client {
 	}
 
 	#[expect(clippy::unused_self, reason = "the client is a handle: lookups read as methods of it")]
-	fn call(&self, url: &str, query: &[(&str, &str)]) -> Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+	fn call(&self, url: &str, query: &[(&str, &str)]) -> Result<http::Response<ureq::Body>, ureq::Error> {
 		let span = crate::net::trace::start();
 		let mut req = PROFILE.get(url).header("Accept", "application/json");
 		for (k, v) in query {
@@ -143,7 +143,7 @@ impl Client {
 	}
 }
 
-fn read<T: serde::de::DeserializeOwned>(mut response: ureq::http::Response<ureq::Body>) -> Result<T, String> {
+fn read<T: serde::de::DeserializeOwned>(mut response: http::Response<ureq::Body>) -> Result<T, String> {
 	response.body_mut().with_config().limit(BODY_LIMIT).read_json().map_err(|e| e.to_string())
 }
 

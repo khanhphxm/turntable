@@ -6,3 +6,8 @@ runner = "scripts/run-signed.sh"
 [target.x86_64-apple-darwin]
 runner = "scripts/run-signed.sh"
 
+
+[env]
+# jemalloc (the app's allocator, see crates/turntable/src/main.rs): one arena, no thread caches, and
+# freed pages go back to the OS within a second, so the footprint follows what is in use.
+JEMALLOC_SYS_WITH_MALLOC_CONF = "narenas:1,tcache:false,dirty_decay_ms:1000,muzzy_decay_ms:0"

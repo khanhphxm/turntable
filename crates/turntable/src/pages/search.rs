@@ -1,72 +1,44 @@
-//! Search: genre tiles while the field is empty, else a top result, songs, artists and albums.
+//! Search: a hint while the field is empty, else a top result beside the songs, then artists,
+//! albums and playlists.
 
 use gpui_kit::{
 	Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _, Styled as _, div,
-	prelude::FluentBuilder as _, px, rgb,
+	prelude::FluentBuilder as _, px,
 };
+use turntable_core::{Route, library::Tile};
 
 use crate::{
-	components::{Column, Row},
-	mock::{Collection, GENRES},
+	components::Column,
 	shell::Shell,
 	theme,
-	widgets::{play_disc, section_title},
+	widgets::{Icon, icon, play_disc, section_title},
 };
+
+/// Songs shown beside the top result.
+const SONGS: usize = 4;
 
 impl Shell {
 	pub fn search_page(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
 		let page = div().id("search-page").size_full().overflow_y_scroll().px_6().pt_4().pb_8().flex().flex_col().gap_8();
-		if self.query.is_empty() {
-			return page.child(section_title("Browse all")).child(div().grid().grid_cols(4).gap_6().children(
-				GENRES.iter().enumerate().map(|(i, (name, color))| {
-					div()
-						.id(("genre", i))
-						.relative()
-						.h(px(180.))
-						.rounded(px(8.))
-						.overflow_hidden()
-						.bg(rgb(*color))
-						.cursor_pointer()
-						.p_4()
-						.text_size(px(24.))
-						.font_weight(FontWeight::BOLD)
-						.child(*name)
-						// A tilted cover in the corner, like Spotify's tiles.
-						.child(
-							div()
-								.absolute()
-								.right(px(-16.))
-								.bottom(px(-8.))
-								.size(px(100.))
-								.rounded(px(4.))
-								.bg(theme::alpha(theme::base(), 0.25))
-								.shadow_lg(),
-						)
-				}),
-			));
-		}
-		let q = self.query.to_lowercase();
-		let tracks: Vec<usize> = self
-			.lib
-			.tracks
-			.iter()
-			.enumerate()
-			.filter(|(_, t)| t.title.to_lowercase().contains(&q) || self.lib.artist_name(t.artist).to_lowercase().contains(&q))
-			.map(|(i, _)| i)
-			.take(4)
-			.collect();
-		let artists: Vec<usize> =
-			self.lib.artists.iter().enumerate().filter(|(_, a)| a.name.to_lowercase().contains(&q)).map(|(i, _)| i).collect();
-		let albums: Vec<usize> = self
-			.lib
-			.albums
-			.iter()
-			.enumerate()
-			.filter(|(_, a)| a.name.to_lowercase().contains(&q) || self.lib.artist_name(a.artist).to_lowercase().contains(&q))
-			.map(|(i, _)| i)
-			.collect();
-		let top = artists.first().map(|&a| Collection::Artist(a)).or_else(|| albums.first().map(|&a| Collection::Album(a)));
-		if tracks.is_empty() && top.is_none() {
+		let query = self.st().library.query.clone();
+		let Some(results) = self.st().library.search.clone().filter(|_| !query.is_empty()) else {
+			return page.child(
+				div()
+					.pt_16()
+					.flex()
+					.flex_col()
+					.items_center()
+					.gap_3()
+					.child(icon(Icon::Search, px(48.), theme::subdued()))
+					.child(div().text_size(px(24.)).font_weight(FontWeight::BOLD).child("Search Spotify"))
+					.child(div().text_size(px(16.)).text_color(theme::subdued()).child("Songs, artists, albums and playlists. ⌘K searches from anywhere.")),
+			);
+		};
+		let artists: Vec<Tile> = results.artists.items.iter().map(Tile::artist).collect();
+		let albums: Vec<Tile> = results.albums.items.iter().map(Tile::album).collect();
+		let playlists: Vec<Tile> = results.playlists.items.iter().map(Tile::playlist).collect();
+		let top = artists.first().or(albums.first()).or(playlists.first()).cloned();
+		if results.tracks.items.is_empty() && top.is_none() {
 			return page.child(
 				div()
 					.pt_16()
@@ -74,69 +46,41 @@ impl Shell {
 					.flex_col()
 					.items_center()
 					.gap_2()
-					.child(div().text_size(px(24.)).font_weight(FontWeight::BOLD).child(format!("No results found for \"{}\"", self.query)))
-					.child(
-						div()
-							.text_size(px(16.))
-							.text_color(theme::subdued())
-							.child("Check the spelling, or try fewer or different keywords."),
-					),
+					.child(div().text_size(px(24.)).font_weight(FontWeight::BOLD).child(format!("No results found for \"{query}\"")))
+					.child(div().text_size(px(16.)).text_color(theme::subdued()).child("Check the spelling, or try fewer or different keywords.")),
 			);
 		}
 		// Top result beside the songs when there's room, above them when not.
 		let wide = self.main_w >= 900.;
+		let songs: Vec<_> = results.tracks.items.iter().take(SONGS).enumerate().map(|(i, t)| self.track_row(i, t, Column::None, None, true, cx)).collect();
+		let mut shelves = Vec::new();
+		for (key, title, tiles) in [("s-artists", "Artists", &artists), ("s-albums", "Albums", &albums), ("s-playlists", "Playlists", &playlists)] {
+			if !tiles.is_empty() {
+				let cards = self.cards(key, tiles, cx);
+				shelves.push(div().mx(px(-12.)).child(self.shelf(title, cards)));
+			}
+		}
 		page.child(
 			div()
 				.flex()
 				.when(!wide, |s| s.flex_col())
 				.gap_6()
-				.when_some(top, |s, c| {
-					s.child(
-						div()
-							.when(wide, |s| s.w(px(420.)).flex_none())
-							.flex()
-							.flex_col()
-							.gap_2()
-							.child(section_title("Top result"))
-							.child(self.top_result(c, cx)),
-					)
+				.when_some(top, |s, t| {
+					s.child(div().when(wide, |s| s.w(px(420.)).flex_none()).flex().flex_col().gap_2().child(section_title("Top result")).child(self.top_result(&t, cx)))
 				})
-				.child(div().flex_1().min_w_0().flex().flex_col().gap_2().child(section_title("Songs")).children(
-					tracks.iter().enumerate().map(|(key, &track)| {
-						// A song found by search plays from its album.
-						let album = self.lib.tracks.get(track).map_or(0, |t| t.album);
-						let pos = self.lib.albums.get(album).and_then(|a| a.tracks.iter().position(|&t| t == track)).unwrap_or(0);
-						self.track_row(Row { key, from: Collection::Album(album), pos, track, column: Column::None, cover: true }, cx)
-					}),
-				)),
+				.when(!songs.is_empty(), |s| s.child(div().flex_1().min_w_0().flex().flex_col().gap_2().child(section_title("Songs")).children(songs))),
 		)
-		.when(!artists.is_empty(), |s| {
-			let cards = artists.iter().map(|&a| self.card(("s-artist", a), Collection::Artist(a), "Artist", cx)).collect();
-			s.child(div().mx(px(-12.)).child(self.shelf("Artists", cards)))
-		})
-		.when(!albums.is_empty(), |s| {
-			let cards = albums
-				.iter()
-				.map(|&a| {
-					let sub =
-						self.lib.albums.get(a).map_or(String::new(), |al| format!("{} • {}", al.year, self.lib.artist_name(al.artist)));
-					self.card(("s-album", a), Collection::Album(a), sub, cx)
-				})
-				.collect();
-			s.child(div().mx(px(-12.)).child(self.shelf("Albums", cards)))
-		})
+		.children(shelves)
 	}
 
-	fn top_result(&self, c: Collection, cx: &mut Context<'_, Self>) -> impl IntoElement {
-		let playing = self.playing && self.now.is_some_and(|n| n.from == c);
-		let kind = match c {
-			Collection::Artist(_) => "Artist".to_owned(),
-			Collection::Album(a) => {
-				self.lib.albums.get(a).map_or(String::new(), |al| format!("Album • {}", self.lib.artist_name(al.artist)))
-			},
-			_ => "Playlist".to_owned(),
+	fn top_result(&self, t: &Tile, cx: &mut Context<'_, Self>) -> impl IntoElement {
+		let playing = self.playing_context(t.play.as_deref());
+		let route = t.route.clone();
+		let play = t.play.clone();
+		let kind = match t.route {
+			Route::Artist(_) => "Artist".to_owned(),
+			_ => t.sub.clone(),
 		};
-		let route = c.route();
 		div()
 			.id("top-result")
 			.group("top-result")
@@ -150,31 +94,23 @@ impl Shell {
 			.bg(theme::raised())
 			.hover(|s| s.bg(theme::raised_hover()))
 			.cursor_pointer()
-			.on_click(cx.listener(move |this, _, _, cx| this.open(route, cx)))
-			.child(self.art(c, px(92.)).shadow_lg())
+			.on_click(cx.listener(move |this, _, _, cx| this.go(route.clone(), cx)))
+			.child(self.art(&t.route, t.image.as_deref(), px(92.), cx).shadow_lg())
 			.child(
 				div()
 					.flex()
 					.flex_col()
 					.gap_1()
-					.child(div().text_size(px(32.)).font_weight(FontWeight::BOLD).truncate().child(self.lib.name_of(c).to_owned()))
+					.child(div().text_size(px(32.)).font_weight(FontWeight::BOLD).truncate().child(t.title.clone()))
 					.child(div().text_size(px(14.)).text_color(theme::subdued()).child(kind)),
 			)
-			.child(
-				div()
-					.absolute()
-					.right(px(20.))
-					.bottom(px(20.))
-					.when(!playing, |s| s.invisible().group_hover("top-result", |s| s.visible()))
-					.child(play_disc(
-						"top-play",
-						px(48.),
-						playing,
-						cx.listener(move |this, _, _, cx| {
-							cx.stop_propagation();
-							this.play_collection(c, cx);
-						}),
-					)),
-			)
+			.when_some(play, |s, uri| {
+				s.child(div().absolute().right(px(20.)).bottom(px(20.)).when(!playing, |s| s.invisible().group_hover("top-result", |s| s.visible())).child(
+					play_disc("top-play", px(48.), playing, cx.listener(move |this, _, _, cx| {
+						cx.stop_propagation();
+						this.play_context(&uri, cx);
+					})),
+				))
+			})
 	}
 }

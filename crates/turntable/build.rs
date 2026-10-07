@@ -2,7 +2,6 @@
 
 use std::{env, error::Error, fs, path::PathBuf};
 
-#[expect(clippy::print_stdout, reason = "Cargo build-script directives use stdout")]
 fn main() -> Result<(), Box<dyn Error>> {
 	println!("cargo:rerun-if-env-changed=TURNTABLE_ICON");
 	if env::var("CARGO_CFG_TARGET_OS")? != "windows" {

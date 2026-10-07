@@ -11,8 +11,17 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 gpui-kit = "0.7.3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+jpeg-decoder = { version = "0.3.2", default-features = false }
+smol = "2"
+turntable-core = { path = "../turntable-core" }
+
+# jemalloc hands freed pages back (the footprint follows what is in use, not the peak); not on
+# Windows, where it doesn't build with MSVC.
+[target.'cfg(not(windows))'.dependencies]
+tikv-jemallocator = "0.7"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"

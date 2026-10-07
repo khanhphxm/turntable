@@ -6,8 +6,10 @@ use gpui_kit::{
 	Styled as _, component::input::Input, div, prelude::FluentBuilder as _, px,
 };
 
+use turntable_core::Route;
+
 use crate::{
-	shell::{Route, Shell},
+	shell::{Page, Shell},
 	theme,
 	widgets::{Icon, icon, round_button},
 };
@@ -18,6 +20,8 @@ const TRAFFIC_LIGHTS_W: f32 = 80.;
 impl Shell {
 	pub fn top_bar(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
 		let can_back = !self.back.is_empty();
+		// The account's initial in the avatar.
+		let initial: String = self.st().library.me.as_ref().and_then(|me| me.display_name.as_deref().or(Some(me.id.as_str()))).and_then(|n| n.chars().next()).map(|c| c.to_uppercase().collect()).unwrap_or_default();
 		let can_forward = !self.forward.is_empty();
 		div()
 			.relative()
@@ -66,8 +70,8 @@ impl Shell {
 						Icon::Home,
 						px(48.),
 						px(24.),
-						self.route == Route::Home,
-						cx.listener(|this, _, _, cx| this.open(Route::Home, cx)),
+						self.page == Page::Core(Route::Home),
+						cx.listener(|this, _, _, cx| this.go(Route::Home, cx)),
 					))
 					.child(self.search_field(cx)),
 			)
@@ -83,16 +87,16 @@ impl Shell {
 						Icon::Sliders,
 						px(32.),
 						px(16.),
-						self.route == Route::Equalizer,
-						cx.listener(|this, _, _, cx| this.open(Route::Equalizer, cx)),
+						self.page == Page::Equalizer,
+						cx.listener(|this, _, _, cx| this.open(Page::Equalizer, cx)),
 					))
 					.child(round_button(
 						"settings",
 						Icon::Gear,
 						px(32.),
 						px(16.),
-						self.route == Route::Settings,
-						cx.listener(|this, _, _, cx| this.open(Route::Settings, cx)),
+						self.page == Page::Settings,
+						cx.listener(|this, _, _, cx| this.open(Page::Settings, cx)),
 					))
 					.child(
 						div().size(px(48.)).flex().items_center().justify_center().rounded_full().bg(theme::raised()).child(
@@ -106,14 +110,14 @@ impl Shell {
 								.text_size(px(14.))
 								.font_weight(gpui_kit::FontWeight::BOLD)
 								.text_color(theme::base())
-								.child("K"),
+								.child(initial),
 						),
 					),
 			)
 	}
 
 	fn search_field(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-		let on = self.route == Route::Search;
+		let on = self.page == Page::Core(Route::Search);
 		div()
 			.id("search")
 			.group("search")
@@ -130,7 +134,7 @@ impl Shell {
 			.hover(|s| s.bg(theme::raised_hover()))
 			.on_click(cx.listener(|this, _, window, cx| {
 				this.search.update(cx, |s, cx| s.focus(window, cx));
-				this.open(Route::Search, cx);
+				this.go(Route::Search, cx);
 			}))
 			.child(icon(Icon::Search, px(24.), if on { theme::text() } else { theme::subdued() }))
 			.child(div().flex_1().text_size(px(16.)).child(Input::new(&self.search).appearance(false).cleanable(true)))

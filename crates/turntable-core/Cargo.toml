@@ -21,13 +21,17 @@ sha2 = { version = "0.10", default-features = false }
 librespot-core = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
 librespot-connect = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
 librespot-metadata = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-protocol = { version = "0.8", default-features = false }
 librespot-oauth = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
 librespot-playback = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+http = "1"
+protobuf = "3.7"
+smallvec = "1"
+tempfile = "3"
+thiserror = "2"
 
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 
 # The library app's refresh token in the OS credential store: macOS Keychain, Linux Secret
 # Service (blocking libdbus, no async runtime) or Windows Credential Manager.
@@ -35,6 +39,7 @@ libc = "0.2"
 keyring = { version = "3.6", default-features = false, features = ["sync-secret-service", "crypto-rust", "vendored"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
 keyring = { version = "3.6", default-features = false, features = ["apple-native"] }
 
 [target.'cfg(windows)'.dependencies]

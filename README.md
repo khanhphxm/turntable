@@ -1,141 +1,176 @@
 # turntable
 
-A standalone native Spotify desktop app built with GPUI, with an in-process
-[librespot](https://github.com/librespot-org/librespot) player. The core supports
-macOS, Linux and Windows; playback needs Spotify Premium. No browser engine or
-terminal host is involved.
+A lightweight, native Spotify desktop player for macOS, Linux and Windows.
+Built with [GPUI](https://www.gpui.rs/) and an in-process
+[librespot](https://github.com/librespot-org/librespot) player—not a browser wrapper.
+**Spotify Premium is required for playback.**
 
-## Workspace
+<!-- screenshot: home -->
 
-- `crates/turntable`: the GPUI desktop application.
-- `crates/turntable-core`: UI-agnostic playback, DSP, Spotify sign-in/Web API,
-  library/cover workers, lyrics/external sources, and Elm-style application state.
-- `old/tern`: the retired terminal UI, input/rendering/signal helpers, binary entry
-  point, plugin, release automation and historical README. Reference only: none
-  of it is a workspace member or compiled.
+## Features
 
-The core retains Home/search/library navigation, playlists, queue editing,
-Spotify Connect controls, synced lyrics, a 10-band EQ, normalization, mono,
-balance, sleep timer and preferences. The host owns window layout, input,
-rendering, image decoding, OS signals and allocator policy.
+- Browse Home, your library, search results, artists, albums and playlists.
+- Play on this computer or use Spotify Connect devices.
+- View and manage the playback queue.
+- Follow synced lyrics from [LRCLIB](https://lrclib.net/), when available.
+- Shape the sound with a 10-band equalizer and presets.
+- Loudness normalization with Off, Quiet, Normal and Loud settings; optional mono audio.
+- Native media keys and Now Playing integration: macOS Control Center,
+  Linux MPRIS and Windows system media controls.
+- A **✓** marks songs already in Liked Songs or one of your playlists.
+- Optional artist biographies from Wikipedia.
 
-## Build and run
+<!-- screenshot: album -->
+<!-- screenshot: lyrics -->
+<!-- screenshot: equalizer -->
 
-Use Rust stable (edition 2024) and the platform's C build tools:
+## Install
 
-```sh
-cargo build -p turntable-core
-cargo run -p turntable
-```
+### Homebrew
 
-On macOS, `scripts/codesign.sh <binary>` signs the binary for stable Keychain
-access. Cargo's macOS runner uses `scripts/run-signed.sh` automatically.
-
-macOS audio uses CoreAudio and supports choosing an output device. Linux uses
-`pw-cat` (`pipewire-bin`), then `pacat` (`pulseaudio-utils`), then `aplay`
-(`alsa-utils`) if the preceding executable is absent; install at least one.
-Windows uses shared-mode, event-driven WASAPI on the default render endpoint.
-EQ and the output stage run in the core on every platform. Idle output stops
-and resumes when PCM arrives.
-
-## Sign-in and storage
-
-1. Sign in to play using your Spotify Premium account in the browser.
-2. Create a Spotify application in the
-   [developer dashboard](https://developer.spotify.com/dashboard), enable Web
-   API, register `http://127.0.0.1:8898/callback`, and provide its Client ID.
-3. Connect the library by signing in with that application.
-
-The default Spotify Connect name is **turntable**. Config/state is
-`$XDG_CONFIG_HOME/turntable` or `~/.config/turntable` on macOS/Linux, and
-`%APPDATA%\turntable` on Windows. Cache is `~/Library/Caches/turntable` on macOS,
-`$XDG_CACHE_HOME/turntable` or `~/.cache/turntable` on Linux, and
-`%LOCALAPPDATA%\turntable` on Windows. The Web API token uses Keychain, Secret
-Service or Credential Manager with service `turntable`.
-
-`TURNTABLE_HOME=<dir>` uses `<dir>/config` and `<dir>/cache` and keeps the Web API
-token in a file rather than an OS credential store. This is useful for isolated
-tests. `TURNTABLE_DEBUG` enables the temporary `turntable-debug.log`;
-`TURNTABLE_TRACE` enables request tracing (see `net::trace`). This is a clean
-cutover: previous application directories and credential-store entries are not
-migrated, read, signed out or deleted. Sign in once for the new app.
-
-Account-scoped library snapshots cache the profile, playlists, Home and up to
-eight first-page listings (2 MiB total). The saved identity gates snapshot
-loading; cached responses arrive before network requests, followed by fresh
-responses. Playback sign-out and library Disconnect delete snapshots. A new
-browser authorization cannot reuse a previous account's data. Covers retain a
-separate bounded disk cache. Queue edits restart the current song once with the
-edited list; other devices can still control playback through Spotify Connect.
-
-Outside requests go to Spotify, LRCLIB (song title/artist/length) and
-Wikipedia/Wikidata (artist metadata); optional sources can be disabled in
-preferences.
-
-## Hosting the core
-
-```rust,no_run
-use std::{sync::Arc, time::Instant};
-use turntable_core::{Controller, Msg, Options, Paths};
-
-fn start(wake: Arc<dyn Fn() + Send + Sync>) -> Result<Controller, String> {
-    let paths = Paths::resolve().map_err(|error| error.to_string())?;
-    Controller::new(&paths, Options::default(), wake)
-}
-
-fn host_iteration(controller: &mut Controller, action: Option<Msg>) -> (bool, Option<Instant>) {
-    let mut redraw = action.is_some_and(|msg| controller.dispatch(msg));
-    redraw |= controller.pump();
-    // Render controller.state() if redraw; State::image records missing URLs.
-    // Pump after rendering to start those cover fetches, then schedule this deadline.
-    (redraw, controller.deadline())
-}
-```
-
-The host calls `pump()` on worker wakes and deadlines. `set_visible(bool)` maps
-focus/minimize state and suppresses remote playback polling while hidden.
-`state()` exposes host-neutral models; `Msg::Seek(u64)` uses milliseconds and
-`Msg::Volume(u8)` uses percent. `Msg::Edit` ranges are UTF-16 code units.
-`State::image` returns `Option<&Arc<Cover>>`; `Cover` contains encoded bytes and
-MIME, not a GUI image. Decode once and cache by `Arc::as_ptr` while retaining the
-Arc: a loaded URL's identity is stable for the controller's lifetime. Lyric
-changes invalidate the host at the next line's deadline; the host scrolls using
-`State::lyric_line()`. Dropping the controller stops client, audio and engine in
-order without signing out.
-
-## Development
+The packaging targets the `khanhphxm/tap` tap:
 
 ```sh
+# macOS (Apple Silicon)
+brew install --cask khanhphxm/tap/turntable
+
+# Linux (x86_64 or aarch64)
+brew install khanhphxm/tap/turntable
+```
+
+**Distribution status:** the repository currently contains cask/formula templates,
+not proof of a published tap package. These commands require the filled-in tap
+entries and publicly accessible release assets. See
+[packaging](packaging/README.md#homebrew-tap-templates) for publication details.
+
+### Release archives
+
+When published, download the archive for your platform from
+[GitHub Releases](https://github.com/khanhphxm/turntable/releases):
+
+- **macOS arm64:** extract the ZIP and move `turntable.app` to Applications.
+  Ad-hoc signed builds are not Gatekeeper-trusted; trusted distribution requires
+  Developer ID signing and notarization.
+- **Linux x86_64 / aarch64:** extract the tarball and follow its `INSTALL.md` or
+  [the Linux installation guide](packaging/INSTALL-linux.md). Packaged binaries
+  target Ubuntu 24.04 / glibc 2.39 and need a graphical session and Vulkan driver.
+- **Windows x86_64:** extract the ZIP and follow
+  [the Windows installation guide](packaging/INSTALL-windows.md).
+
+Archive contents, signing and bundling instructions are documented in
+[packaging/](packaging/README.md).
+
+## Build from source
+
+Use **Rust stable 1.90 or newer** (the workspace's `rust-version` in
+[`Cargo.toml`](Cargo.toml)), plus your platform's native C/C++ build tools.
+
+```sh
+git clone https://github.com/khanhphxm/turntable.git
+cd turntable
+cargo build --release -p turntable
+cargo run --release -p turntable
+```
+
+On Linux, install the platform libraries listed in
+[packaging/INSTALL-linux.md](packaging/INSTALL-linux.md). Building also needs
+corresponding development headers, Clang/libclang, CMake, Ninja and pkg-config;
+see [packaging](packaging/README.md#linux). Audio uses `pw-cat`, falling back to
+`pacat`, then `aplay` when the preceding executable is absent: install at least
+one (`pipewire-bin`, `pulseaudio-utils` or `alsa-utils` on Debian/Ubuntu).
+
+On Debian/Ubuntu, source builds also need development packages including
+`libfontconfig1-dev`, `libfreetype6-dev`, `libxkbcommon-dev`,
+`libxkbcommon-x11-dev`, `libdbus-1-dev`, `libssl-dev` and `libwayland-dev`.
+
+On macOS, Cargo's runner signs the executable automatically for stable Keychain
+access. To package an application bundle, use the scripts in
+[packaging/](packaging/README.md). Windows builds use the native MSVC toolchain.
+
+The workspace separates the GPUI application (`crates/turntable`) from the
+UI-independent playback, DSP and library engine (`crates/turntable-core`).
+The retired terminal application in `old/tern` is not part of the build.
+
+For development, build and lint both workspace crates:
+
+```sh
+cargo build --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 cargo +nightly fmt --all
-cargo build -p turntable-core
-cargo test -p turntable-core
-cargo clippy -p turntable-core --all-targets -- -D warnings
-scripts/lint.sh
 ```
 
-Debug builds optimize dependencies at level 2 while keeping workspace crates quick
-to compile. Keep the lockfile's `vergen 9.0.6` pin when refreshing dependencies:
-`vergen 9.1.0` uses an incompatible `vergen-lib` version for librespot 0.8's
-`vergen-gitcl 1.0.8` build metadata. After a full lockfile regeneration, restore it
-with `cargo update -p vergen --precise 9.0.6`.
-
-Cross-check the core's Windows path from macOS using LLVM/lld and `cargo-xwin`:
+To cross-check Windows compilation from macOS with LLVM/lld and `cargo-xwin`:
 
 ```sh
 PATH=/opt/homebrew/opt/llvm/bin:/opt/homebrew/opt/lld/bin:$PATH \
 CARGO_TARGET_DIR=target/win \
-cargo xwin check -p turntable-core --target x86_64-pc-windows-msvc
+cargo xwin check --workspace --all-targets --target x86_64-pc-windows-msvc
 ```
 
-Cross-compilation does not exercise WASAPI, credential storage or browser
-redirects; those require a Windows host. Unit tests do not use the user's
-credentials or live playback. The core has no global allocator or
-allocator-specific reclamation; allocator choice belongs to the desktop binary.
+Compilation checks do not exercise native audio, credential storage, browser
+sign-in or media controls; those require testing on the target platform.
 
-`scripts/bench/play.sh` controls a Connect device using an explicitly supplied
-`SPOTIFY_ACCESS_TOKEN`; playback commands can interrupt another device.
-`scripts/bench/measure.sh` measures a supplied macOS process without controlling
-playback. Neither helper reads the app's saved sign-in.
+## Privacy and external services
 
-turntable is independent of Spotify. Spotify is a trademark of Spotify AB.
+turntable needs network access to Spotify for sign-in, playback, Spotify Connect,
+library browsing and artwork. It also uses optional external sources:
+
+| Service | What is requested | Settings control |
+| --- | --- | --- |
+| LRCLIB | Lyrics matched using song title, artist and duration | Sources → Lyrics |
+| Wikidata / Wikipedia | Artist identification and biography text | Sources → Artist bios |
+| Spotify's web player | Additional artist pages, listeners and play counts | Sources → Spotify's web player |
+
+All three optional sources are enabled by default and can be disabled in
+**Settings → Sources**. Disabling them does not disable Spotify playback or
+library requests. As with other direct network requests, these services receive
+your network address.
+
+Settings and account-scoped library snapshots are stored locally. The Web API
+token uses the OS credential store (Keychain, Secret Service or Credential
+Manager); covers use a separate disk cache. Configuration lives under
+`$XDG_CONFIG_HOME/turntable` or `~/.config/turntable` on macOS/Linux, and
+`%APPDATA%\turntable` on Windows. Caches live under
+`~/Library/Caches/turntable` on macOS, `$XDG_CACHE_HOME/turntable` or
+`~/.cache/turntable` on Linux, and `%LOCALAPPDATA%\turntable` on Windows.
+
+## Memory goals
+
+The goal is a small native player, around **50 MB** rather than the footprint of
+a browser-based desktop app. The current reference observation is approximately
+**43 MB after settling, without playback**. This is not a playback measurement,
+a startup-peak measurement or a guarantee across platforms and libraries.
+Artwork, navigation and playback can change memory use. This number will be
+updated as representative measurements become available.
+
+## FAQ
+
+**Do I need Spotify Premium?**  
+Yes. Local playback through librespot requires a Premium account.
+
+**Does Spotify's desktop app need to be running?**  
+No. turntable includes its own player. Spotify Connect also lets you control
+other available devices. Starting playback here can transfer playback away from
+another device using the same account.
+
+**Why are lyrics missing or not synced?**  
+LRCLIB does not have every recording. turntable uses synced lyrics when found,
+can show plain lyrics instead, and may find no matching lyrics. Check that
+Settings → Sources → Lyrics is enabled.
+
+**What does the ✓ beside a song mean?**  
+It means the song is in Liked Songs or one of your playlists, not that it has
+been downloaded for offline playback.
+
+**Why does a Linux archive not run on my distribution?**  
+Release archives target glibc 2.39 and require the graphical, GPU and audio
+libraries in the [Linux guide](packaging/INSTALL-linux.md). Build from source
+on older systems rather than assuming the packaged executable is compatible.
+
+**Is this an official Spotify application?**  
+No. turntable is independent and is not affiliated with or endorsed by Spotify.
+Spotify is a trademark of Spotify AB.
+
+## License
+
 [MIT](LICENSE).

@@ -77,3 +77,12 @@ pub fn darken(c: Rgba, amount: f32) -> Rgba {
 	let k = 1. - amount;
 	Rgba { r: c.r * k, g: c.g * k, b: c.b * k, a: c.a }
 }
+
+/// [`raised`] as a number, for artwork placeholders.
+pub const RAISED: u32 = 0x1f1f1f;
+
+/// "#1db954" or "1db954" → 0x1db954.
+pub fn parse_hex(s: &str) -> Option<u32> {
+	let h = s.trim_start_matches('#');
+	if h.len() == 6 { u32::from_str_radix(h, 16).ok() } else { None }
+}
