@@ -1,0 +1,65 @@
+name: CI
+
+# Private repository: manual runs only. Enable push/pull_request (and optional
+# push.tags: ['v*']) here once automatic CI/release triggers are wanted.
+on: workflow_dispatch
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: '12.0'
+
+jobs:
+  format:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - run: cargo fmt -p turntable -p turntable-core -- --check
+
+  check:
+    name: Build, test, clippy (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy
+      - name: Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang libclang-dev cmake ninja-build pkg-config \
+            libasound2-dev libpipewire-0.3-dev libdbus-1-dev libssl-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libx11-xcb-dev \
+            libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-randr0-dev libxcb-render0-dev \
+            libxcb-xkb-dev libxrandr-dev libxi-dev libxcursor-dev libxinerama-dev libxrender-dev \
+            libxfixes-dev libegl1-mesa-dev libfontconfig1-dev libfreetype6-dev libvulkan-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build both crates
+        run: cargo build --locked -p turntable -p turntable-core --target ${{ matrix.target }}
+      - name: Test both crates
+        run: cargo test --locked -p turntable -p turntable-core --all-targets --target ${{ matrix.target }}
+      - name: Clippy both crates
+        run: cargo clippy --locked -p turntable -p turntable-core --all-targets --target ${{ matrix.target }} -- -D warnings

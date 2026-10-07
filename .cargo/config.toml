@@ -1,0 +1,13 @@
+# Sign macOS executables before `cargo run` / `cargo test` for stable Keychain access.
+# The runner prefers a Developer ID identity when one is available.
+[target.aarch64-apple-darwin]
+runner = "scripts/run-signed.sh"
+
+[target.x86_64-apple-darwin]
+runner = "scripts/run-signed.sh"
+
+# The allocator (crates/terntable/src/main.rs): one arena, no thread caches (a few threads that
+# allocate little), dirty pages returned a second after they go unused and at once on
+# `net::trim_heap`. Baked in at build time.
+[env]
+JEMALLOC_SYS_WITH_MALLOC_CONF = "narenas:1,tcache:false,dirty_decay_ms:1000,muzzy_decay_ms:0"

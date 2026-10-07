@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=turntable
+Comment=Lightweight native Spotify player
+Exec=turntable
+TryExec=turntable
+Icon=turntable
+Terminal=false
+Categories=AudioVideo;Audio;Music;
+StartupNotify=true

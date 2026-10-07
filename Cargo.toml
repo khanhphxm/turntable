@@ -1,0 +1,137 @@
+[workspace]
+resolver = "3"
+members = ["crates/terntable"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/khanhphxm/terntable"
+
+# Lints for every crate (`[lints] workspace = true` in each manifest). `scripts/lint.sh` runs clippy
+# with `-D warnings`, so "warn" here means "fails the check" there, while an editor shows a squiggle.
+# To silence a lint at one site use `#[expect(lint, reason = "...")]`, never `#[allow]`: the
+# expectation fails when the lint stops firing, so suppressions cannot outlive their reason.
+# What is deliberately OFF, and why: arithmetic_side_effects, float_arithmetic, as_conversions and
+# default_numeric_fallback (DSP and layout maths would drown in them), cast_precision_loss (usize
+# to f32 for display), unreachable_pub (a binary crate has no public API; dead_code already finds
+# unused items), let_underscore_must_use (best-effort cleanup is common; `.ok();` and
+# `map_err(|_|` are denied instead), missing_docs_in_private_items, min_ident_chars,
+# question_mark_used, implicit_return, single_call_fn, shadow_* and the other style-only lints.
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+unused_crate_dependencies = "warn"
+unused_qualifications = "warn"
+unused_lifetimes = "warn"
+redundant_lifetimes = "warn"
+unused_macro_rules = "warn"
+unused_import_braces = "warn"
+redundant_imports = "warn"
+unit_bindings = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+elided_lifetimes_in_paths = "warn"
+
+[workspace.lints.clippy]
+# Nothing in the player aborts on a surprising value: handle it or pass it up.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+exit = "deny"
+indexing_slicing = "warn"
+string_slice = "deny"
+
+# Errors are handled or passed up, never dropped on the floor.
+unused_result_ok = "deny"
+map_err_ignore = "deny"
+let_underscore_future = "deny"
+let_underscore_lock = "deny"
+mem_forget = "deny"
+
+# Leftovers. stdout and stderr are the Tern pane (a stray line corrupts the TUI): only CLI
+# entry points and the log sink may print.
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+
+# A suppression says why, and goes away when it stops being needed (`#[expect]`, not `#[allow]`).
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+
+# `unsafe` is explained where it is used.
+undocumented_unsafe_blocks = "deny"
+unnecessary_safety_comment = "deny"
+unnecessary_safety_doc = "deny"
+missing_safety_doc = "deny"
+borrow_as_ptr = "warn"
+ptr_as_ptr = "warn"
+ref_as_ptr = "warn"
+
+tests_outside_test_module = "deny"
+
+# `as` that can change a value: use From/TryFrom/clamp, or `#[expect(..., reason = "...")]`.
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+cast_possible_wrap = "warn"
+cast_lossless = "warn"
+manual_midpoint = "warn"
+
+# Sloppy structure.
+too_many_lines = "warn"
+cognitive_complexity = "warn"
+fn_params_excessive_bools = "warn"
+needless_pass_by_value = "warn"
+trivially_copy_pass_by_ref = "warn"
+unnecessary_wraps = "warn"
+unused_self = "warn"
+items_after_statements = "warn"
+semicolon_if_nothing_returned = "warn"
+manual_let_else = "warn"
+match_same_arms = "warn"
+match_wildcard_for_single_variants = "warn"
+needless_continue = "warn"
+redundant_else = "warn"
+ref_option = "warn"
+unnested_or_patterns = "warn"
+manual_assert = "warn"
+ignored_unit_patterns = "warn"
+wildcard_imports = "warn"
+enum_glob_use = "warn"
+mut_mut = "warn"
+
+# Waste.
+redundant_clone = "warn"
+needless_collect = "warn"
+collection_is_never_read = "warn"
+implicit_clone = "warn"
+inefficient_to_string = "warn"
+map_unwrap_or = "warn"
+needless_for_each = "warn"
+explicit_iter_loop = "warn"
+explicit_into_iter_loop = "warn"
+cloned_instead_of_copied = "warn"
+flat_map_option = "warn"
+stable_sort_primitive = "warn"
+large_types_passed_by_value = "warn"
+unnecessary_box_returns = "warn"
+range_plus_one = "warn"
+unreadable_literal = "warn"
+uninlined_format_args = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[patch.crates-io]
+# Spirc with queue access (add to queue, upcoming tracks, context) for the in-process player.
+librespot-connect = { path = "vendor/librespot-connect" }
+# One-worker runtime for the decoder thread (upstream starts one worker per core).
+librespot-playback = { path = "vendor/librespot-playback" }

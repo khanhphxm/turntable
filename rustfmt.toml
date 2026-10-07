@@ -1,0 +1,15 @@
+# Formatting for the whole workspace: tabs for indentation, spaces for alignment (struct fields and
+# their initialisers line up), one import block per crate, std / external / crate groups.
+#
+# Struct field alignment and import grouping are unstable rustfmt options, so this needs a nightly
+# rustfmt: `cargo +nightly fmt` (`scripts/lint.sh fmt` runs it with `--check`). Stable rustfmt ignores
+# the unstable lines and would undo the alignment.
+unstable_features = true
+hard_tabs = true
+max_width = 140
+use_small_heuristics = "Max"
+match_block_trailing_comma = true
+overflow_delimited_expr = true
+struct_field_align_threshold = 40
+group_imports = "StdExternalCrate"
+imports_granularity = "Crate"
