@@ -45,10 +45,15 @@ use windows::Backend;
 pub enum Command {
 	Play,
 	Pause,
+	#[cfg_attr(windows, expect(dead_code, reason = "Windows media buttons emit separate Play and Pause commands"))]
 	Toggle,
 	Next,
 	Previous,
 	/// A signed offset from the current position, in milliseconds (MPRIS Seek).
+	#[cfg_attr(
+		not(target_os = "linux"),
+		expect(dead_code, reason = "MPRIS emits relative seeks; native macOS and Windows scrubbers emit SetPosition")
+	)]
 	Seek(i64),
 	/// An absolute position in milliseconds (native scrubbers / MPRIS SetPosition).
 	SetPosition(u64),

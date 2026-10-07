@@ -39,7 +39,9 @@ impl Shell {
 	pub fn right_panel(&mut self, side: Side, cx: &mut Context<'_, Self>) -> impl IntoElement {
 		let st = self.st();
 		let title: String = match side {
-			Side::Core(Panel::NowPlaying) => [st.context.name(), st.item.parent_name()].into_iter().find(|n| !n.is_empty()).unwrap_or("Now playing").to_owned(),
+			Side::Core(Panel::NowPlaying) => {
+				[st.context.name(), st.item.parent_name()].into_iter().find(|n| !n.is_empty()).unwrap_or("Now playing").to_owned()
+			},
 			Side::Core(Panel::Lyrics) => "Lyrics".to_owned(),
 			Side::Devices => "Connect to a device".to_owned(),
 			Side::Core(_) => "Queue".to_owned(),
@@ -54,6 +56,7 @@ impl Shell {
 			.w(theme::RIGHT_W)
 			.flex_none()
 			.h_full()
+			.relative()
 			.rounded(theme::RADIUS)
 			.bg(theme::panel())
 			.overflow_hidden()
@@ -69,15 +72,30 @@ impl Shell {
 					.pl_4()
 					.pr_2()
 					.child(div().text_size(px(16.)).font_weight(FontWeight::BOLD).truncate().child(title))
-					.child(icon_button("panel-close", Icon::Close, px(16.), false, cx.listener(move |this, _, _, cx| this.toggle_side(side, cx)))),
+					.child(icon_button(
+						"panel-close",
+						Icon::Close,
+						px(16.),
+						false,
+						cx.listener(move |this, _, _, cx| this.toggle_side(side, cx)),
+					)),
 			)
 			// Lyrics scroll themselves (to follow the sung line); the rest scroll here.
-			.child(div().id(("panel-scroll", self.panel_gen)).flex_1().min_h_0().when(side != Side::Core(Panel::Lyrics), |s| s.overflow_y_scroll()).child(body))
+			.child(
+				div()
+					.id(("panel-scroll", self.panel_gen))
+					.flex_1()
+					.min_h_0()
+					.when(side != Side::Core(Panel::Lyrics), |s| s.overflow_y_scroll())
+					.child(body),
+			)
+			.child(crate::widgets::corner_mask())
 			.with_animation(("panel", self.panel_gen), Animation::new(ENTER).with_easing(ease_out_quint()), |el, d| {
 				el.opacity(d).relative().left(px(32. * (1. - d)))
 			})
 	}
 
+	#[expect(clippy::too_many_lines, reason = "keep the declarative now-playing panel sections together")]
 	fn now_playing_body(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
 		let st = self.st();
 		let item = st.item.clone();
@@ -91,14 +109,20 @@ impl Shell {
 		let next = st.upcoming.first().map(|q| q.item.clone());
 		let big = item.cover(CoverSize::Large).map(str::to_owned);
 		let cover_w = f32::from(theme::RIGHT_W) - 32.;
-		let image = self.image(big.as_deref(), cover_w as u32, cx);
+		#[expect(
+			clippy::cast_possible_truncation,
+			clippy::cast_sign_loss,
+			reason = "the fixed panel width minus padding is positive and bounded to u32 pixels"
+		)]
+		let cover_pixels = cover_w as u32;
+		let image = self.image(big.as_deref(), cover_pixels, cx);
 		let about = artist.map(|a| {
 			let id = artist_id.clone().unwrap_or_default();
 			let photo = overview
 				.as_ref()
 				.and_then(|o| o.header.clone().or(o.avatar.clone()))
 				.or_else(|| pick_image(&a.images, 640).map(|i| i.url.clone()));
-			let photo = self.image(photo.as_deref(), cover_w as u32, cx);
+			let photo = self.image(photo.as_deref(), cover_pixels, cx);
 			let listeners = overview.as_ref().and_then(|o| o.monthly_listeners);
 			let bio = overview.as_ref().and_then(|o| o.biography.clone()).or_else(|| (!a.genres.is_empty()).then(|| a.genres.join(", ")));
 			div()
@@ -114,7 +138,9 @@ impl Shell {
 						.h(px(200.))
 						.bg(theme::raised_hover())
 						.when_some(photo, |s, src| s.child(gpui_kit::img(src).size_full()))
-						.child(div().absolute().top_4().left_4().text_size(px(16.)).font_weight(FontWeight::BOLD).child("About the artist")),
+						.child(
+							div().absolute().top_4().left_4().text_size(px(16.)).font_weight(FontWeight::BOLD).child("About the artist"),
+						),
 				)
 				.child(
 					div()
@@ -122,8 +148,12 @@ impl Shell {
 						.flex()
 						.flex_col()
 						.gap_2()
-						.child(div().text_size(px(16.)).font_weight(FontWeight::BOLD).child(a.name.clone()))
-						.when_some(listeners, |s, n| s.child(div().text_size(px(14.)).text_color(theme::subdued()).child(format!("{} monthly listeners", grouped(n)))))
+						.child(div().text_size(px(16.)).font_weight(FontWeight::BOLD).child(a.name))
+						.when_some(listeners, |s, n| {
+							s.child(
+								div().text_size(px(14.)).text_color(theme::subdued()).child(format!("{} monthly listeners", grouped(n))),
+							)
+						})
 						.when_some(bio, |s, b| s.child(div().text_size(px(14.)).text_color(theme::subdued()).line_clamp(3).child(b))),
 				)
 		});
@@ -148,12 +178,22 @@ impl Shell {
 							.flex_col()
 							.child(div().text_size(px(24.)).font_weight(FontWeight::BOLD).truncate().child(item.name().to_owned()))
 							.child(match &artist_id {
-								Some(id) => self.link("np-artist", item.creators(), Route::Artist(id.clone()), cx).text_size(px(16.)).text_color(theme::subdued()).into_any_element(),
+								Some(id) => self
+									.link("np-artist", item.creators(), Route::Artist(id.clone()), cx)
+									.text_size(px(16.))
+									.text_color(theme::subdued())
+									.into_any_element(),
 								None => div().text_size(px(16.)).text_color(theme::subdued()).child(item.creators()).into_any_element(),
 							}),
 					)
 					.when_some(liked, |s, liked| {
-						s.child(div().id("np-add").cursor_pointer().on_click(cx.listener(|this, _, _, cx| this.send(Msg::ToggleLike, cx))).child(added_badge(liked, px(24.))))
+						s.child(
+							div()
+								.id("np-add")
+								.cursor_pointer()
+								.on_click(cx.listener(|this, _, _, cx| this.send(Msg::ToggleLike, cx)))
+								.child(added_badge(liked, px(24.))),
+						)
 					}),
 			)
 			.children(about)
@@ -189,22 +229,19 @@ impl Shell {
 			.cursor_pointer()
 			.on_click(cx.listener(move |this, _, _, cx| this.send(if current { Msg::TogglePlay } else { Msg::QueueJump(key) }, cx)))
 			.child(
-				div()
-					.relative()
-					.child(cover(self.image(url.as_deref(), 40, cx), theme::RAISED, px(40.), px(4.)))
-					.child(
-						div()
-							.absolute()
-							.inset_0()
-							.rounded(px(4.))
-							.flex()
-							.items_center()
-							.justify_center()
-							.bg(theme::alpha(theme::base(), 0.5))
-							.invisible()
-							.group_hover("queue-row", |s| s.visible())
-							.child(icon(if playing { Icon::Pause } else { Icon::Play }, px(16.), theme::text())),
-					),
+				div().relative().child(cover(self.image(url.as_deref(), 40, cx), theme::RAISED, px(40.), px(4.))).child(
+					div()
+						.absolute()
+						.inset_0()
+						.rounded(px(4.))
+						.flex()
+						.items_center()
+						.justify_center()
+						.bg(theme::alpha(theme::base(), 0.5))
+						.invisible()
+						.group_hover("queue-row", |s| s.visible())
+						.child(icon(if playing { Icon::Pause } else { Icon::Play }, px(16.), theme::text())),
+				),
 			)
 			.child(
 				div()
@@ -237,27 +274,24 @@ impl Shell {
 			.child(self.queue_row(usize::MAX, &item, true, cx))
 			.when(!mine.is_empty(), |s| {
 				s.child(
-					div()
-						.flex()
-						.items_center()
-						.justify_between()
-						.child(heading("Next in queue"))
-						.child(
-							div()
-								.id("queue-clear")
-								.px_2()
-								.text_size(px(14.))
-								.font_weight(FontWeight::BOLD)
-								.text_color(theme::subdued())
-								.hover(|s| s.text_color(theme::text()))
-								.cursor_pointer()
-								.on_click(cx.listener(|this, _, _, cx| this.send(Msg::QueueClear, cx)))
-								.child("Clear queue"),
-						),
+					div().flex().items_center().justify_between().child(heading("Next in queue")).child(
+						div()
+							.id("queue-clear")
+							.px_2()
+							.text_size(px(14.))
+							.font_weight(FontWeight::BOLD)
+							.text_color(theme::subdued())
+							.hover(|s| s.text_color(theme::text()))
+							.cursor_pointer()
+							.on_click(cx.listener(|this, _, _, cx| this.send(Msg::QueueClear, cx)))
+							.child("Clear queue"),
+					),
 				)
 				.children(mine)
 			})
-			.when(!rest.is_empty(), |s| s.child(heading(if context.is_empty() { "Next up".to_owned() } else { format!("Next from: {context}") })).children(rest))
+			.when(!rest.is_empty(), |s| {
+				s.child(heading(if context.is_empty() { "Next up".to_owned() } else { format!("Next from: {context}") })).children(rest)
+			})
 			.into_any_element()
 	}
 
@@ -268,7 +302,9 @@ impl Shell {
 			Some(LyricsState::Missing) => return note("No lyrics for this song."),
 			Some(LyricsState::Failed) => return note("Couldn't load lyrics."),
 			Some(LyricsState::Found(Lyrics::Plain(text))) => text.lines().map(str::to_owned).collect(),
-			Some(LyricsState::Found(Lyrics::Synced(lines))) => lines.iter().map(|(_, l)| if l.trim().is_empty() { "♪".to_owned() } else { l.clone() }).collect(),
+			Some(LyricsState::Found(Lyrics::Synced(lines))) => {
+				lines.iter().map(|(_, l)| if l.trim().is_empty() { "♪".to_owned() } else { l.clone() }).collect()
+			},
 		};
 		let synced = st.synced_lyrics().is_some();
 		let line = st.lyric_line();
@@ -358,13 +394,9 @@ impl Shell {
 						.items_center()
 						.gap_3()
 						.child(icon(glyph(&d.kind), px(32.), theme::accent()))
-						.child(
-							div()
-								.flex()
-								.flex_col()
-								.child(div().text_size(px(14.)).child("Current device"))
-								.child(div().text_size(px(16.)).font_weight(FontWeight::BOLD).text_color(theme::accent()).child(d.name.clone())),
-						),
+						.child(div().flex().flex_col().child(div().text_size(px(14.)).child("Current device")).child(
+							div().text_size(px(16.)).font_weight(FontWeight::BOLD).text_color(theme::accent()).child(d.name.clone()),
+						)),
 				)
 			})
 			.when(!rows.is_empty(), |s| s.child(heading("Select another device")).children(rows))
@@ -372,4 +404,3 @@ impl Shell {
 			.into_any_element()
 	}
 }
-

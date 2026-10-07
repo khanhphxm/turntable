@@ -4,7 +4,11 @@ use gpui_kit::{
 	Context, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _, Styled as _, div,
 	prelude::FluentBuilder as _, px, relative,
 };
-use turntable_core::{Msg, Panel, Route, engine::{CoverSize, Repeat}, spotify::id_of};
+use turntable_core::{
+	Msg, Panel, Route,
+	engine::{CoverSize, Repeat},
+	spotify::id_of,
+};
 
 use crate::{
 	components::clock,
@@ -60,7 +64,9 @@ impl Shell {
 				.flex()
 				.flex_col()
 				.child(match album {
-					Some(id) => self.link("bar-title", title, Route::Album(id), cx).text_size(px(14.)).text_color(theme::text()).into_any_element(),
+					Some(id) => {
+						self.link("bar-title", title, Route::Album(id), cx).text_size(px(14.)).text_color(theme::text()).into_any_element()
+					},
 					None => div().text_size(px(14.)).truncate().child(title).into_any_element(),
 				})
 				.child(match artist {
@@ -103,7 +109,13 @@ impl Shell {
 					.flex()
 					.items_center()
 					.gap_2()
-					.child(icon_button("shuffle", Icon::Shuffle, px(16.), shuffle, cx.listener(|this, _, _, cx| this.send(Msg::ToggleShuffle, cx))))
+					.child(icon_button(
+						"shuffle",
+						Icon::Shuffle,
+						px(16.),
+						shuffle,
+						cx.listener(|this, _, _, cx| this.send(Msg::ToggleShuffle, cx)),
+					))
 					.child(icon_button("prev", Icon::Prev, px(16.), false, cx.listener(|this, _, _, cx| this.send(Msg::Prev, cx))))
 					.child(
 						div()
@@ -168,7 +180,13 @@ impl Shell {
 					.when(lyrics, |s| s.child(panel_button("lyrics", Icon::Mic, Side::Core(Panel::Lyrics), cx)))
 					.child(panel_button("queue", Icon::Queue, Side::Core(Panel::Queue), cx))
 					.child(panel_button("devices", Icon::Device, Side::Devices, cx))
-					.child(icon_button("mute", if muted { Icon::Mute } else { Icon::Volume }, px(16.), false, cx.listener(|this, _, _, cx| this.send(Msg::ToggleMute, cx))))
+					.child(icon_button(
+						"mute",
+						if muted { Icon::Mute } else { Icon::Volume },
+						px(16.),
+						false,
+						cx.listener(|this, _, _, cx| this.send(Msg::ToggleMute, cx)),
+					))
 					.child(div().w(px(93.)).child(self.volume_slider.clone())),
 			)
 			// Playing on another device: Spotify's green strip names it.

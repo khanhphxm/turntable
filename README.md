@@ -81,7 +81,8 @@ one (`pipewire-bin`, `pulseaudio-utils` or `alsa-utils` on Debian/Ubuntu).
 
 On Debian/Ubuntu, source builds also need development packages including
 `libfontconfig1-dev`, `libfreetype6-dev`, `libxkbcommon-dev`,
-`libxkbcommon-x11-dev`, `libdbus-1-dev`, `libssl-dev` and `libwayland-dev`.
+`libxkbcommon-x11-dev`, `libxcb-xkb-dev`, `libasound2-dev`, `libdbus-1-dev`,
+`libssl-dev` and `libwayland-dev`.
 
 On macOS, Cargo's runner signs the executable automatically for stable Keychain
 access. To package an application bundle, use the scripts in
@@ -102,13 +103,56 @@ cargo +nightly fmt --all
 To cross-check Windows compilation from macOS with LLVM/lld and `cargo-xwin`:
 
 ```sh
-PATH=/opt/homebrew/opt/llvm/bin:/opt/homebrew/opt/lld/bin:$PATH \
+PATH="/opt/homebrew/opt/llvm/bin:/opt/homebrew/opt/lld/bin:$PATH" \
 CARGO_TARGET_DIR=target/win \
 cargo xwin check --workspace --all-targets --target x86_64-pc-windows-msvc
 ```
 
 Compilation checks do not exercise native audio, credential storage, browser
 sign-in or media controls; those require testing on the target platform.
+
+### Core library reads
+
+The library worker shares the playback engine's authenticated librespot Session.
+Playlist pages use Playlist4; album pages, artist discography/top tracks and
+track rows use extended metadata batches of up to 100 entities. Liked Songs and
+saved-item membership come from the complete collection; playlists come from
+the decorated rootlist. These reads do not use the quota-limited Web API once
+the matching playback account connects. Before that connection, the worker
+uses the existing Web API account, without holding up browsing or changing
+the host-facing `Response`/listing models.
+
+The Web API remains for search, personalized Home history/top shelves, remote
+playback controls and library/playlist writes. Optional web-player data still
+adds play counts, listener statistics, credits and cover colors that Session
+metadata does not supply. Account-scoped disk snapshots retain their existing
+stale-while-revalidate behavior; a Session attachment drops only in-memory page
+answers, so subsequent fresh pages come from the player.
+
+### Core membership API
+
+Hosts render the saved-track check with
+`controller.state().added("spotify:track:...") -> bool`. It is the union of
+**Liked Songs and playlists owned by the signed-in user**; followed playlists,
+collaborators' playlists, episodes and local files do not count. The query uses
+immutable worker-delivered membership caches, without I/O or allocation. An
+unknown track returns `false` until membership arrives. The worker wakes the
+host; call `Controller::pump()` and redraw as for other library responses.
+
+`Msg::ToggleLike` still toggles only the now-playing track's Liked Songs status,
+not the union. For row actions, dispatch `Msg::AddToLiked(String)` or
+`Msg::RemoveFromLiked(String)` with a Spotify track URI. Removing a like leaves
+the added check on while that track remains in any owned playlist.
+
+Owned-playlist membership uses the engine's connected librespot Session and
+Playlist4, off the UI thread. Startup and successful playlist add/remove/create
+operations schedule a refresh after pending library requests. Account-scoped
+binary caches under `cache/playlist-index/<sha256(username)>.plidx` retain
+playlist revisions and duplicate occurrences. An unchanged refresh fetches
+only rootlist pages, not playlist contents; only new, changed or locally edited
+owned playlists are refetched. Writes are atomic, with private Unix permissions.
+Liked Songs membership reuses the Session's complete collection, loaded pages
+and cached per-track answers; no per-row Web API contains requests are needed.
 
 ## Privacy and external services
 

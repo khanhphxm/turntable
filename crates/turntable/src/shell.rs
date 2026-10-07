@@ -75,6 +75,8 @@ pub struct Shell {
 	pub lyrics_scroll: gpui_kit::ScrollHandle,
 	/// The lyric line last scrolled to.
 	pub lyrics_line:   Option<usize>,
+	/// The OS's Now Playing session (set once the window is open).
+	pub now_playing:   Option<crate::nowplaying::NowPlaying>,
 }
 
 impl Focusable for Shell {
@@ -89,6 +91,11 @@ impl Shell {
 		let volume_slider = Slider::new(cx, f32::from(core.state().volume) / 100.);
 		cx.subscribe(&seek, |this, _, e: &SliderEvent, cx| {
 			if let SliderEvent::Commit(v) = e {
+				#[expect(
+					clippy::cast_possible_truncation,
+					clippy::cast_sign_loss,
+					reason = "the normalized seek slider maps to nonnegative integer milliseconds"
+				)]
 				let ms = (f64::from(*v) * this.st().duration_ms() as f64) as u64;
 				this.send(Msg::Seek(ms), cx);
 			}
@@ -96,6 +103,11 @@ impl Shell {
 		.detach();
 		cx.subscribe(&volume_slider, |this, _, e: &SliderEvent, cx| {
 			let (SliderEvent::Scrub(v) | SliderEvent::Commit(v)) = e;
+			#[expect(
+				clippy::cast_possible_truncation,
+				clippy::cast_sign_loss,
+				reason = "the normalized volume slider maps to the bounded 0..=100 integer percent range"
+			)]
 			this.send(Msg::Volume((v * 100.).round() as u8), cx);
 		})
 		.detach();
@@ -146,6 +158,7 @@ impl Shell {
 			scale: window.scale_factor(),
 			lyrics_scroll: gpui_kit::ScrollHandle::new(),
 			lyrics_line: None,
+			now_playing: None,
 		};
 		shell.send(Msg::Navigate(Route::Home), cx);
 		shell
@@ -158,8 +171,12 @@ impl Shell {
 	/// Hands `msg` to the core and redraws when it changed something.
 	pub fn send(&mut self, msg: Msg, cx: &mut Context<'_, Self>) {
 		let before = self.st().side_panel();
+		let sign_out = matches!(msg, Msg::SignOut);
 		if self.core.dispatch(msg) {
 			self.after_change(before, cx);
+		}
+		if sign_out && !self.st().signed_in {
+			CoverCache::prune(cx);
 		}
 	}
 
@@ -194,6 +211,10 @@ impl Shell {
 		let gains = self.core.state().eq.gains_db;
 		for (slider, db) in self.eq.iter().zip(gains) {
 			slider.update(cx, |s, cx| s.set(crate::pages::eq::db_to_value(db), cx));
+		}
+		if let Some(mut np) = self.now_playing.take() {
+			np.sync(self);
+			self.now_playing = Some(np);
 		}
 		if self.st().quit {
 			cx.quit();
@@ -282,10 +303,12 @@ pub fn run_core(shell: &Entity<Shell>, wake: smol::channel::Receiver<()>, cx: &m
 			match deadline {
 				Some(at) => {
 					let timer = cx.background_executor().timer(at.saturating_duration_since(Instant::now()));
-					smol::future::or(async { woken.await.map(|()| ()).ok() }, async {
-						timer.await;
-						Some(())
-					})
+					smol::future::or(
+						async {
+							let _ = woken.await;
+						},
+						timer,
+					)
 					.await;
 				},
 				None => {
@@ -362,7 +385,8 @@ impl Render for Shell {
 							.overflow_hidden()
 							.bg(theme::panel())
 							.child(main)
-							.when_some(toast, |s, (id, text)| s.child(toast_view(text, id))),
+							.when_some(toast, |s, (id, text)| s.child(toast_view(text, id)))
+							.child(crate::widgets::corner_mask()),
 					)
 					.when_some(side, |row, side| row.child(self.right_panel(side, cx))),
 			)

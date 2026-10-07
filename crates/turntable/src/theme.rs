@@ -4,47 +4,47 @@ use gpui_kit::{Hsla, Pixels, Rgba, px, rgb, rgba};
 
 /// The window behind the panels.
 pub fn base() -> Rgba {
-	rgb(0x000000)
+	rgb(0x0000_0000)
 }
 /// A panel (library, main view, right-hand panel).
 pub fn panel() -> Rgba {
-	rgb(0x121212)
+	rgb(0x0012_1212)
 }
 /// A control's resting fill (search field, round buttons).
 pub fn raised() -> Rgba {
-	rgb(0x1f1f1f)
+	rgb(0x001f_1f1f)
 }
 /// The same, hovered.
 pub fn raised_hover() -> Rgba {
-	rgb(0x2a2a2a)
+	rgb(0x002a_2a2a)
 }
 /// A row or card under the pointer.
 pub fn hover() -> Rgba {
-	rgba(0xffffff12)
+	rgba(0xffff_ff12)
 }
 /// A selected row.
 pub fn selected() -> Rgba {
-	rgba(0xffffff26)
+	rgba(0xffff_ff26)
 }
 pub fn text() -> Rgba {
-	rgb(0xffffff)
+	rgb(0x00ff_ffff)
 }
 pub fn subdued() -> Rgba {
-	rgb(0xb3b3b3)
+	rgb(0x00b3_b3b3)
 }
 pub fn faint() -> Rgba {
-	rgb(0x7c7c7c)
+	rgb(0x007c_7c7c)
 }
 /// Spotify's green: playing, saved, active toggles.
 pub fn accent() -> Rgba {
-	rgb(0x1ed760)
+	rgb(0x001e_d760)
 }
 /// A seek or volume bar's track.
 pub fn track() -> Rgba {
-	rgba(0xffffff4d)
+	rgba(0xffff_ff4d)
 }
 pub fn divider() -> Rgba {
-	rgba(0xffffff1a)
+	rgba(0xffff_ff1a)
 }
 
 /// The gap between panels and around the window's edge.
@@ -69,17 +69,11 @@ pub fn alpha(c: Rgba, alpha: f32) -> Hsla {
 pub const CARD_W: f32 = 188.;
 
 pub fn accent_hover() -> Rgba {
-	rgb(0x3be477)
-}
-
-/// `c` mixed towards black by `amount` (0..=1).
-pub fn darken(c: Rgba, amount: f32) -> Rgba {
-	let k = 1. - amount;
-	Rgba { r: c.r * k, g: c.g * k, b: c.b * k, a: c.a }
+	rgb(0x003b_e477)
 }
 
 /// [`raised`] as a number, for artwork placeholders.
-pub const RAISED: u32 = 0x1f1f1f;
+pub const RAISED: u32 = 0x001f_1f1f;
 
 /// "#1db954" or "1db954" → 0x1db954.
 pub fn parse_hex(s: &str) -> Option<u32> {

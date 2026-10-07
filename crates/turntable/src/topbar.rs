@@ -5,7 +5,6 @@ use gpui_kit::{
 	Context, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, ParentElement as _, StatefulInteractiveElement as _,
 	Styled as _, component::input::Input, div, prelude::FluentBuilder as _, px,
 };
-
 use turntable_core::Route;
 
 use crate::{
@@ -18,10 +17,19 @@ use crate::{
 const TRAFFIC_LIGHTS_W: f32 = 80.;
 
 impl Shell {
+	#[expect(clippy::too_many_lines, reason = "keep the declarative topbar controls together")]
 	pub fn top_bar(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
 		let can_back = !self.back.is_empty();
 		// The account's initial in the avatar.
-		let initial: String = self.st().library.me.as_ref().and_then(|me| me.display_name.as_deref().or(Some(me.id.as_str()))).and_then(|n| n.chars().next()).map(|c| c.to_uppercase().collect()).unwrap_or_default();
+		let initial: String = self
+			.st()
+			.library
+			.me
+			.as_ref()
+			.and_then(|me| me.display_name.as_deref().or(Some(me.id.as_str())))
+			.and_then(|n| n.chars().next())
+			.map(|c| c.to_uppercase().collect())
+			.unwrap_or_default();
 		let can_forward = !self.forward.is_empty();
 		div()
 			.relative()
@@ -103,7 +111,7 @@ impl Shell {
 							div()
 								.size(px(32.))
 								.rounded_full()
-								.bg(gpui_kit::rgb(0xe8a33d))
+								.bg(gpui_kit::rgb(0x00e8_a33d))
 								.flex()
 								.items_center()
 								.justify_center()

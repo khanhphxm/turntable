@@ -41,9 +41,16 @@ impl Shell {
 					.on_click(cx.listener(|this, _, _, cx| this.send(turntable_core::Msg::SignIn, cx)))
 					.child(if waiting { "Waiting for your browser…" } else { "Sign in with Spotify" }),
 			)
-			.when_some(self.st().notice.clone(), |s, n| s.child(div().max_w(px(480.)).text_size(px(14.)).text_color(theme::subdued()).child(n)))
+			.when_some(self.st().notice.clone(), |s, n| {
+				s.child(div().max_w(px(480.)).text_size(px(14.)).text_color(theme::subdued()).child(n))
+			})
 			.when(waiting, |s| {
-				s.child(div().text_size(px(14.)).text_color(theme::subdued()).child("Finish signing in in the browser window that opened, then come back here."))
+				s.child(
+					div()
+						.text_size(px(14.))
+						.text_color(theme::subdued())
+						.child("Finish signing in in the browser window that opened, then come back here."),
+				)
 			})
 	}
 }

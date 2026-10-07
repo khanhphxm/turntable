@@ -17,6 +17,7 @@ use crate::{
 const POPULAR: usize = 5;
 
 impl Shell {
+	#[expect(clippy::too_many_lines, reason = "keep the declarative artist page sections together")]
 	pub fn artist_page(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
 		let page = div().id("artist").size_full().overflow_y_scroll();
 		let Some(l) = self.st().library.listing.clone() else {
@@ -51,9 +52,15 @@ impl Shell {
 				chip(("disco", i), *label, i == pick, cx.listener(move |this, _, _, cx| this.send(Msg::Discography(i), cx)))
 			}));
 			let cards = l.discography.get(pick).map_or_else(Vec::new, |(_, tiles)| self.cards("disc", tiles, cx));
-			shelves.push(div().flex().flex_col().gap_3().child(div().px(px(12.)).child(section_title("Discography"))).child(chips).child(
-				div().h(px(theme::CARD_W + 70.)).overflow_hidden().flex().flex_wrap().children(cards),
-			));
+			shelves.push(
+				div()
+					.flex()
+					.flex_col()
+					.gap_3()
+					.child(div().px(px(12.)).child(section_title("Discography")))
+					.child(chips)
+					.child(div().h(px(theme::CARD_W + 70.)).overflow_hidden().flex().flex_wrap().children(cards)),
+			);
 		}
 		if !l.appears_on.is_empty() {
 			let cards = self.cards("appears", &l.appears_on, cx);
@@ -103,7 +110,9 @@ impl Shell {
 						.flex_col()
 						.gap_2()
 						.child(section_title("Popular"))
-						.when(l.tracks.is_empty() && !l.popular_loaded, |s| s.child(div().h(px(5. * 56.)).text_color(theme::subdued()).child("Loading…")))
+						.when(l.tracks.is_empty() && !l.popular_loaded, |s| {
+							s.child(div().h(px(5. * 56.)).text_color(theme::subdued()).child("Loading…"))
+						})
 						.children(popular)
 						.when(more_than, |s| {
 							s.child(
@@ -134,7 +143,11 @@ impl Shell {
 							.bg(theme::raised())
 							.child(match img {
 								Some(src) => div().h(px(320.)).child(gpui_kit::img(src).size_full()),
-								None => div().h(px(120.)).bg(linear_gradient(180., linear_color_stop(theme::alpha(rgb(tint), 0.6), 0.), linear_color_stop(theme::raised(), 1.))),
+								None => div().h(px(120.)).bg(linear_gradient(
+									180.,
+									linear_color_stop(theme::alpha(rgb(tint), 0.6), 0.),
+									linear_color_stop(theme::raised(), 1.),
+								)),
 							})
 							.child(
 								div()
@@ -142,7 +155,14 @@ impl Shell {
 									.flex()
 									.flex_col()
 									.gap_2()
-									.when_some(listeners, |s, n| s.child(div().text_size(px(16.)).font_weight(FontWeight::BOLD).child(format!("{} monthly listeners", grouped(n)))))
+									.when_some(listeners, |s, n| {
+										s.child(
+											div()
+												.text_size(px(16.))
+												.font_weight(FontWeight::BOLD)
+												.child(format!("{} monthly listeners", grouped(n))),
+										)
+									})
 									.child(div().text_size(px(16.)).text_color(theme::subdued()).line_clamp(4).child(text)),
 							),
 					),
@@ -155,4 +175,3 @@ impl Shell {
 		tiles.iter().enumerate().map(|(i, t)| self.card(gpui_kit::ElementId::NamedInteger(key.into(), i as u64), t, cx)).collect()
 	}
 }
-

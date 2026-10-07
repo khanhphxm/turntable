@@ -6,7 +6,9 @@ use gpui_kit::{
 	AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
 	SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, WeakEntity,
 	component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
-	div, linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px, rgb,
+	div, linear_color_stop, linear_gradient,
+	prelude::FluentBuilder as _,
+	px, rgb,
 };
 use turntable_core::{
 	Msg, Route,
@@ -30,7 +32,7 @@ pub fn grouped(n: u64) -> String {
 	let s = n.to_string();
 	let mut out = String::with_capacity(s.len() + s.len() / 3);
 	for (i, c) in s.chars().enumerate() {
-		if i > 0 && (s.len() - i) % 3 == 0 {
+		if i > 0 && (s.len() - i).is_multiple_of(3) {
 			out.push(',');
 		}
 		out.push(c);
@@ -60,19 +62,24 @@ pub const TAIL_W: f32 = 112.;
 pub const ROW_PAD_X: f32 = 16.;
 
 /// The neutral tint of a page whose artwork colour isn't known yet.
-const NEUTRAL: u32 = 0x535353;
+const NEUTRAL: u32 = 0x0053_5353;
 
 impl Shell {
 	/// Artwork for something a route opens, at `size`: round for artists, Liked Songs' heart on
 	/// its gradient, a grey tile until the image arrives.
 	pub fn art(&self, route: &Route, url: Option<&str>, size: Pixels, cx: &mut Context<'_, Self>) -> Div {
+		#[expect(
+			clippy::cast_possible_truncation,
+			clippy::cast_sign_loss,
+			reason = "artwork sizes are nonnegative UI pixels; rounding up preserves full-resolution coverage"
+		)]
 		let logical = f32::from(size).ceil() as u32;
 		match route {
 			Route::Liked => div()
 				.size(size)
 				.flex_none()
 				.rounded(px(4.))
-				.bg(linear_gradient(135., linear_color_stop(rgb(0x450af5), 0.), linear_color_stop(rgb(0xc4efd9), 1.)))
+				.bg(linear_gradient(135., linear_color_stop(rgb(0x0045_0af5), 0.), linear_color_stop(rgb(0x00c4_efd9), 1.)))
 				.flex()
 				.items_center()
 				.justify_center()
@@ -83,6 +90,7 @@ impl Shell {
 	}
 
 	/// The column header above a track table.
+	#[expect(clippy::unused_self, reason = "view builders share Shell's method-call convention")]
 	pub fn table_head(&self, column: Column) -> Div {
 		div()
 			.h(px(36.))
@@ -103,7 +111,16 @@ impl Shell {
 
 	/// Row `i` of the page's tracks (`State::library.rows()`): number (play on hover), cover,
 	/// title and artists, optional column, duration and a menu. Click selects, double-click plays.
-	pub fn track_row(&self, i: usize, t: &Track, column: Column, plays: Option<u64>, with_cover: bool, cx: &mut Context<'_, Self>) -> AnyElement {
+	#[expect(clippy::too_many_lines, reason = "keep the declarative row layout and its event handlers together")]
+	pub fn track_row(
+		&self,
+		i: usize,
+		t: &Track,
+		column: Column,
+		plays: Option<u64>,
+		with_cover: bool,
+		cx: &mut Context<'_, Self>,
+	) -> AnyElement {
 		let st = self.st();
 		let current = !st.item.uri.is_empty() && t.uri == st.item.uri;
 		let playing = current && st.playing();
@@ -152,7 +169,9 @@ impl Shell {
 							.text_size(px(16.))
 							.when(current, |s| s.text_color(theme::accent()))
 							.group_hover("row", |s| s.invisible())
-							.map(|s| if playing { s.child(icon(Icon::Volume, px(16.), theme::accent())) } else { s.child((i + 1).to_string()) }),
+							.map(|s| {
+								if playing { s.child(icon(Icon::Volume, px(16.), theme::accent())) } else { s.child((i + 1).to_string()) }
+							}),
 					)
 					.child(
 						div()
@@ -181,19 +200,19 @@ impl Shell {
 							.min_w_0()
 							.flex()
 							.flex_col()
-							.child(div().text_size(px(16.)).text_color(if current { theme::accent() } else { theme::text() }).truncate().child(t.name.clone()))
 							.child(
 								div()
-									.flex()
-									.items_center()
-									.gap_1()
-									.min_w_0()
-									.when(t.explicit, |s| s.child(explicit_badge()))
-									.child(match &artist_id {
-										Some(id) => self.link(("row-artist", i), artists(t), Route::Artist(id.clone()), cx).into_any_element(),
-										None => div().truncate().child(artists(t)).into_any_element(),
-									}),
-							),
+									.text_size(px(16.))
+									.text_color(if current { theme::accent() } else { theme::text() })
+									.truncate()
+									.child(t.name.clone()),
+							)
+							.child(div().flex().items_center().gap_1().min_w_0().when(t.explicit, |s| s.child(explicit_badge())).child(
+								match &artist_id {
+									Some(id) => self.link(("row-artist", i), artists(t), Route::Artist(id.clone()), cx).into_any_element(),
+									None => div().truncate().child(artists(t)).into_any_element(),
+								},
+							)),
 					),
 			)
 			.when(column == Column::Album, |s| {
@@ -231,6 +250,7 @@ impl Shell {
 	}
 
 	/// Subdued text that underlines and turns white on hover and opens `route`.
+	#[expect(clippy::unused_self, reason = "view builders share Shell's method-call convention")]
 	pub fn link(&self, id: impl Into<ElementId>, text: impl Into<SharedString>, route: Route, cx: &mut Context<'_, Self>) -> Stateful<Div> {
 		div()
 			.id(id)
@@ -269,19 +289,27 @@ impl Shell {
 			.hover(|s| s.bg(theme::hover()))
 			.cursor_pointer()
 			.on_click(cx.listener(move |this, _, _, cx| this.go(route.clone(), cx)))
-			.child(
-				div()
-					.relative()
-					.child(self.art(&tile.route, tile.image.as_deref(), px(theme::CARD_W - 24.), cx).shadow_lg())
-					.when_some(play, |s, uri| {
-						s.child(div().absolute().right(px(8.)).bottom(px(8.)).when(!playing, |s| s.invisible().group_hover("card", |s| s.visible())).child(
-							play_disc(("card-play", uri.len()), px(48.), playing, cx.listener(move |this, _, _, cx| {
-								cx.stop_propagation();
-								this.play_context(&uri, cx);
-							})),
-						))
-					}),
-			)
+			.child(div().relative().child(self.art(&tile.route, tile.image.as_deref(), px(theme::CARD_W - 24.), cx).shadow_lg()).when_some(
+				play,
+				|s, uri| {
+					s.child(
+						div()
+							.absolute()
+							.right(px(8.))
+							.bottom(px(8.))
+							.when(!playing, |s| s.invisible().group_hover("card", |s| s.visible()))
+							.child(play_disc(
+								("card-play", uri.len()),
+								px(48.),
+								playing,
+								cx.listener(move |this, _, _, cx| {
+									cx.stop_propagation();
+									this.play_context(&uri, cx);
+								}),
+							)),
+					)
+				},
+			))
 			.child(
 				div()
 					.flex()
@@ -302,6 +330,7 @@ impl Shell {
 	}
 
 	/// A titled row of cards, as many as fit (Spotify's shelves don't scroll sideways).
+	#[expect(clippy::unused_self, reason = "view builders share Shell's method-call convention")]
 	pub fn shelf(&self, title: impl Into<SharedString>, cards: Vec<Stateful<Div>>) -> Div {
 		div()
 			.flex()
@@ -312,7 +341,17 @@ impl Shell {
 	}
 
 	/// The tinted header every listing and artist page opens with.
-	pub fn page_header(&self, route: &Route, cover_url: Option<&str>, tint: u32, kicker: SharedString, title: SharedString, meta: AnyElement, cx: &mut Context<'_, Self>) -> Div {
+	#[expect(clippy::too_many_arguments, reason = "the declarative page header receives its independent display fields directly")]
+	pub fn page_header(
+		&self,
+		route: &Route,
+		cover_url: Option<&str>,
+		tint: u32,
+		kicker: SharedString,
+		title: SharedString,
+		meta: AnyElement,
+		cx: &mut Context<'_, Self>,
+	) -> Div {
 		// Spotify sizes the title to the room it has: the largest step at which it fits on one
 		// line (bold glyphs average ~0.6 em), else the smallest, which may wrap to two.
 		let room = self.main_w - 232. - 3. * 24.;
@@ -321,6 +360,8 @@ impl Shell {
 		div()
 			.h(px(320.))
 			.w_full()
+			// GPUI clips children to rectangles: whatever touches the panel's top rounds itself.
+			.rounded_t(theme::RADIUS)
 			.flex()
 			.items_end()
 			.gap_6()
@@ -335,7 +376,14 @@ impl Shell {
 					.flex_col()
 					.gap_2()
 					.child(div().text_size(px(14.)).child(kicker))
-					.child(div().text_size(px(size)).line_height(px(size * 1.1)).font_weight(FontWeight::EXTRA_BOLD).line_clamp(2).child(title))
+					.child(
+						div()
+							.text_size(px(size))
+							.line_height(px(size * 1.1))
+							.font_weight(FontWeight::EXTRA_BOLD)
+							.line_clamp(2)
+							.child(title),
+					)
 					.child(div().text_size(px(14.)).child(meta)),
 			)
 	}
@@ -349,17 +397,21 @@ impl Shell {
 			.gap_6()
 			.px_6()
 			.py_6()
-			.child(play_disc("page-play", px(56.), playing, cx.listener(move |this, _, _, cx| {
-				match &context {
+			.child(play_disc(
+				"page-play",
+				px(56.),
+				playing,
+				cx.listener(move |this, _, _, cx| match &context {
 					Some(uri) if this.st().context.uri == *uri => this.send(Msg::TogglePlay, cx),
 					_ => this.send(Msg::PlayListing, cx),
-				}
-			})))
+				}),
+			))
 			.child(actions)
 			.child(icon_button("page-more", Icon::Ellipsis, px(32.), false, |_, _, _| {}))
 	}
 
 	/// The colour wash behind a page's action bar and first rows.
+	#[expect(clippy::unused_self, reason = "view builders share Shell's method-call convention")]
 	pub fn wash(&self, tint: u32) -> Div {
 		div().bg(linear_gradient(180., linear_color_stop(theme::alpha(rgb(tint), 0.35), 0.), linear_color_stop(theme::panel(), 1.)))
 	}
@@ -387,7 +439,14 @@ fn explicit_badge() -> Div {
 }
 
 /// Right-click on a track.
-fn track_menu(menu: PopupMenu, shell: &WeakEntity<Shell>, row: usize, artist: Option<String>, album: Option<String>, editable: bool) -> PopupMenu {
+fn track_menu(
+	menu: PopupMenu,
+	shell: &WeakEntity<Shell>,
+	row: usize,
+	artist: Option<String>,
+	album: Option<String>,
+	editable: bool,
+) -> PopupMenu {
 	let item = |label: &'static str, msg: Msg| {
 		let shell = shell.clone();
 		PopupMenuItem::new(label).on_click(move |_, _, cx| {

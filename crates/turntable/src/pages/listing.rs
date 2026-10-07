@@ -1,10 +1,7 @@
 //! A playlist, album or Liked Songs: header, action bar, then the track table (virtualised;
 //! the next page loads as the end comes into view).
 
-use gpui_kit::{
-	AnyElement, Context, FontWeight, IntoElement, ParentElement as _, Styled as _, div,
-	list, prelude::FluentBuilder as _, px,
-};
+use gpui_kit::{AnyElement, Context, FontWeight, IntoElement, ParentElement as _, Styled as _, div, list, prelude::FluentBuilder as _, px};
 use turntable_core::{Msg, Route, spotify::id_of};
 
 use crate::{
@@ -17,6 +14,7 @@ use crate::{
 impl Shell {
 	pub fn listing_page(&mut self, route: Route, cx: &mut Context<'_, Self>) -> impl IntoElement {
 		let rows = self.st().library.listing.as_ref().map_or(0, |l| l.tracks.len());
+		let album = matches!(route, Route::Album(_));
 		// The list's items: the header, the rows, then a footer (loading / show more).
 		if self.list_for.as_ref() != Some(&(route.clone(), rows)) {
 			if self.list_for.as_ref().is_some_and(|(r, _)| *r == route) {
@@ -25,9 +23,8 @@ impl Shell {
 			} else {
 				self.list.reset(rows + 2);
 			}
-			self.list_for = Some((route.clone(), rows));
+			self.list_for = Some((route, rows));
 		}
-		let album = matches!(route, Route::Album(_));
 		list(
 			self.list.clone(),
 			cx.processor(move |this, ix: usize, _, cx| {
@@ -90,8 +87,14 @@ impl Shell {
 			(Route::Playlist(_), Some(false)) => "Private Playlist".to_owned(),
 			_ => l.kicker.to_string(),
 		};
-		let (title, subtitle, description, cover_url, context, owned) =
-			(l.title.clone(), l.subtitle.clone(), l.description.clone().filter(|d| !d.is_empty()), l.cover_url.clone(), l.context_uri.clone(), l.owned);
+		let (title, subtitle, description, cover_url, context, owned) = (
+			l.title.clone(),
+			l.subtitle.clone(),
+			l.description.clone().filter(|d| !d.is_empty()),
+			l.cover_url.clone(),
+			l.context_uri.clone(),
+			l.owned,
+		);
 		let note = l.note.clone();
 		let tint = Self::tint(l.accent.as_deref());
 		// An album names its artist as a link.
@@ -108,7 +111,10 @@ impl Shell {
 					.items_center()
 					.gap_1()
 					.when_some(artist, |s, (name, id)| {
-						s.child(self.link("header-artist", name, Route::Artist(id), cx).text_color(theme::text()).font_weight(FontWeight::BOLD)).child(div().text_color(dim).child("•"))
+						s.child(
+							self.link("header-artist", name, Route::Artist(id), cx).text_color(theme::text()).font_weight(FontWeight::BOLD),
+						)
+						.child(div().text_color(dim).child("•"))
 					})
 					.child(div().text_color(dim).child(subtitle)),
 			)
@@ -118,8 +124,22 @@ impl Shell {
 			.flex()
 			.items_center()
 			.gap_4()
-			.child(icon_button("page-shuffle", Icon::Shuffle, px(32.), shuffle, cx.listener(|this, _, _, cx| this.send(Msg::ToggleShuffle, cx))))
-			.when(owned, |s| s.child(icon_button("page-edit", Icon::Pencil, px(24.), false, cx.listener(|this, _, _, cx| this.send(Msg::RenamePlaylist, cx)))));
+			.child(icon_button(
+				"page-shuffle",
+				Icon::Shuffle,
+				px(32.),
+				shuffle,
+				cx.listener(|this, _, _, cx| this.send(Msg::ToggleShuffle, cx)),
+			))
+			.when(owned, |s| {
+				s.child(icon_button(
+					"page-edit",
+					Icon::Pencil,
+					px(24.),
+					false,
+					cx.listener(|this, _, _, cx| this.send(Msg::RenamePlaylist, cx)),
+				))
+			});
 		let column = if matches!(route, Route::Album(_)) { Column::None } else { Column::Album };
 		div()
 			.w_full()
@@ -136,4 +156,3 @@ impl Shell {
 			.into_any_element()
 	}
 }
-

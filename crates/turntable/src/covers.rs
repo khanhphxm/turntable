@@ -21,7 +21,7 @@ use std::{
 	sync::{Arc, Weak},
 };
 
-use gpui_kit::{AnyWeakEntity, App, BorrowAppContext as _, Context, Global, RenderImage, Window};
+use gpui_kit::{AnyWeakEntity, App, BorrowAppContext as _, Context, Global, RenderImage};
 use image::{DynamicImage, Frame, ImageFormat, RgbaImage};
 use turntable_core::Cover;
 
@@ -164,9 +164,9 @@ impl CoverCache {
 	}
 
 	/// Reclaim artwork whose source Arcs were dropped, e.g. on library changes.
-	pub fn prune(window: &mut Window, cx: &mut App) {
+	pub fn prune(cx: &mut App) {
 		if cx.has_global::<Self>() {
-			cx.update_global::<Self, _>(|cache, cx| cache.sweep(|image| cx.drop_image(image, Some(window))));
+			cx.update_global::<Self, _>(|cache, cx| cache.sweep(|image| cx.defer(move |cx| cx.drop_image(image, None))));
 		}
 	}
 
@@ -270,7 +270,7 @@ fn decode_jpeg(bytes: &[u8], side: u32) -> Option<DynamicImage> {
 		jpeg_decoder::PixelFormat::RGB24 => image::RgbImage::from_raw(width, height, pixels).map(DynamicImage::ImageRgb8),
 		jpeg_decoder::PixelFormat::L8 => image::GrayImage::from_raw(width, height, pixels).map(DynamicImage::ImageLuma8),
 		jpeg_decoder::PixelFormat::L16 => {
-			let values = pixels.chunks_exact(2).map(|pair| Some(u16::from_ne_bytes(pair.try_into().ok()?))).collect::<Option<Vec<_>>>()?;
+			let values = pixels.as_chunks::<2>().0.iter().map(|pair| u16::from_ne_bytes(*pair)).collect();
 			image::ImageBuffer::from_raw(width, height, values).map(DynamicImage::ImageLuma16)
 		},
 		jpeg_decoder::PixelFormat::CMYK32 => {

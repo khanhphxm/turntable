@@ -8,6 +8,7 @@ mod bar;
 mod components;
 mod covers;
 mod media;
+mod nowplaying;
 mod pages;
 mod panel;
 mod shell;
@@ -40,8 +41,8 @@ fn main() {
 		let options = WindowOptions {
 			window_bounds: Some(WindowBounds::Windowed(bounds)),
 			titlebar: Some(TitlebarOptions {
-				title: Some("turntable".into()),
-				appears_transparent: true,
+				title:                  Some("turntable".into()),
+				appears_transparent:    true,
 				traffic_light_position: Some(point(px(14.), px(14.))),
 			}),
 			window_min_size: Some(size(px(800.), px(560.))),
@@ -53,19 +54,29 @@ fn main() {
 			let _ = wake_tx.try_send(());
 		});
 		let core = Paths::resolve().map_err(|e| e.to_string()).and_then(|paths| Controller::new(&paths, Options::default(), wake));
+		let mut shell = None;
 		let opened = match core {
 			Ok(core) => gpui_kit::open_window(options, cx, |window, cx| {
-				let shell = cx.new(|cx| shell::Shell::new(core, window, cx));
-				shell::run_core(&shell, wake_rx, cx);
-				shell
+				let entity = cx.new(|cx| shell::Shell::new(core, window, cx));
+				shell::run_core(&entity, wake_rx, cx);
+				shell = Some(entity.clone());
+				entity
 			})
 			.map(|_| ()),
 			Err(e) => gpui_kit::open_window(options, cx, |_, cx| cx.new(|_| Failed(e.into()))).map(|_| ()),
 		};
 		if opened.is_err() {
 			cx.quit();
+			return;
 		}
-		cx.activate(true);
+		// TURNTABLE_BACKGROUND: open behind other windows without taking focus (automated checks).
+		if std::env::var_os("TURNTABLE_BACKGROUND").is_none() {
+			cx.activate(true);
+		}
+		if let Some(shell) = shell {
+			let np = nowplaying::NowPlaying::start(&shell, cx);
+			shell.update(cx, |s, _| s.now_playing = np);
+		}
 	});
 }
 

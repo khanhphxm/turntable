@@ -1,8 +1,8 @@
 //! Home: a greeting, a grid of quick picks, then shelves of what the user plays.
 
 use gpui_kit::{
-	AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
-	div, linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px, rgb,
+	AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
+	Styled as _, div, linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px, rgb,
 };
 use turntable_core::library::Tile;
 
@@ -40,7 +40,16 @@ impl Shell {
 			.cursor_pointer()
 			.on_click(cx.listener(move |this, _, _, cx| this.go(route.clone(), cx)))
 			.child(self.art(&t.route, t.image.as_deref(), px(64.), cx).rounded(px(0.)).shadow_lg())
-			.child(div().flex_1().min_w(px(0.)).overflow_hidden().text_size(px(14.)).font_weight(FontWeight::BOLD).line_clamp(2).child(t.title.clone()))
+			.child(
+				div()
+					.flex_1()
+					.min_w(px(0.))
+					.overflow_hidden()
+					.text_size(px(14.))
+					.font_weight(FontWeight::BOLD)
+					.line_clamp(2)
+					.child(t.title.clone()),
+			)
 			.when_some(play, |s, uri| {
 				s.child(div().when(!playing, |s| s.invisible().group_hover("pick", |s| s.visible())).child(play_disc(
 					("pick-play", i),
@@ -74,7 +83,7 @@ impl Shell {
 		let playlists: Vec<Tile> = lib.playlists.iter().map(Tile::playlist).collect();
 		let loaded = h.loaded;
 		let picks: Vec<AnyElement> = quick.iter().enumerate().map(|(i, t)| self.quick_pick(i, t, cx)).collect();
-		let tint = self.st().library.listing.as_ref().and_then(|l| l.accent.as_deref()).and_then(theme::parse_hex).unwrap_or(0x404040);
+		let tint = self.st().library.listing.as_ref().and_then(|l| l.accent.as_deref()).and_then(theme::parse_hex).unwrap_or(0x0040_4040);
 		let mut shelves: Vec<Div> = Vec::new();
 		for (key, title, tiles) in [
 			("recents", "Recents", &recents),
@@ -95,6 +104,7 @@ impl Shell {
 			.child(
 				div()
 					.bg(linear_gradient(180., linear_color_stop(theme::alpha(rgb(tint), 0.45), 0.), linear_color_stop(theme::panel(), 1.)))
+					.rounded_t(theme::RADIUS)
 					.px_6()
 					.pt_6()
 					.pb_4()

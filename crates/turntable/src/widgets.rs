@@ -12,6 +12,10 @@ use gpui_kit::{
 pub use crate::assets::Icon;
 use crate::theme;
 
+/// Our glyphs leave ~2.5 px of air inside their 24 px grid, where Spotify's fill their box; a
+/// button's glyph is drawn this much larger so the two read at the same size.
+pub const OPTICAL: f32 = 1.2;
+
 pub fn icon(icon: Icon, size: Pixels, color: impl Into<Hsla>) -> Svg {
 	svg().path(icon.path()).size(size).flex_none().text_color(color)
 }
@@ -37,7 +41,7 @@ pub fn icon_button(
 		.size(size + px(16.))
 		.cursor_pointer()
 		.on_click(on_click)
-		.child(icon(glyph, size, color).when(!active, |s| s.group_hover("icon-button", |s| s.text_color(theme::text()))))
+		.child(icon(glyph, size * OPTICAL, color).when(!active, |s| s.group_hover("icon-button", |s| s.text_color(theme::text()))))
 		// Spotify marks an active toggle with a small dot under the icon.
 		.when(active, |el| el.child(div().absolute().bottom(px(0.)).size(px(4.)).rounded_full().bg(theme::accent())))
 }
@@ -65,7 +69,7 @@ pub fn round_button(
 		.cursor_pointer()
 		.on_click(on_click)
 		.child(
-			icon(glyph, icon_size, if on { theme::text() } else { theme::subdued() })
+			icon(glyph, icon_size * OPTICAL, if on { theme::text() } else { theme::subdued() })
 				.group_hover("round-button", |s| s.text_color(theme::text())),
 		)
 }
@@ -301,4 +305,12 @@ pub fn outline_button(id: impl Into<ElementId>, label: impl Into<SharedString>) 
 		.text_size(px(14.))
 		.font_weight(FontWeight::BOLD)
 		.child(label.into())
+}
+
+/// Rounds a panel's corners over whatever scrolls inside it. GPUI clips children to rectangles,
+/// so rows scrolled under a panel's top would show square corners; this frame, laid over the
+/// panel, paints the window's colour outside the rounded outline (it takes no input).
+pub fn corner_mask() -> Div {
+	let w = theme::GAP;
+	div().absolute().top(-w).left(-w).right(-w).bottom(-w).rounded(theme::RADIUS + w).border(w).border_color(theme::base())
 }

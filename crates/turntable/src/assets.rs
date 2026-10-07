@@ -11,6 +11,7 @@ macro_rules! icons {
 	($($variant:ident => $file:literal),* $(,)?) => {
 		/// The bundled icons.
 		#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+		#[expect(dead_code, reason = "used by upcoming views")]
 		pub enum Icon { $($variant),* }
 
 		impl Icon {

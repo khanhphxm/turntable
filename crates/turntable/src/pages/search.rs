@@ -31,7 +31,12 @@ impl Shell {
 					.gap_3()
 					.child(icon(Icon::Search, px(48.), theme::subdued()))
 					.child(div().text_size(px(24.)).font_weight(FontWeight::BOLD).child("Search Spotify"))
-					.child(div().text_size(px(16.)).text_color(theme::subdued()).child("Songs, artists, albums and playlists. ⌘K searches from anywhere.")),
+					.child(
+						div()
+							.text_size(px(16.))
+							.text_color(theme::subdued())
+							.child("Songs, artists, albums and playlists. ⌘K searches from anywhere."),
+					),
 			);
 		};
 		let artists: Vec<Tile> = results.artists.items.iter().map(Tile::artist).collect();
@@ -47,14 +52,22 @@ impl Shell {
 					.items_center()
 					.gap_2()
 					.child(div().text_size(px(24.)).font_weight(FontWeight::BOLD).child(format!("No results found for \"{query}\"")))
-					.child(div().text_size(px(16.)).text_color(theme::subdued()).child("Check the spelling, or try fewer or different keywords.")),
+					.child(
+						div()
+							.text_size(px(16.))
+							.text_color(theme::subdued())
+							.child("Check the spelling, or try fewer or different keywords."),
+					),
 			);
 		}
 		// Top result beside the songs when there's room, above them when not.
 		let wide = self.main_w >= 900.;
-		let songs: Vec<_> = results.tracks.items.iter().take(SONGS).enumerate().map(|(i, t)| self.track_row(i, t, Column::None, None, true, cx)).collect();
+		let songs: Vec<_> =
+			results.tracks.items.iter().take(SONGS).enumerate().map(|(i, t)| self.track_row(i, t, Column::None, None, true, cx)).collect();
 		let mut shelves = Vec::new();
-		for (key, title, tiles) in [("s-artists", "Artists", &artists), ("s-albums", "Albums", &albums), ("s-playlists", "Playlists", &playlists)] {
+		for (key, title, tiles) in
+			[("s-artists", "Artists", &artists), ("s-albums", "Albums", &albums), ("s-playlists", "Playlists", &playlists)]
+		{
 			if !tiles.is_empty() {
 				let cards = self.cards(key, tiles, cx);
 				shelves.push(div().mx(px(-12.)).child(self.shelf(title, cards)));
@@ -66,9 +79,19 @@ impl Shell {
 				.when(!wide, |s| s.flex_col())
 				.gap_6()
 				.when_some(top, |s, t| {
-					s.child(div().when(wide, |s| s.w(px(420.)).flex_none()).flex().flex_col().gap_2().child(section_title("Top result")).child(self.top_result(&t, cx)))
+					s.child(
+						div()
+							.when(wide, |s| s.w(px(420.)).flex_none())
+							.flex()
+							.flex_col()
+							.gap_2()
+							.child(section_title("Top result"))
+							.child(self.top_result(&t, cx)),
+					)
 				})
-				.when(!songs.is_empty(), |s| s.child(div().flex_1().min_w_0().flex().flex_col().gap_2().child(section_title("Songs")).children(songs))),
+				.when(!songs.is_empty(), |s| {
+					s.child(div().flex_1().min_w_0().flex().flex_col().gap_2().child(section_title("Songs")).children(songs))
+				}),
 		)
 		.children(shelves)
 	}
@@ -105,12 +128,22 @@ impl Shell {
 					.child(div().text_size(px(14.)).text_color(theme::subdued()).child(kind)),
 			)
 			.when_some(play, |s, uri| {
-				s.child(div().absolute().right(px(20.)).bottom(px(20.)).when(!playing, |s| s.invisible().group_hover("top-result", |s| s.visible())).child(
-					play_disc("top-play", px(48.), playing, cx.listener(move |this, _, _, cx| {
-						cx.stop_propagation();
-						this.play_context(&uri, cx);
-					})),
-				))
+				s.child(
+					div()
+						.absolute()
+						.right(px(20.))
+						.bottom(px(20.))
+						.when(!playing, |s| s.invisible().group_hover("top-result", |s| s.visible()))
+						.child(play_disc(
+							"top-play",
+							px(48.),
+							playing,
+							cx.listener(move |this, _, _, cx| {
+								cx.stop_propagation();
+								this.play_context(&uri, cx);
+							}),
+						)),
+				)
 			})
 	}
 }

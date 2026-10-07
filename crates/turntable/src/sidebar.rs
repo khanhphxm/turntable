@@ -2,9 +2,15 @@
 //! a rail of covers.
 
 use gpui_kit::{
-	AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _, Styled as _, div,
-	prelude::FluentBuilder as _, px, uniform_list,
-	component::{button::{Button, ButtonVariants as _}, menu::{DropdownMenu as _, PopupMenuItem}},
+	AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
+	Styled as _,
+	component::{
+		button::{Button, ButtonVariants as _},
+		menu::{DropdownMenu as _, PopupMenuItem},
+	},
+	div,
+	prelude::FluentBuilder as _,
+	px, uniform_list,
 };
 use turntable_core::{
 	Msg, Route,
@@ -47,6 +53,7 @@ impl Shell {
 			.bg(theme::panel())
 			.flex()
 			.flex_col()
+			.relative()
 			.overflow_hidden()
 			.child(self.library_header(collapsed, cx))
 			.when(!collapsed, |s| s.child(self.library_filters(cx)))
@@ -62,8 +69,10 @@ impl Shell {
 				.px_2()
 				.pb_2(),
 			)
+			.child(crate::widgets::corner_mask())
 	}
 
+	#[expect(clippy::unused_self, reason = "view builders share Shell's method-call convention")]
 	fn library_header(&mut self, collapsed: bool, cx: &mut Context<'_, Self>) -> impl IntoElement {
 		let toggle = div()
 			.id("library-title")
@@ -82,14 +91,11 @@ impl Shell {
 					.size(px(24.))
 					.relative()
 					.child(icon(Icon::Library, px(24.), theme::subdued()).group_hover("library-title", |s| s.invisible()))
-					.child(
-						div()
-							.absolute()
-							.inset_0()
-							.invisible()
-							.group_hover("library-title", |s| s.visible())
-							.child(icon(if collapsed { Icon::SidebarOpen } else { Icon::SidebarClose }, px(24.), theme::text())),
-					),
+					.child(div().absolute().inset_0().invisible().group_hover("library-title", |s| s.visible()).child(icon(
+						if collapsed { Icon::SidebarOpen } else { Icon::SidebarClose },
+						px(24.),
+						theme::text(),
+					))),
 			)
 			.when(!collapsed, |s| s.child(div().text_size(px(16.)).font_weight(FontWeight::BOLD).child("Your Library")));
 		div()
@@ -157,7 +163,12 @@ impl Shell {
 					})
 					.children(Kind::ALL.iter().enumerate().map(|(i, k)| {
 						let k = *k;
-						chip(("kind", i), k.plural(), kinds.contains(&k), cx.listener(move |this, _, _, cx| this.send(Msg::LibraryKind(k), cx)))
+						chip(
+							("kind", i),
+							k.plural(),
+							kinds.contains(&k),
+							cx.listener(move |this, _, _, cx| this.send(Msg::LibraryKind(k), cx)),
+						)
 					})),
 			)
 			.child(
