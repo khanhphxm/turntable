@@ -251,14 +251,22 @@ impl Client {
 		Ok(())
 	}
 
-	/// Removes every occurrence of `uris` from a playlist the user owns or collaborates on.
-	pub fn remove_from_playlist(&self, id: &str, uris: &[&str]) -> Result<()> {
-		let path = format!("/playlists/{}/items", urlencode(id));
-		for chunk in uris.chunks(MAX_PLAYLIST_ITEMS) {
-			let items: Vec<_> = chunk.iter().map(|uri| serde_json::json!({ "uri": uri })).collect();
-			let body = serde_json::json!({ "items": items }).to_string();
-			self.request(Method::Delete, &path, &[], Some(&body))?;
+	/// Remove exactly one occurrence, retaining duplicates at other positions.
+	pub fn remove_playlist_row(&self, id: &str, uri: &str, row: u32) -> Result<()> {
+		let body = serde_json::json!({ "items": [{ "uri": uri, "positions": [row] }] }).to_string();
+		self.request(Method::Delete, &format!("/playlists/{}/items", urlencode(id)), &[], Some(&body))?;
+		Ok(())
+	}
+
+	/// Move one row to its final zero-based position.
+	pub fn move_playlist_row(&self, id: &str, from: u32, to: u32) -> Result<()> {
+		if from == to {
+			return Ok(());
 		}
+		let insert_before =
+			if to > from { to.checked_add(1).ok_or_else(|| Error::Parse("Playlist row is out of range".into()))? } else { to };
+		let body = serde_json::json!({ "range_start": from, "range_length": 1, "insert_before": insert_before }).to_string();
+		self.request(Method::Put, &format!("/playlists/{}/items", urlencode(id)), &[], Some(&body))?;
 		Ok(())
 	}
 

@@ -191,7 +191,7 @@ impl<'de> Deserialize<'de> for Playlist {
 			uri:           if raw.uri.is_empty() { format!("spotify:playlist:{}", raw.id) } else { raw.uri },
 			id:            raw.id,
 			name:          raw.name,
-			description:   raw.description.filter(|d| !d.is_empty()),
+			description:   raw.description.filter(|d| Playlist::has_description(d)),
 			public:        raw.public,
 			owner:         raw.owner,
 			images:        raw.images,
@@ -202,6 +202,36 @@ impl<'de> Deserialize<'de> for Playlist {
 }
 
 impl Playlist {
+	/// Native playlist attributes can contain the literal null sentinel instead
+	/// of an absent description, including in old disk snapshots.
+	pub(crate) fn has_description(value: &str) -> bool {
+		!value.trim().is_empty() && value.trim() != "null"
+	}
+
+	/// Human-readable attribution, never an opaque account ID.
+	pub fn owner_name(&self) -> &str {
+		self.owner
+			.display_name
+			.as_deref()
+			.map(str::trim)
+			.filter(|name| !name.is_empty() && *name != self.owner.id)
+			.unwrap_or("Spotify user")
+	}
+
+	/// Reuse the signed-in profile's name for owned playlists on every ingress.
+	pub(crate) fn normalize(&mut self, account: &str, display_name: Option<&str>) {
+		if self.description.as_deref().is_some_and(|description| !Self::has_description(description)) {
+			self.description = None;
+		}
+		if self.owner.id == account
+			&& let Some(name) = display_name.filter(|name| !name.trim().is_empty())
+		{
+			if self.owner.display_name.as_deref() != Some(name) {
+				self.owner.display_name = Some(name.to_owned());
+			}
+		}
+	}
+
 	/// Whether `GET /playlists/{id}/items` is allowed: Development Mode only serves items of
 	/// playlists the user owns or collaborates on (anything else is a 403).
 	pub fn items_readable(&self, me: &str) -> bool {
@@ -610,5 +640,19 @@ mod tests {
 		assert_eq!(r.playlists.items.len(), 1);
 		assert_eq!(r.playlists.items[0].track_count, Some(3));
 		assert_eq!(r.playlists.total, 2);
+	}
+
+	#[test]
+	fn playlist_null_descriptions_and_missing_owner_names_are_not_displayed() {
+		for description in [serde_json::Value::Null, serde_json::json!("null"), serde_json::json!("")] {
+			let mut playlist: Playlist = serde_json::from_value(
+				serde_json::json!({ "id": "scratch", "description": description, "owner": { "id": "opaque-account-id" } }),
+			)
+			.unwrap();
+			assert_eq!(playlist.description, None);
+			assert_eq!(playlist.owner_name(), "Spotify user");
+			playlist.normalize("opaque-account-id", Some("Alex"));
+			assert_eq!(playlist.owner_name(), "Alex");
+		}
 	}
 }

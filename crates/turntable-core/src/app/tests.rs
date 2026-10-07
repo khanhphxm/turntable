@@ -595,3 +595,55 @@ fn row_liked_actions_are_explicit_and_optimistic_without_changing_now_playing() 
 	s.library.apply(library::Response::Liked(row.into(), false));
 	assert_eq!(s.liked(), Some(true));
 }
+
+#[test]
+fn playlist_row_edits_target_one_occurrence_and_apply_only_after_success() {
+	let mut state = State::default();
+	state.library.route = Route::Playlist("scratch".into());
+	let track = |uri: &str| serde_json::from_value::<crate::spotify::Track>(serde_json::json!({ "uri": uri })).unwrap();
+	state.library.listing = Some(library::Listing {
+		editable: true,
+		tracks: vec![track("a"), track("b"), track("a")],
+		total: 3,
+		plays: vec![10, 20, 30],
+		..Default::default()
+	});
+	state.library.selected = Some(1);
+	assert!(
+		matches!(state.update(Msg::MoveRow(0, 2)).as_slice(), [Effect::Library(library::Request::MovePlaylistRow(id, 0, 2))] if id == "scratch")
+	);
+	assert_eq!(state.library.rows()[0].uri, "a", "wait for successful acknowledgment");
+	state.library.apply(library::Response::Moved("scratch".into(), 0, 2));
+	assert_eq!(state.library.rows().iter().map(|track| track.uri.as_str()).collect::<Vec<_>>(), ["b", "a", "a"]);
+	assert_eq!(state.library.selected, Some(0));
+	assert_eq!(state.library.listing.as_ref().unwrap().plays, [20, 30, 10]);
+	assert!(
+		matches!(state.update(Msg::RemoveRow(2)).as_slice(), [Effect::Library(library::Request::RemoveFromPlaylist(id, uri, 2))] if id == "scratch" && uri == "a")
+	);
+	state.library.apply(library::Response::Removed("scratch".into(), "a".into(), 2));
+	assert_eq!(state.library.rows().iter().map(|track| track.uri.as_str()).collect::<Vec<_>>(), ["b", "a"]);
+	assert_eq!(state.library.listing.as_ref().unwrap().total, 2);
+	assert_eq!(state.library.listing.as_ref().unwrap().plays, [20, 30]);
+	assert!(state.update(Msg::MoveRow(0, 0)).is_empty());
+	assert!(state.update(Msg::MoveRow(0, 99)).is_empty());
+	state.library.listing.as_mut().unwrap().editable = false;
+	assert!(state.update(Msg::MoveRow(0, 1)).is_empty());
+	assert!(state.update(Msg::RemoveRow(0)).is_empty());
+}
+
+#[test]
+fn direct_playlist_add_uses_the_same_request_without_consuming_a_dialog() {
+	let mut state = State::default();
+	let playlist = serde_json::from_value(serde_json::json!({ "id": "scratch", "name": "Scratch", "owner": { "id": "me" } })).unwrap();
+	state.library.playlists.push(playlist);
+	state.dialog = Some(Dialog::AddToPlaylist { uris: vec!["picked".into()], label: "Picked".into() });
+	let effects = state.update(Msg::AddToPlaylistDirect { playlist: "scratch".into(), uris: vec!["result".into()] });
+	assert!(
+		matches!(effects.as_slice(), [Effect::Library(library::Request::AddToPlaylist(id, name, uris))] if id == "scratch" && name == "Scratch" && uris == &["result"])
+	);
+	assert!(matches!(&state.dialog, Some(Dialog::AddToPlaylist { uris, .. }) if uris == &["picked"]));
+	let dialog_effects = state.update(Msg::AddToPlaylist(Some("scratch".into())));
+	assert!(
+		matches!(dialog_effects.as_slice(), [Effect::Library(library::Request::AddToPlaylist(id, name, uris))] if id == "scratch" && name == "Scratch" && uris == &["picked"])
+	);
+}

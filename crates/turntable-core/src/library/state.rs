@@ -229,9 +229,10 @@ impl Library {
 				Listing {
 					kicker: ("Playlist").into(),
 					title: p.map_or_else(String::new, |p| p.name.clone()),
-					description: p.and_then(|p| p.description.clone()),
+					description: p.and_then(|p| p.description.clone()).filter(|description| Playlist::has_description(description)),
 					public: p.and_then(|p| p.public),
 					owned: p.is_some_and(|p| self.me.as_ref().is_some_and(|me| me.id == p.owner.id)),
+					subtitle: p.map(|p| format!("{} • {} songs", p.owner_name(), p.track_count.unwrap_or_default())).unwrap_or_default(),
 					context_uri: p.map(|p| p.uri.clone()),
 					cover_url: p.and_then(|p| spotify::pick_image(&p.images, 300)).map(|i| i.url.clone()),
 					..Listing::default()
@@ -266,7 +267,6 @@ impl Library {
 				}
 			},
 			Response::NeedsClientId => self.conn = Conn::NeedsClientId,
-			Response::Offline(_) => {},
 			Response::Liked(uri, liked) => self.apply_liked(uri, liked),
 			Response::Added { tracks, stats } => {
 				self.owned_tracks = tracks;
@@ -320,23 +320,71 @@ impl Library {
 					l.plays = counts.unwrap_or_default();
 				}
 			},
-			Response::Playlists(playlists) => self.playlists = playlists,
+			Response::Playlists(mut playlists) => {
+				if let Some(me) = &self.me {
+					for playlist in &mut playlists {
+						playlist.normalize(&me.id, me.display_name.as_deref());
+					}
+				}
+				self.playlists = playlists;
+			},
 			Response::Albums(albums) => self.albums = albums,
 			Response::Following(artists) => self.followed = artists,
-			Response::Created(p) => self.playlists.insert(0, p),
-			Response::Removed(id, uri) => {
+			Response::Created(mut p) => {
+				if let Some(me) = &self.me {
+					p.normalize(&me.id, me.display_name.as_deref());
+				}
+				self.playlists.insert(0, p);
+			},
+			Response::Removed(id, uri, row) => {
 				if self.route == Route::Playlist(id)
 					&& let Some(l) = &mut self.listing
+					&& let Ok(row) = usize::try_from(row)
+					&& l.tracks.get(row).is_some_and(|track| track.uri == uri)
 				{
-					l.tracks.retain(|t| t.uri != uri);
+					l.tracks.remove(row);
+					if row < l.plays.len() {
+						l.plays.remove(row);
+					}
 					l.total = l.total.saturating_sub(1);
+					self.selected = self
+						.selected
+						.and_then(|selected| if selected == row { None } else { Some(selected - usize::from(selected > row)) });
 				}
 			},
-			// Playback and queue replies belong to `State`, not to the library.
-			Response::Queue(..)
+			Response::Moved(id, from, to) => {
+				if self.route == Route::Playlist(id)
+					&& let Some(l) = &mut self.listing
+					&& let (Ok(from), Ok(to)) = (usize::try_from(from), usize::try_from(to))
+					&& from < l.tracks.len()
+					&& to < l.tracks.len()
+				{
+					let track = l.tracks.remove(from);
+					l.tracks.insert(to, track);
+					if l.plays.len() == l.tracks.len() {
+						let plays = l.plays.remove(from);
+						l.plays.insert(to, plays);
+					}
+					self.selected = self.selected.map(|row| {
+						if row == from {
+							to
+						} else if from < row && row <= to {
+							row - 1
+						} else if to <= row && row < from {
+							row + 1
+						} else {
+							row
+						}
+					});
+				}
+			},
+			// Connection, playback and queue replies belong to `State`, not to the library.
+			Response::Offline(_)
+			| Response::Queue(..)
 			| Response::Done(_)
 			| Response::Devices(_)
 			| Response::Playback(_)
+			| Response::LastPlayback { .. }
 			| Response::Transferred
 			| Response::PlayerError(_) => {},
 			Response::Listing { route, offset, listing } => self.apply_listing(&route, offset, listing),
@@ -352,10 +400,13 @@ impl Library {
 		}
 	}
 
-	fn apply_connected(&mut self, me: User, playlists: Vec<Playlist>) {
+	fn apply_connected(&mut self, me: User, mut playlists: Vec<Playlist>) {
 		if self.me.as_ref().is_some_and(|old| old.id != me.id) {
 			self.liked = None;
 			self.liked_cache.clear();
+		}
+		for playlist in &mut playlists {
+			playlist.normalize(&me.id, me.display_name.as_deref());
 		}
 		self.conn = Conn::Ready;
 		self.me = Some(me);
@@ -543,5 +594,27 @@ mod tests {
 		lib.apply(Response::Albums(vec![album("a1", "Blonde", "Frank Ocean")]));
 		lib.apply(Response::Following(vec![artist("r1", "Radiohead")]));
 		assert_eq!((lib.albums.len(), lib.followed.len()), (1, 1));
+	}
+
+	#[test]
+	fn created_playlists_and_cached_headers_use_profile_names_and_no_null_description() {
+		let mut lib = library();
+		let mut created = playlist("scratch", "My Playlist", "alex");
+		created.owner.display_name = None;
+		created.description = Some("null".into());
+		created.track_count = Some(0);
+		lib.apply(Response::Created(created));
+		lib.navigate(Route::Playlist("scratch".into()));
+		let header = lib.listing.as_ref().unwrap();
+		assert_eq!(header.description, None);
+		assert_eq!(header.subtitle, "Alex • 0 songs");
+		assert_eq!(Entry::Playlist(&lib.playlists[0]).sub(), "Playlist • Alex");
+		let mut refreshed = lib.playlists.clone();
+		refreshed[0].owner.display_name = None;
+		lib.apply(Response::Playlists(refreshed));
+		assert_eq!(lib.playlists[0].owner_name(), "Alex");
+		let mut other = playlist("other", "Other", "opaque-id");
+		other.owner.display_name = None;
+		assert_eq!(Entry::Playlist(&other).sub(), "Playlist • Spotify user");
 	}
 }

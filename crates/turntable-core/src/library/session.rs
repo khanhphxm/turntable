@@ -1,7 +1,8 @@
-//! Read-only library data from the player's authenticated Session. Playlist4 keeps raw page
-//! offsets; extended metadata resolves each page in batches, never one request per song.
+//! Library data and Playlist4 edits from the player's authenticated Session.
+//! Playlist4 keeps raw page offsets; metadata resolves pages in batches.
 
 mod collection;
+mod playlist;
 #[cfg(test)]
 mod tests;
 
@@ -560,7 +561,7 @@ fn playlist(id: &str, owner: &str, attributes: &ListAttributes, length: i32) -> 
 		id: id.to_owned(),
 		uri: format!("spotify:playlist:{id}"),
 		name: attributes.name().to_owned(),
-		description: (!attributes.description().is_empty()).then(|| attributes.description().to_owned()),
+		description: Playlist::has_description(attributes.description()).then(|| attributes.description().to_owned()),
 		public: None,
 		owner: User { id: owner.to_owned(), display_name: None },
 		images,

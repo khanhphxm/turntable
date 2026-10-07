@@ -126,6 +126,7 @@ pub(super) struct Session {
 	pub(super) client:    Client,
 	pub(super) player:    Option<Reader>,
 	pub(super) me:        String,
+	pub(super) me_name:   Option<String>,
 	pub(super) snapshots: Arc<Mutex<Store>>,
 	/// The user's playlists, to name recently played ones without a request.
 	pub(super) playlists: Vec<Playlist>,
@@ -149,11 +150,12 @@ pub(super) struct Session {
 const PAGES_TTL: Duration = Duration::from_secs(180);
 
 impl Session {
-	fn new(client: Client, me: String, playlists: Vec<Playlist>, snapshots: Arc<Mutex<Store>>) -> Self {
+	fn new(client: Client, me: spotify::User, playlists: Vec<Playlist>, snapshots: Arc<Mutex<Store>>) -> Self {
 		Self {
 			client,
 			player: None,
-			me,
+			me: me.id,
+			me_name: me.display_name,
 			snapshots,
 			playlists,
 			artists: HashMap::new(),
@@ -205,6 +207,9 @@ impl Session {
 				}
 			}
 		}
+		for playlist in &mut playlists {
+			playlist.normalize(&self.me, self.me_name.as_deref());
+		}
 		Ok(playlists)
 	}
 
@@ -241,6 +246,11 @@ fn serve(
 			Ok(()) => connect(config, snapshots, session, player, &output),
 			Err(e) => deliver(Response::LoginFailed(e.user_message())),
 		},
+		Request::RememberPlayback(position) => {
+			if let Err(error) = super::restore::remember(config, position) {
+				deliver(Response::Error { route: None, message: format!("Couldn't save playback position: {error}") });
+			}
+		},
 		Request::Logout => {
 			snapshots.lock().unwrap_or_else(PoisonError::into_inner).clear();
 			*session = None;
@@ -267,8 +277,9 @@ fn serve(
 					| Request::RenamePlaylist(..)
 					| Request::AddToPlaylist(..)
 					| Request::RemoveFromPlaylist(..)
+					| Request::MovePlaylistRow(..)
 			);
-			match run(s, added, refresh_added, other, deliver) {
+			match run(config, s, added, refresh_added, other, deliver) {
 				Ok(Some(response)) => {
 					// What the Web API lacks of a page follows it, so nothing waits for it: an album's play
 					// counts, and the cover's tint (all the page's tracks share the first page's).
@@ -346,7 +357,7 @@ fn connect(
 	let client = Client::open(account.source());
 	let has_snapshot = cached.is_some();
 	if let Some(Response::Connected { me, playlists }) = cached {
-		*session = Some(Session::new(client, me.id.clone(), playlists.clone(), snapshots.clone()));
+		*session = Some(Session::new(client, me.clone(), playlists.clone(), snapshots.clone()));
 		trace::hit("library", "Connected", "disk");
 		deliver(Response::Connected { me, playlists });
 		if let Some(home) = home {
@@ -354,7 +365,7 @@ fn connect(
 			deliver(Response::Home(home));
 		}
 	} else {
-		*session = Some(Session::new(client, String::new(), Vec::new(), snapshots.clone()));
+		*session = Some(Session::new(client, spotify::User { id: String::new(), display_name: None }, Vec::new(), snapshots.clone()));
 	}
 	let Some(s) = session.as_mut() else { return };
 	let client = &s.client;
@@ -381,6 +392,7 @@ fn connect(
 			deliver(Response::Offline(false));
 			let _ = account.remember_user(&me.id);
 			s.me = me.id.clone();
+			s.me_name.clone_from(&me.display_name);
 			for playlist in &mut playlists {
 				if playlist.owner.id == me.id {
 					playlist.owner.display_name.clone_from(&me.display_name);
@@ -426,6 +438,7 @@ fn is_free(plan: Option<&str>) -> bool {
 }
 
 fn run(
+	config: &Path,
 	s: &mut Session,
 	added: &mut Membership,
 	refresh_added: &mut bool,
@@ -456,15 +469,27 @@ fn run(
 		Request::SetFollowed(uri, follow) => {
 			let response = set_followed(s, &uri, follow)?;
 			*refresh_added |= uri.starts_with("spotify:playlist:");
+			if !follow && uri.starts_with("spotify:playlist:") {
+				added.deleted(&uri, deliver);
+			}
 			response
 		},
 		Request::CreatePlaylist(name, uris) => {
 			let response = create_playlist(s, &name, &uris)?;
+			if let Response::Created(playlist) = &response {
+				added.created(&playlist.uri, &name, &uris, deliver);
+			}
 			*refresh_added = true;
 			response
 		},
 		Request::RenamePlaylist(id, changes) => {
-			s.client.rename_playlist(&id, &changes)?;
+			match &mut s.player {
+				Some(player) if changes.public.is_none() => player.rename_playlist(&id, &changes)?,
+				_ => s.client.rename_playlist(&id, &changes)?,
+			}
+			if let Some(name) = &changes.name {
+				added.renamed(&format!("spotify:playlist:{id}"), name, deliver);
+			}
 			if let Some(public) = changes.public
 				&& let Some(playlist) = s.playlists.iter_mut().find(|playlist| playlist.id == id)
 			{
@@ -476,19 +501,36 @@ fn run(
 			Response::Playlists(s.playlists.clone())
 		},
 		Request::AddToPlaylist(id, name, uris) => {
-			let borrowed: Vec<&str> = uris.iter().map(String::as_str).collect();
-			s.client.add_to_playlist(&id, &borrowed)?;
-			added.edited(&format!("spotify:playlist:{id}"), &uris, &[], deliver);
+			match &mut s.player {
+				Some(player) => player.add_to_playlist(&id, &uris)?,
+				None => {
+					let borrowed: Vec<&str> = uris.iter().map(String::as_str).collect();
+					s.client.add_to_playlist(&id, &borrowed)?;
+				},
+			}
+			added.appended(&format!("spotify:playlist:{id}"), &uris, deliver);
 			*refresh_added = true;
 			s.forget(&Route::Playlist(id));
 			Response::Done(format!("Added to {name}"))
 		},
-		Request::RemoveFromPlaylist(id, uri) => {
-			s.client.remove_from_playlist(&id, &[&uri])?;
-			added.edited(&format!("spotify:playlist:{id}"), &[], std::slice::from_ref(&uri), deliver);
+		Request::RemoveFromPlaylist(id, uri, row) => {
+			match &mut s.player {
+				Some(player) => player.remove_from_playlist(&id, &uri, row)?,
+				None => s.client.remove_playlist_row(&id, &uri, row)?,
+			}
+			added.removed_row(&format!("spotify:playlist:{id}"), &uri, deliver);
 			*refresh_added = true;
 			s.forget(&Route::Playlist(id.clone()));
-			Response::Removed(id, uri)
+			Response::Removed(id, uri, row)
+		},
+		Request::MovePlaylistRow(id, from, to) => {
+			match &mut s.player {
+				Some(player) => player.move_playlist_row(&id, from, to)?,
+				None => s.client.move_playlist_row(&id, from, to)?,
+			}
+			s.forget(&Route::Playlist(id.clone()));
+			// Membership is order-independent: reordering needs no index refresh.
+			Response::Moved(id, from, to)
 		},
 		Request::QueueContext(route) => {
 			let listing = open(s, &route, 0)?;
@@ -511,11 +553,17 @@ fn run(
 			Response::Listing { route, offset, listing }
 		},
 		Request::Search(query) => {
-			let results = s.client.search(&query, 0)?;
+			let results = match s.web.search(&query, 0) {
+				Ok(results) => results,
+				Err(_) => s.client.search(&query, 0)?,
+			};
 			Response::Search { query, results }
 		},
 		Request::Devices => Response::Devices(player_reply(s.client.devices())?),
 		Request::Playback => Response::Playback(player_reply(s.client.playback())?),
+		Request::LastPlayback => {
+			Response::LastPlayback { account: s.me.clone(), playback: super::restore::recent(config, &s.me, &s.client, &s.playlists)? }
+		},
 		Request::Transfer { id, play } => match player_reply(s.client.transfer(&id, play))? {
 			Ok(()) => Response::Transferred,
 			Err(message) => Response::PlayerError(message),
@@ -524,7 +572,7 @@ fn run(
 			Ok(()) => return Ok(None),
 			Err(message) => Response::PlayerError(message),
 		},
-		Request::Connect | Request::Login | Request::Logout | Request::ForgetSnapshot => return Ok(None),
+		Request::Connect | Request::Login | Request::Logout | Request::ForgetSnapshot | Request::RememberPlayback(_) => return Ok(None),
 	}))
 }
 
@@ -544,7 +592,11 @@ fn set_liked(s: &mut Session, uri: &str, liked: bool, deliver: &dyn Fn(Response)
 }
 
 fn set_followed(s: &mut Session, uri: &str, follow: bool) -> spotify::Result<Response> {
-	if follow {
+	if let Some(player) = &mut s.player
+		&& uri.starts_with("spotify:playlist:")
+	{
+		player.follow_playlist(uri, follow)?;
+	} else if follow {
 		s.client.save(&[uri])?;
 	} else {
 		s.client.unsave(&[uri])?;
@@ -574,11 +626,18 @@ fn set_followed(s: &mut Session, uri: &str, follow: bool) -> spotify::Result<Res
 }
 
 fn create_playlist(s: &mut Session, name: &str, uris: &[String]) -> spotify::Result<Response> {
-	let playlist = s.client.create_playlist(name)?;
-	if !uris.is_empty() {
-		let uris: Vec<&str> = uris.iter().map(String::as_str).collect();
-		s.client.add_to_playlist(&playlist.id, &uris)?;
-	}
+	let mut playlist = match &mut s.player {
+		Some(player) => player.create_playlist(name, uris)?,
+		None => {
+			let playlist = s.client.create_playlist(name)?;
+			if !uris.is_empty() {
+				let uris: Vec<&str> = uris.iter().map(String::as_str).collect();
+				s.client.add_to_playlist(&playlist.id, &uris)?;
+			}
+			playlist
+		},
+	};
+	playlist.normalize(&s.me, s.me_name.as_deref());
 	s.playlists.insert(0, playlist.clone());
 	Ok(Response::Created(playlist))
 }

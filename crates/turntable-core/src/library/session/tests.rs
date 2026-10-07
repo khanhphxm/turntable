@@ -211,3 +211,12 @@ fn liked_snapshots_publish_changes_once_and_reconcile_removed_tracks() -> Result
 	assert!(liked_snapshot(&[], &mut cached, &mut changed).is_none());
 	Ok(())
 }
+
+#[test]
+fn playlist4_null_description_is_absent_but_normal_copy_is_preserved() {
+	let mut attributes = ListAttributes::new();
+	attributes.set_description("null".into());
+	assert_eq!(super::playlist("scratch", "alex", &attributes, 0).description, None);
+	attributes.set_description("A mix".into());
+	assert_eq!(super::playlist("scratch", "alex", &attributes, 0).description.as_deref(), Some("A mix"));
+}

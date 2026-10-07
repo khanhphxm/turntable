@@ -284,6 +284,37 @@ impl PlaylistIndex {
 		Ok(true)
 	}
 
+	/// Register a successfully created owned playlist immediately, including duplicates.
+	pub fn apply_create(&mut self, playlist: PlaylistId, name: &str, tracks: &[TrackId]) {
+		let mut tracks = tracks.to_vec();
+		tracks.sort_unstable();
+		self.replace_playlist(
+			playlist,
+			CachedPlaylist { name: name.to_owned(), revision: Vec::new(), tracks, dirty: true },
+			&mut RefreshStats::default(),
+		);
+	}
+
+	pub fn apply_rename(&mut self, playlist: &PlaylistId, name: &str) -> Result<(), IndexError> {
+		let record = self.playlists.get_mut(playlist).ok_or(IndexError::UnknownPlaylist)?;
+		if record.name != name {
+			record.name = name.to_owned();
+			record.dirty = true;
+			self.cache_dirty = true;
+		}
+		Ok(())
+	}
+
+	/// Forget an unfollowed/deleted owned playlist without a rootlist round trip.
+	pub fn apply_delete(&mut self, playlist: &PlaylistId) {
+		if let Some(record) = self.playlists.remove(playlist) {
+			for &track in unique_tracks(&record.tracks) {
+				remove_membership(&mut self.by_track, track, *playlist);
+			}
+			self.cache_dirty = true;
+		}
+	}
+
 	/// Fetch decorated rootlist pages, then only new, changed, or locally edited
 	/// owned playlists. At most `concurrency` playlists are in flight; pages of
 	/// one playlist are sequential. Unchanged launches make no playlist requests
@@ -484,9 +515,61 @@ impl Membership {
 		}
 	}
 
-	/// Apply successful Web API writes before reconciling Playlist4 revisions. A Web
-	/// API removal by URI removes every occurrence, not just one playlist row.
-	pub(super) fn edited(&mut self, playlist_uri: &str, additions: &[String], removals: &[String], deliver: &dyn Fn(Response)) {
+	pub(super) fn created(&mut self, playlist_uri: &str, name: &str, uris: &[String], deliver: &dyn Fn(Response)) {
+		if let Some(index) = &mut self.index
+			&& let Ok(id) = PlaylistId::from_uri(playlist_uri)
+		{
+			let tracks: Vec<_> = uris.iter().filter_map(|uri| TrackId::from_uri(uri).ok()).collect();
+			index.apply_create(id, name, &tracks);
+			self.local_answer(deliver);
+		}
+	}
+
+	pub(super) fn renamed(&mut self, playlist_uri: &str, name: &str, deliver: &dyn Fn(Response)) {
+		if let Some(index) = &mut self.index
+			&& let Ok(id) = PlaylistId::from_uri(playlist_uri)
+			&& index.playlists.contains_key(&id)
+		{
+			if let Err(error) = index.apply_rename(&id, name) {
+				Self::failed(&error, deliver);
+			}
+			self.local_answer(deliver);
+		}
+	}
+
+	pub(super) fn deleted(&mut self, playlist_uri: &str, deliver: &dyn Fn(Response)) {
+		if let Some(index) = &mut self.index
+			&& let Ok(id) = PlaylistId::from_uri(playlist_uri)
+		{
+			index.apply_delete(&id);
+			self.local_answer(deliver);
+		}
+	}
+
+	pub(super) fn removed_row(&mut self, playlist_uri: &str, uri: &str, deliver: &dyn Fn(Response)) {
+		if let Some(index) = &mut self.index
+			&& let (Ok(id), Ok(track)) = (PlaylistId::from_uri(playlist_uri), TrackId::from_uri(uri))
+			&& index.playlists.contains_key(&id)
+		{
+			if let Err(error) = index.apply_remove(&id, &track) {
+				Self::failed(&error, deliver);
+			}
+			self.local_answer(deliver);
+		}
+	}
+
+	fn local_answer(&mut self, deliver: &dyn Fn(Response)) {
+		if let Some(index) = &mut self.index
+			&& let Err(error) = index.persist()
+		{
+			Self::failed(&error, deliver);
+		}
+		self.snapshot();
+		self.publish(None, deliver);
+	}
+
+	/// Publish successful additions before reconciling Playlist4 revisions.
+	pub(super) fn appended(&mut self, playlist_uri: &str, additions: &[String], deliver: &dyn Fn(Response)) {
 		if let Some(index) = &mut self.index
 			&& let Ok(playlist) = PlaylistId::from_uri(playlist_uri)
 			&& index.playlists.contains_key(&playlist)
@@ -498,16 +581,7 @@ impl Membership {
 					Self::failed(&error, deliver);
 				}
 			}
-			for uri in removals {
-				if let Ok(track) = TrackId::from_uri(uri) {
-					index.remove_all(playlist, track);
-				}
-			}
-			if let Err(error) = index.persist() {
-				Self::failed(&error, deliver);
-			}
-			self.snapshot();
-			self.publish(None, deliver);
+			self.local_answer(deliver);
 		}
 	}
 
@@ -527,21 +601,6 @@ impl Membership {
 
 	fn failed(error: &IndexError, deliver: &dyn Fn(Response)) {
 		deliver(Response::Error { route: None, message: format!("Couldn't update playlist membership: {error}") });
-	}
-}
-
-impl PlaylistIndex {
-	fn remove_all(&mut self, playlist: PlaylistId, track: TrackId) {
-		let Some(record) = self.playlists.get_mut(&playlist) else { return };
-		let start = record.tracks.partition_point(|existing| *existing < track);
-		let end = record.tracks.partition_point(|existing| *existing <= track);
-		if start == end {
-			return;
-		}
-		drop(record.tracks.drain(start..end));
-		record.dirty = true;
-		self.cache_dirty = true;
-		remove_membership(&mut self.by_track, track, playlist);
 	}
 }
 
@@ -830,21 +889,28 @@ mod tests {
 	}
 
 	#[test]
-	fn web_api_remove_reconciles_all_occurrences_but_preserves_other_playlists() -> Result<(), IndexError> {
+	fn create_rename_and_row_removals_publish_immediate_persisted_membership() -> Result<(), IndexError> {
 		let directory = tempfile::tempdir()?;
-		let mut index = PlaylistIndex::load(directory.path(), "alice")?;
-		index.replace_playlist(PlaylistId(1), record(1, &[1, 1, 2]), &mut RefreshStats::default());
-		index.replace_playlist(PlaylistId(2), record(1, &[1]), &mut RefreshStats::default());
 		let mut membership = Membership::new(directory.path());
-		membership.index = Some(index);
-		membership.edited("spotify:playlist:0000000000000000000001", &[], &["spotify:track:0000000000000000000001".into()], &|_| {});
+		membership.index = Some(PlaylistIndex::load(directory.path(), "alice")?);
+		let playlist = "spotify:playlist:0000000000000000000001";
+		let track = "spotify:track:0000000000000000000001";
+		membership.created(playlist, "Scratch", &[track.into(), track.into()], &|_| {});
+		assert_eq!(membership.tracks.as_ref(), &[TrackId(1)]);
+		membership.renamed(playlist, "Renamed", &|_| {});
 		let loaded = PlaylistIndex::load(directory.path(), "alice")?;
-		assert_eq!(loaded.playlist_tracks(&PlaylistId(1)), Some([TrackId(2)].as_slice()));
-		assert_eq!(loaded.playlists_with(&TrackId(1)), &[PlaylistId(2)]);
-		assert!(loaded.needs_fetch(&PlaylistId(1), &root(1)));
-		assert_eq!(membership.tracks.as_ref(), &[TrackId(1), TrackId(2)]);
-		membership.edited("spotify:playlist:0000000000000000000002", &[], &["spotify:track:0000000000000000000001".into()], &|_| {});
-		assert_eq!(membership.tracks.as_ref(), &[TrackId(2)]);
+		assert_eq!(loaded.playlists().next().map(|playlist| playlist.name), Some("Renamed"));
+		membership.removed_row(playlist, track, &|_| {});
+		assert_eq!(membership.tracks.as_ref(), &[TrackId(1)], "duplicate keeps membership");
+		let loaded = PlaylistIndex::load(directory.path(), "alice")?;
+		assert_eq!(loaded.playlist_tracks(&PlaylistId(1)), Some([TrackId(1)].as_slice()));
+		membership.removed_row(playlist, track, &|_| {});
+		assert!(membership.tracks.is_empty());
+		membership.appended(playlist, &[track.into()], &|_| {});
+		assert_eq!(membership.tracks.as_ref(), &[TrackId(1)]);
+		membership.deleted(playlist, &|_| {});
+		assert!(membership.tracks.is_empty());
+		assert_eq!(PlaylistIndex::load(directory.path(), "alice")?.playlist_count(), 0);
 		Ok(())
 	}
 
@@ -1046,7 +1112,7 @@ mod tests {
 		let mut membership = Membership::new(directory.path());
 		membership.index = Some(index);
 		let responses = std::cell::RefCell::new(Vec::new());
-		membership.edited("spotify:playlist:0000000000000000000001", &["spotify:track:0000000000000000000001".into()], &[], &|response| {
+		membership.appended("spotify:playlist:0000000000000000000001", &["spotify:track:0000000000000000000001".into()], &|response| {
 			responses.borrow_mut().push(response);
 		});
 		assert!(
@@ -1055,7 +1121,7 @@ mod tests {
 		let loaded = PlaylistIndex::load(directory.path(), "alice")?;
 		assert!(loaded.contains(&TrackId(1)));
 		assert!(loaded.needs_fetch(&PlaylistId(1), &root(1)));
-		membership.edited("spotify:playlist:0000000000000000000002", &["spotify:track:0000000000000000000003".into()], &[], &|response| {
+		membership.appended("spotify:playlist:0000000000000000000002", &["spotify:track:0000000000000000000003".into()], &|response| {
 			responses.borrow_mut().push(response);
 		});
 		assert!(!membership.tracks.contains(&TrackId(3)), "followed or unindexed playlists cannot be optimistically marked owned");

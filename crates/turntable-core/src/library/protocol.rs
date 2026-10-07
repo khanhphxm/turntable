@@ -40,7 +40,10 @@ pub enum Request {
 	RenamePlaylist(String, spotify::PlaylistChanges),
 	/// Append tracks to a playlist (id, name for the notice, URIs).
 	AddToPlaylist(String, String, Vec<String>),
-	RemoveFromPlaylist(String, String),
+	/// Remove one occurrence (playlist id, URI, absolute zero-based row).
+	RemoveFromPlaylist(String, String, u32),
+	/// Move one row to its final zero-based position.
+	MovePlaylistRow(String, u32, u32),
 	/// The tracks of an album or playlist, to add to the queue.
 	QueueContext(Route),
 	/// Whether `uri` is in Liked Songs.
@@ -53,6 +56,10 @@ pub enum Request {
 	Devices,
 	/// What plays and on which device (polled while another device plays).
 	Playback,
+	/// Last played track/context; requested only if the session has no paused player state.
+	LastPlayback,
+	/// Persist a position checkpoint without any network request.
+	RememberPlayback(super::PlaybackPosition),
 	/// Move playback to the device `id`, playing or staying paused.
 	Transfer {
 		id:   String,
@@ -124,7 +131,8 @@ pub enum Response {
 	Plays(Route, HashMap<String, u64>),
 	Playlists(Vec<Playlist>),
 	Created(Playlist),
-	Removed(String, String),
+	Removed(String, String, u32),
+	Moved(String, u32, u32),
 	/// Track URIs to add to the queue, and what they came from.
 	Queue(Vec<String>, String),
 	/// A one-line confirmation for a toast.
@@ -157,6 +165,11 @@ pub enum Response {
 	Devices(Result<Vec<spotify::Device>, String>),
 	/// What plays and where: `Ok(None)` when no device is active.
 	Playback(Result<Option<spotify::Playback>, String>),
+	/// Passive recently-played fallback, bound to the authenticated account.
+	LastPlayback {
+		account:  String,
+		playback: Option<crate::engine::LastPlayback>,
+	},
 	/// Playback was moved to the device asked for.
 	Transferred,
 	/// A transfer or a transport command to another device failed (a sentence for the user).

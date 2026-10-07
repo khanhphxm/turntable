@@ -5,7 +5,7 @@
 use gpui_kit::{
 	AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
 	SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, WeakEntity,
-	component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
+	component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
 	div, linear_color_stop, linear_gradient,
 	prelude::FluentBuilder as _,
 	px, rgb,
@@ -19,7 +19,7 @@ use turntable_core::{
 use crate::{
 	shell::Shell,
 	theme,
-	widgets::{Icon, added_badge, cover, icon, icon_button, play_disc, section_title},
+	widgets::{Icon, added_badge, cover, icon, menu_icon, play_disc, section_title},
 };
 
 pub fn clock(ms: u64) -> String {
@@ -85,6 +85,12 @@ impl Shell {
 				.justify_center()
 				.child(icon(Icon::Heart, size * 0.42, theme::text())),
 			Route::Artist(_) => cover(self.image(url, logical, cx), theme::RAISED, size, size / 2.),
+			// A playlist without artwork (new or empty) shows a note, as Spotify does.
+			_ if url.is_none() => cover(None, theme::RAISED, size, if size > px(100.) { px(6.) } else { px(4.) })
+				.flex()
+				.items_center()
+				.justify_center()
+				.child(icon(Icon::Music, size * 0.32, theme::subdued())),
 			_ => cover(self.image(url, logical, cx), theme::RAISED, size, if size > px(100.) { px(6.) } else { px(4.) }),
 		}
 	}
@@ -361,6 +367,7 @@ impl Shell {
 		let room = self.main_w - 232. - 3. * 24.;
 		let chars = title.chars().count().max(1) as f32;
 		let size = [96., 72., 48., 32.].into_iter().find(|s| chars * s * 0.6 <= room).unwrap_or(32.);
+		let editable = self.editable_playlist();
 		div()
 			.h(px(320.))
 			.w_full()
@@ -371,7 +378,7 @@ impl Shell {
 			.gap_6()
 			.p_6()
 			.bg(linear_gradient(180., linear_color_stop(rgb(tint), 0.), linear_color_stop(theme::alpha(rgb(tint), 0.55), 1.)))
-			.child(self.art(route, cover_url, px(232.), cx).shadow_2xl())
+			.child(self.header_cover(route, cover_url, editable, cx))
 			.child(
 				div()
 					.flex_1()
@@ -382,10 +389,12 @@ impl Shell {
 					.child(div().text_size(px(14.)).child(kicker))
 					.child(
 						div()
+							.id("header-title")
 							.text_size(px(size))
 							.line_height(px(size * 1.1))
 							.font_weight(FontWeight::EXTRA_BOLD)
 							.line_clamp(2)
+							.when(editable, |s| s.cursor_pointer().on_click(cx.listener(|this, _, _, cx| this.send(Msg::RenamePlaylist, cx))))
 							.child(title),
 					)
 					.child(div().text_size(px(14.)).child(meta)),
@@ -411,7 +420,77 @@ impl Shell {
 				}),
 			))
 			.child(actions)
-			.child(icon_button("page-more", Icon::Ellipsis, px(32.), false, |_, _, _| {}))
+			.child(self.page_menu(cx))
+	}
+
+	/// The open page is a playlist the user owns (its details can be edited).
+	pub fn editable_playlist(&self) -> bool {
+		let lib = &self.st().library;
+		matches!(lib.route, Route::Playlist(_)) && lib.listing.as_ref().is_some_and(|l| l.owned)
+	}
+
+	/// The header's artwork; on the user's own playlist, hovering offers to edit its details.
+	fn header_cover(&self, route: &Route, cover_url: Option<&str>, editable: bool, cx: &mut Context<'_, Self>) -> AnyElement {
+		let art = self.art(route, cover_url, px(232.), cx).shadow_2xl();
+		if !editable {
+			return art.into_any_element();
+		}
+		div()
+			.id("header-cover")
+			.group("header-cover")
+			.relative()
+			.cursor_pointer()
+			.on_click(cx.listener(|this, _, _, cx| this.send(Msg::RenamePlaylist, cx)))
+			.child(art)
+			.child(
+				div()
+					.absolute()
+					.inset_0()
+					.rounded(px(6.))
+					.bg(theme::alpha(theme::base(), 0.6))
+					.flex()
+					.flex_col()
+					.items_center()
+					.justify_center()
+					.gap_2()
+					.invisible()
+					.group_hover("header-cover", |s| s.visible())
+					.child(icon(Icon::Pencil, px(48.), theme::text()))
+					.child(div().text_size(px(16.)).child("Edit details")),
+			)
+			.into_any_element()
+	}
+
+	/// The page's "…": what Spotify offers for the open playlist, album or artist.
+	fn page_menu(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+		let lib = &self.st().library;
+		let route = lib.route.clone();
+		let listing = lib.listing.as_ref();
+		let owned = self.editable_playlist();
+		let followed = listing.and_then(|l| l.followed);
+		let artist = listing.and_then(|l| l.album.as_ref()).and_then(|a| a.artists.first()).map(|a| id_of(&a.uri).to_owned());
+		let shell = cx.entity().downgrade();
+		menu_icon("page-more", Icon::Ellipsis, px(32.)).dropdown_menu(move |menu, _, _| {
+			let item = |label: &'static str, msg: Msg| {
+				let shell = shell.clone();
+				PopupMenuItem::new(label).on_click(move |_, _, cx| {
+					let _ = shell.update(cx, |this, cx| match &msg {
+						Msg::Navigate(route) => this.go(route.clone(), cx),
+						other => this.send(other.clone(), cx),
+					});
+				})
+			};
+			let mut menu = menu.item(item("Add to queue", Msg::QueueContext(route.clone())));
+			if owned {
+				menu = menu.item(item("Edit details", Msg::RenamePlaylist));
+			} else if let Some(followed) = followed {
+				menu = menu.item(item(if followed { "Remove from Your Library" } else { "Add to Your Library" }, Msg::ToggleFollow));
+			}
+			if let Some(id) = &artist {
+				menu = menu.item(PopupMenuItem::separator()).item(item("Go to artist", Msg::Navigate(Route::Artist(id.clone()))));
+			}
+			menu
+		})
 	}
 
 	/// The colour wash behind a page's action bar and first rows.

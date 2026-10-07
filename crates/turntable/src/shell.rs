@@ -20,10 +20,14 @@ use crate::{
 	widgets::{Slider, SliderEvent},
 };
 
-actions!(turntable, [TogglePlay, Next, Previous, Back, Forward, FocusSearch, ToggleLibrary, ToggleQueue, ToggleLyrics, ToggleNowPlaying]);
+/// How long a toast stays up.
+const TOAST_FOR: std::time::Duration = std::time::Duration::from_millis(3000);
+
+actions!(turntable, [CloseDialog, TogglePlay, Next, Previous, Back, Forward, FocusSearch, ToggleLibrary, ToggleQueue, ToggleLyrics, ToggleNowPlaying]);
 
 pub fn bind_keys(cx: &mut gpui_kit::App) {
 	cx.bind_keys([
+		KeyBinding::new("escape", CloseDialog, Some("Shell")),
 		KeyBinding::new("space", TogglePlay, Some("Shell")),
 		KeyBinding::new("cmd-right", Next, Some("Shell")),
 		KeyBinding::new("cmd-left", Previous, Some("Shell")),
@@ -66,7 +70,7 @@ pub struct Shell {
 	pub list:          ListState,
 	pub list_for:      Option<(Route, usize)>,
 	pub search:        Entity<InputState>,
-	pub eq:            Vec<Entity<Slider>>,
+	pub eq_graph:      Entity<crate::eqgraph::EqGraph>,
 	pub focus:         FocusHandle,
 	/// The main view's width as of this frame (titles size themselves to it).
 	pub main_w:        f32,
@@ -77,6 +81,11 @@ pub struct Shell {
 	pub lyrics_line:   Option<usize>,
 	/// The OS's Now Playing session (set once the window is open).
 	pub now_playing:   Option<crate::nowplaying::NowPlaying>,
+	/// The open "Edit details" dialog's fields.
+	pub details:       Option<crate::dialogs::DetailsInputs>,
+	/// The toast last shown, and the one whose time is up (the core never clears toasts).
+	pub toast_shown:   Option<u32>,
+	pub toast_gone:    Option<u32>,
 }
 
 impl Focusable for Shell {
@@ -130,16 +139,8 @@ impl Shell {
 			_ => {},
 		})
 		.detach();
-		let eq: Vec<Entity<Slider>> =
-			core.state().eq.gains_db.iter().map(|db| Slider::vertical(cx, crate::pages::eq::db_to_value(*db))).collect();
-		for (band, slider) in eq.iter().enumerate() {
-			cx.subscribe(slider, move |this, _, e: &SliderEvent, cx| {
-				if let SliderEvent::Commit(v) = e {
-					this.send(Msg::EqBand(band, crate::pages::eq::value_to_step(*v)), cx);
-				}
-			})
-			.detach();
-		}
+		let eq_graph = crate::eqgraph::EqGraph::new(cx, core.state().eq.gains_db, core.state().eq.enabled);
+		cx.subscribe(&eq_graph, |this, _, e: &crate::eqgraph::BandChanged, cx| this.send(Msg::EqBand(e.band, e.step), cx)).detach();
 		let page = Page::Core(core.state().library.route.clone());
 		let mut shell = Self {
 			core,
@@ -152,13 +153,16 @@ impl Shell {
 			list: ListState::new(0, ListAlignment::Top, px(600.)),
 			list_for: None,
 			search,
-			eq,
+			eq_graph,
 			focus: cx.focus_handle(),
 			main_w: 600.,
 			scale: window.scale_factor(),
 			lyrics_scroll: gpui_kit::ScrollHandle::new(),
 			lyrics_line: None,
 			now_playing: None,
+			details: None,
+			toast_shown: None,
+			toast_gone: None,
 		};
 		shell.send(Msg::Navigate(Route::Home), cx);
 		shell
@@ -207,19 +211,34 @@ impl Shell {
 		let (pos, vol) = (st.position_ms() as f32 / total as f32, f32::from(st.volume) / 100.);
 		self.seek.update(cx, |s, cx| s.set(pos, cx));
 		self.volume_slider.update(cx, |s, cx| s.set(vol, cx));
-		// The band sliders follow the core (a preset moves them all).
-		let gains = self.core.state().eq.gains_db;
-		for (slider, db) in self.eq.iter().zip(gains) {
-			slider.update(cx, |s, cx| s.set(crate::pages::eq::db_to_value(db), cx));
-		}
+		// The EQ curve follows the core (a preset moves every band).
+		let eq = self.core.state().eq;
+		self.eq_graph.update(cx, |g, cx| g.set(eq.gains_db, eq.enabled, cx));
 		if let Some(mut np) = self.now_playing.take() {
 			np.sync(self);
 			self.now_playing = Some(np);
 		}
+		self.time_toast(cx);
 		if self.st().quit {
 			cx.quit();
 		}
 		cx.notify();
+	}
+
+	/// Hides each new toast after a few seconds.
+	fn time_toast(&mut self, cx: &mut Context<'_, Self>) {
+		let id = self.st().toast.as_ref().map(|(id, _)| *id);
+		if id.is_some() && id != self.toast_shown {
+			self.toast_shown = id;
+			cx.spawn(async move |this, cx| {
+				cx.background_executor().timer(TOAST_FOR).await;
+				let _ = this.update(cx, |this, cx| {
+					this.toast_gone = id;
+					cx.notify();
+				});
+			})
+			.detach();
+		}
 	}
 
 	/// A cover at `logical` px, decoded off-thread: `None` until it's ready (the core fetches it).
@@ -343,10 +362,12 @@ impl Render for Shell {
 			Page::Settings => self.settings_page(cx).into_any_element(),
 			Page::Equalizer => self.eq_page(cx).into_any_element(),
 		};
-		let toast = self.st().toast.clone();
+		let toast = self.st().toast.clone().filter(|(id, _)| Some(*id) != self.toast_gone);
+		let dialog = self.dialog(window, cx);
 		div()
 			.key_context("Shell")
 			.track_focus(&self.focus)
+			.on_action(cx.listener(|this, _: &CloseDialog, _, cx| this.send(Msg::CloseDialog, cx)))
 			.on_action(cx.listener(|this, _: &TogglePlay, _, cx| this.send(Msg::TogglePlay, cx)))
 			.on_action(cx.listener(|this, _: &Next, _, cx| this.send(Msg::Next, cx)))
 			.on_action(cx.listener(|this, _: &Previous, _, cx| this.send(Msg::Prev, cx)))
@@ -391,6 +412,8 @@ impl Render for Shell {
 					.when_some(side, |row, side| row.child(self.right_panel(side, cx))),
 			)
 			.child(self.player_bar(cx))
+			.relative()
+			.children(dialog)
 			.into_any_element()
 	}
 }

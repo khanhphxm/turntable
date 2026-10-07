@@ -38,7 +38,7 @@ pub struct Tile {
 
 impl Tile {
 	pub fn playlist(p: &Playlist) -> Self {
-		let owner = p.owner.display_name.as_deref().unwrap_or(&p.owner.id);
+		let owner = p.owner_name();
 		Self {
 			route: Route::Playlist(p.id.clone()),
 			play:  Some(p.uri.clone()),
@@ -202,7 +202,7 @@ impl Entry<'_> {
 	pub(super) fn creator(&self) -> &str {
 		match self {
 			Self::Liked(owner) => owner,
-			Self::Playlist(p) => p.owner.display_name.as_deref().unwrap_or(&p.owner.id),
+			Self::Playlist(p) => p.owner_name(),
 			Self::Album(a) => a.artists.first().map_or("", |x| x.name.as_str()),
 			Self::Artist(a) => &a.name,
 		}

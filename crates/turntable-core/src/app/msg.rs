@@ -43,7 +43,14 @@ pub enum Msg {
 	AddNowPlayingToPlaylist,
 	/// Add the picked tracks to playlist `id`, or to a new playlist (`None`).
 	AddToPlaylist(Option<String>),
+	/// Add directly from search results without opening or consuming a dialog.
+	AddToPlaylistDirect {
+		playlist: String,
+		uris:     Vec<String>,
+	},
 	RemoveRow(usize),
+	/// Move a playlist row to final zero-based row `to` (drag-and-drop).
+	MoveRow(usize, usize),
 	RenamePlaylist,
 	SaveRename,
 	TogglePlaylistPublic,

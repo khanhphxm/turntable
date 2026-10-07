@@ -4,7 +4,7 @@ use std::{cell::Cell, rc::Rc};
 
 use gpui_kit::{
 	App, AppContext as _, Bounds, ClickEvent, Context, DispatchPhase, Div, ElementId, Entity, EventEmitter, FontWeight, Hsla,
-	InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point,
+	InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point,
 	Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Svg, Window, canvas, div, prelude::FluentBuilder as _,
 	px, relative, rgb, svg,
 };
@@ -157,10 +157,8 @@ pub enum SliderEvent {
 }
 
 /// Spotify's bar slider: a 4 px track that turns green with a knob on hover or drag.
-/// Horizontal (seek, volume) or vertical (EQ bands, 0 at the bottom).
 pub struct Slider {
 	value:    f32,
-	vertical: bool,
 	/// The value under the pointer while dragging.
 	dragging: Option<f32>,
 	bounds:   Rc<Cell<Bounds<Pixels>>>,
@@ -170,11 +168,7 @@ impl EventEmitter<SliderEvent> for Slider {}
 
 impl Slider {
 	pub fn new(cx: &mut App, value: f32) -> Entity<Self> {
-		cx.new(|_| Self { value, vertical: false, dragging: None, bounds: Rc::default() })
-	}
-
-	pub fn vertical(cx: &mut App, value: f32) -> Entity<Self> {
-		cx.new(|_| Self { value, vertical: true, dragging: None, bounds: Rc::default() })
+		cx.new(|_| Self { value, dragging: None, bounds: Rc::default() })
 	}
 
 	/// The owner's value, unless a drag holds the knob.
@@ -189,17 +183,10 @@ impl Slider {
 
 	fn at(&self, p: Point<Pixels>) -> f32 {
 		let b = self.bounds.get();
-		if self.vertical {
-			if b.size.height <= px(0.) {
-				return self.value;
-			}
-			(1. - (p.y - b.origin.y) / b.size.height).clamp(0., 1.)
-		} else {
-			if b.size.width <= px(0.) {
-				return self.value;
-			}
-			((p.x - b.origin.x) / b.size.width).clamp(0., 1.)
+		if b.size.width <= px(0.) {
+			return self.value;
 		}
+		((p.x - b.origin.x) / b.size.width).clamp(0., 1.)
 	}
 
 	fn scrub(&mut self, p: Point<Pixels>, cx: &mut Context<'_, Self>) {
@@ -241,27 +228,28 @@ impl Render for Slider {
 	fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
 		let shown = self.dragging.unwrap_or(self.value);
 		let active = self.dragging.is_some();
-		let vertical = self.vertical;
 		let bounds = self.bounds.clone();
 		let entity = active.then(|| cx.entity());
 		let fill = div()
 			.absolute()
+			.left_0()
+			.top_0()
+			.h_full()
+			.w(relative(shown))
 			.rounded_full()
 			.bg(if active { theme::accent() } else { theme::text() })
 			.group_hover("slider", |s| s.bg(theme::accent()));
-		let fill =
-			if vertical { fill.left_0().bottom_0().w_full().h(relative(shown)) } else { fill.left_0().top_0().h_full().w(relative(shown)) };
 		let knob = div()
 			.absolute()
+			.left(relative(shown))
+			.ml(px(-6.))
 			.size(px(12.))
 			.rounded_full()
 			.bg(theme::text())
 			.shadow_md()
 			.when(!active, |s| s.invisible())
 			.group_hover("slider", |s| s.visible());
-		let knob = if vertical { knob.bottom(relative(shown)).mb(px(-6.)) } else { knob.left(relative(shown)).ml(px(-6.)) };
-		let rail = div().relative().rounded_full().bg(theme::track()).child(fill);
-		let rail = if vertical { rail.w(px(4.)).h_full() } else { rail.h(px(4.)).w_full() };
+		let rail = div().relative().h(px(4.)).w_full().rounded_full().bg(theme::track()).child(fill);
 		div()
 			.id("slider")
 			.group("slider")
@@ -270,7 +258,8 @@ impl Render for Slider {
 			.items_center()
 			.justify_center()
 			.cursor_pointer()
-			.map(|s| if vertical { s.w(px(16.)).h_full() } else { s.h(px(16.)).w_full() })
+			.h(px(16.))
+			.w_full()
 			.child(
 				canvas(
 					move |b, _, _| bounds.set(b),
@@ -314,4 +303,65 @@ pub fn outline_button(id: impl Into<ElementId>, label: impl Into<SharedString>) 
 pub fn corner_mask() -> Div {
 	let w = theme::GAP;
 	div().absolute().top(-w).left(-w).right(-w).bottom(-w).rounded(theme::RADIUS + w).border(w).border_color(theme::base())
+}
+
+/// Any element as a dropdown-menu trigger (`DropdownMenu` wants `Selectable`): a bare icon
+/// button opens a menu exactly like a gpui-kit `Button` would, without the button's chrome.
+#[derive(IntoElement)]
+pub struct MenuTrigger {
+	inner:    Stateful<Div>,
+	selected: bool,
+}
+
+impl MenuTrigger {
+	pub fn new(inner: Stateful<Div>) -> Self {
+		Self { inner, selected: false }
+	}
+}
+
+impl gpui_kit::Styled for MenuTrigger {
+	fn style(&mut self) -> &mut gpui_kit::StyleRefinement {
+		gpui_kit::Styled::style(&mut self.inner)
+	}
+}
+
+impl InteractiveElement for MenuTrigger {
+	fn interactivity(&mut self) -> &mut gpui_kit::Interactivity {
+		self.inner.interactivity()
+	}
+}
+
+impl gpui_kit::component::Selectable for MenuTrigger {
+	fn selected(mut self, selected: bool) -> Self {
+		self.selected = selected;
+		self
+	}
+
+	fn is_selected(&self) -> bool {
+		self.selected
+	}
+}
+
+impl gpui_kit::component::menu::DropdownMenu for MenuTrigger {}
+
+impl gpui_kit::RenderOnce for MenuTrigger {
+	fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+		self.inner
+	}
+}
+
+/// A bare icon that opens a menu (the "…" of pages, rows and the sort control).
+pub fn menu_icon(id: impl Into<ElementId>, glyph: Icon, size: Pixels) -> MenuTrigger {
+	MenuTrigger::new(
+		div()
+			.id(id)
+			.group("menu-icon")
+			.size(size + px(16.))
+			.flex()
+			.flex_none()
+			.items_center()
+			.justify_center()
+			.cursor_pointer()
+			.child(icon(glyph, size * OPTICAL, theme::subdued()).group_hover("menu-icon", |s| s.text_color(theme::text()))),
+	)
 }

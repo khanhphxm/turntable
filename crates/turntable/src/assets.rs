@@ -45,6 +45,7 @@ icons! {
 	Lock => "lock",
 	Mic => "mic",
 	Moon => "moon",
+	Music => "music",
 	Mute => "mute",
 	Next => "next",
 	NowPlaying => "now-playing",

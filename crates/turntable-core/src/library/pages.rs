@@ -154,16 +154,17 @@ fn session_open(s: &mut Session, route: &Route, offset: u32) -> spotify::Result<
 					p.images.clone_from(&known.images);
 				}
 			}
+			p.normalize(&s.me, s.me_name.as_deref());
 			let owned = p.owner.id == s.me;
 			let followed = if owned { None } else { player.contains(&p.uri).ok() };
-			let owner = p.owner.display_name.as_deref().unwrap_or(&p.owner.id);
+			let subtitle = format!("{} • {}", p.owner_name(), songs(u64::from(p.track_count.unwrap_or_default())));
 			let mut listing = Listing {
 				kicker: "Playlist".into(),
 				title: p.name,
 				description: p.description,
 				public: p.public,
 				owned,
-				subtitle: format!("{owner} • {}", songs(u64::from(p.track_count.unwrap_or_default()))),
+				subtitle,
 				cover_url: spotify::pick_image(&p.images, 300).map(|i| i.url.clone()),
 				context_uri: Some(p.uri),
 				editable: editable || p.collaborative || owned,
@@ -192,8 +193,9 @@ pub(super) fn header(s: &mut Session, route: &Route) -> spotify::Result<Listing>
 	Ok(match route {
 		Route::Liked => Listing { kicker: ("Playlist").into(), title: "Liked Songs".into(), ..Listing::default() },
 		Route::Playlist(id) => match s.client.playlist(id) {
-			Ok(p) => {
-				let owner = p.owner.display_name.clone().unwrap_or_else(|| p.owner.id.clone());
+			Ok(mut p) => {
+				p.normalize(&s.me, s.me_name.as_deref());
+				let owner = p.owner_name();
 				let editable = p.items_readable(&s.me);
 				let followed =
 					if p.owner.id == s.me { None } else { part(s.client.library_contains(&[&p.uri]))?.and_then(|f| f.first().copied()) };

@@ -14,10 +14,9 @@ use crate::{
 };
 
 /// Room for the macOS traffic lights.
-const TRAFFIC_LIGHTS_W: f32 = 80.;
+const TRAFFIC_LIGHTS_W: f32 = 84.;
 
 impl Shell {
-	#[expect(clippy::too_many_lines, reason = "keep the declarative topbar controls together")]
 	pub fn top_bar(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
 		let can_back = !self.back.is_empty();
 		// The account's initial in the avatar.
@@ -52,21 +51,9 @@ impl Shell {
 					.items_center()
 					.gap_2()
 					.when(cfg!(target_os = "macos"), |s| s.pl(px(TRAFFIC_LIGHTS_W)))
-					.child(
-						round_button("back", Icon::Back, px(32.), px(16.), can_back, cx.listener(|this, _, _, cx| this.go_back(cx)))
-							.when(!can_back, |s| s.opacity(0.5)),
-					)
-					.child(
-						round_button(
-							"forward",
-							Icon::Forward,
-							px(32.),
-							px(16.),
-							can_forward,
-							cx.listener(|this, _, _, cx| this.go_forward(cx)),
-						)
-						.when(!can_forward, |s| s.opacity(0.5)),
-					),
+					// Spotify's back/forward are bare chevrons beside the traffic lights.
+					.child(nav_chevron("back", Icon::Back, can_back, cx.listener(|this, _, _, cx| this.go_back(cx))))
+					.child(nav_chevron("forward", Icon::Forward, can_forward, cx.listener(|this, _, _, cx| this.go_forward(cx)))),
 			)
 			.child(
 				div()
@@ -147,4 +134,25 @@ impl Shell {
 			.child(icon(Icon::Search, px(24.), if on { theme::text() } else { theme::subdued() }))
 			.child(div().flex_1().text_size(px(16.)).child(Input::new(&self.search).appearance(false).cleanable(true)))
 	}
+}
+
+/// A back/forward chevron: subdued, white on hover, faint and inert when there's nowhere to go.
+fn nav_chevron(
+	id: &'static str,
+	glyph: Icon,
+	enabled: bool,
+	on_click: impl Fn(&gpui_kit::ClickEvent, &mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
+) -> impl IntoElement {
+	div()
+		.id(id)
+		.group(id)
+		.size(px(32.))
+		.flex()
+		.items_center()
+		.justify_center()
+		.when(enabled, |s| s.cursor_pointer().on_click(on_click))
+		.child(
+			icon(glyph, px(20.), if enabled { theme::subdued().into() } else { theme::alpha(theme::subdued(), 0.4) })
+				.when(enabled, |s| s.group_hover(id, |s| s.text_color(theme::text()))),
+		)
 }

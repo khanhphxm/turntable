@@ -7,6 +7,8 @@ mod assets;
 mod bar;
 mod components;
 mod covers;
+mod dialogs;
+mod eqgraph;
 mod media;
 mod nowplaying;
 mod pages;
@@ -46,7 +48,8 @@ fn main() {
 			titlebar: Some(TitlebarOptions {
 				title:                  Some("turntable".into()),
 				appears_transparent:    true,
-				traffic_light_position: Some(point(px(14.), px(14.))),
+				// Centred in the 64 px top bar (a light's frame is ~14 px), inset like Spotify's.
+				traffic_light_position: Some(point(px(20.), px(25.))),
 			}),
 			window_min_size: Some(size(px(800.), px(560.))),
 			..Default::default()

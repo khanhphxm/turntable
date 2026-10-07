@@ -79,7 +79,9 @@ impl State {
 			Msg::AddRowToPlaylist(i) => self.add_row_to_playlist(i),
 			Msg::AddNowPlayingToPlaylist => self.add_now_playing_to_playlist(),
 			Msg::AddToPlaylist(target) => self.add_to_playlist(target, &mut effects),
+			Msg::AddToPlaylistDirect { playlist, uris } => effects.push(Effect::Library(self.playlist_add_request(playlist, uris))),
 			Msg::RemoveRow(i) => self.remove_row(i, &mut effects),
+			Msg::MoveRow(from, to) => self.move_playlist_row(from, to, &mut effects),
 			Msg::RenamePlaylist => self.open_playlist_details(),
 			Msg::SaveRename => effects.extend(self.save_playlist_details().map(Effect::Library)),
 			Msg::TogglePlaylistPublic => self.public_input = Some(!self.public_input.unwrap_or(false)),
@@ -174,8 +176,26 @@ impl State {
 		if self.playing() {
 			cmds.push(Command::Pause);
 		} else {
-			let play = self.rules_resume().unwrap_or(Command::Play { uri: None });
-			self.activate_command(play, cmds);
+			if let Some(play) = self.rules_resume() {
+				self.activate_command(play, cmds);
+			} else if !self.active && !self.item.uri.is_empty() {
+				// The bar can hold a passive account snapshot: no local track is loaded yet.
+				// An explicit load resumes exactly what is shown, without a transfer that
+				// could choose a different track or position from a later account state.
+				let position_ms = self.position_ms();
+				let start = if self.context.uri.is_empty() {
+					crate::spotify::PlayStart::List { uris: vec![self.item.uri.clone()], position_ms }
+				} else {
+					crate::spotify::PlayStart::Context {
+						uri: self.context.uri.clone(),
+						offset_uri: Some(self.item.uri.clone()),
+						position_ms,
+					}
+				};
+				cmds.push(Command::Load(start));
+			} else {
+				self.activate_command(Command::Play { uri: None }, cmds);
+			}
 		}
 	}
 
@@ -344,19 +364,37 @@ impl State {
 	fn add_to_playlist(&mut self, target: Option<String>, effects: &mut Vec<Effect>) {
 		if let Some(Dialog::AddToPlaylist { uris, .. }) = self.dialog.take() {
 			let request = match target {
-				Some(id) => {
-					let name = self.library.playlists.iter().find(|p| p.id == id).map_or_else(String::new, |p| p.name.clone());
-					library::Request::AddToPlaylist(id, name, uris)
-				},
+				Some(id) => self.playlist_add_request(id, uris),
 				None => library::Request::CreatePlaylist(self.new_playlist_name(), uris),
 			};
 			effects.push(Effect::Library(request));
 		}
 	}
 
+	fn playlist_add_request(&self, id: String, uris: Vec<String>) -> library::Request {
+		let name = self.library.playlists.iter().find(|p| p.id == id).map_or_else(String::new, |p| p.name.clone());
+		library::Request::AddToPlaylist(id, name, uris)
+	}
+
 	fn remove_row(&self, index: usize, effects: &mut Vec<Effect>) {
-		if let (Route::Playlist(id), Some(track)) = (&self.library.route, self.library.rows().get(index)) {
-			effects.push(Effect::Library(library::Request::RemoveFromPlaylist(id.clone(), track.uri.clone())));
+		if let (Route::Playlist(id), Some(track), Some(listing)) =
+			(&self.library.route, self.library.rows().get(index), &self.library.listing)
+			&& listing.editable
+			&& let Ok(position) = u32::try_from(index)
+		{
+			effects.push(Effect::Library(library::Request::RemoveFromPlaylist(id.clone(), track.uri.clone(), position)));
+		}
+	}
+
+	fn move_playlist_row(&self, from: usize, to: usize, effects: &mut Vec<Effect>) {
+		if let (Route::Playlist(id), Some(listing)) = (&self.library.route, &self.library.listing)
+			&& listing.editable
+			&& from != to
+			&& from < listing.tracks.len()
+			&& to < listing.tracks.len()
+			&& let (Ok(from), Ok(to)) = (u32::try_from(from), u32::try_from(to))
+		{
+			effects.push(Effect::Library(library::Request::MovePlaylistRow(id.clone(), from, to)));
 		}
 	}
 

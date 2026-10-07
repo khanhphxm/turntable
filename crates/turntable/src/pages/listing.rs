@@ -87,14 +87,9 @@ impl Shell {
 			(Route::Playlist(_), Some(false)) => "Private Playlist".to_owned(),
 			_ => l.kicker.to_string(),
 		};
-		let (title, subtitle, description, cover_url, context, owned) = (
-			l.title.clone(),
-			l.subtitle.clone(),
-			l.description.clone().filter(|d| !d.is_empty()),
-			l.cover_url.clone(),
-			l.context_uri.clone(),
-			l.owned,
-		);
+		let (title, subtitle, cover_url, context) = (l.title.clone(), l.subtitle.clone(), l.cover_url.clone(), l.context_uri.clone());
+		// Spotify stores a missing description as the text "null" on some playlists.
+		let description = l.description.clone().filter(|d| !d.is_empty() && d != "null");
 		let note = l.note.clone();
 		let tint = Self::tint(l.accent.as_deref());
 		// An album names its artist as a link.
@@ -120,26 +115,7 @@ impl Shell {
 			)
 			.into_any_element();
 		let shuffle = self.st().options.shuffle;
-		let actions = div()
-			.flex()
-			.items_center()
-			.gap_4()
-			.child(icon_button(
-				"page-shuffle",
-				Icon::Shuffle,
-				px(32.),
-				shuffle,
-				cx.listener(|this, _, _, cx| this.send(Msg::ToggleShuffle, cx)),
-			))
-			.when(owned, |s| {
-				s.child(icon_button(
-					"page-edit",
-					Icon::Pencil,
-					px(24.),
-					false,
-					cx.listener(|this, _, _, cx| this.send(Msg::RenamePlaylist, cx)),
-				))
-			});
+		let actions = icon_button("page-shuffle", Icon::Shuffle, px(32.), shuffle, cx.listener(|this, _, _, cx| this.send(Msg::ToggleShuffle, cx)));
 		let column = if matches!(route, Route::Album(_)) { Column::None } else { Column::Album };
 		div()
 			.w_full()

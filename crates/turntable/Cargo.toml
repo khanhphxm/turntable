@@ -21,6 +21,8 @@ turntable-core = { path = "../turntable-core" }
 # Enable only GPUI's Metal harness, not Kit's optional gpui-fast test backend.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 gpui-platform = { package = "gpui-pre-platform", version = "=0.3.9", default-features = false, features = ["test-support"] }
+libc = "0.2"
+mach2 = "0.6"
 
 # jemalloc hands freed pages back (the footprint follows what is in use, not the peak); not on
 # Windows, where it doesn't build with MSVC.

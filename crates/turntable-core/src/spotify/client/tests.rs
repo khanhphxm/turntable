@@ -332,3 +332,22 @@ fn a_conditional_get_sends_if_none_match_and_reads_a_304() {
 	assert_eq!(got.etag.as_deref(), Some("\"abc\""));
 	assert!(seen.all()[0].to_ascii_lowercase().contains("if-none-match: \"abc\""));
 }
+
+#[test]
+fn playlist_row_write_contracts_keep_duplicates_and_final_move_indices() {
+	let (base, seen, handle) = mock(vec![reply("200 OK", "", "{}"), reply("200 OK", "", "{}"), reply("200 OK", "", "{}")]);
+	let client = client(base);
+	client.remove_playlist_row("scratch", "spotify:track:a", 2).unwrap();
+	client.move_playlist_row("scratch", 1, 4).unwrap();
+	client.move_playlist_row("scratch", 4, 1).unwrap();
+	client.move_playlist_row("scratch", 1, 1).unwrap();
+	handle.join().unwrap();
+	let requests = seen.all();
+	assert_eq!(requests.len(), 3);
+	let body = |index: usize| serde_json::from_str::<serde_json::Value>(requests[index].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+	assert!(requests[0].starts_with("DELETE /playlists/scratch/items HTTP/1.1"));
+	assert_eq!(body(0), serde_json::json!({ "items": [{ "uri": "spotify:track:a", "positions": [2] }] }));
+	assert!(requests[1].starts_with("PUT /playlists/scratch/items HTTP/1.1"));
+	assert_eq!(body(1), serde_json::json!({ "range_start": 1, "range_length": 1, "insert_before": 5 }));
+	assert_eq!(body(2), serde_json::json!({ "range_start": 4, "range_length": 1, "insert_before": 1 }));
+}
