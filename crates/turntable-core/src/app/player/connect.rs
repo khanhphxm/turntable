@@ -29,7 +29,7 @@ impl Controller {
 
 	/// Sends `GET /me/player` (one at a time, and only while the window shows).
 	pub(super) fn poll_playback(&mut self) {
-		if self.poll_inflight || !self.visible || !self.state.web_ready() {
+		if self.state.connect.session || self.poll_inflight || !self.visible || !self.state.web_ready() {
 			return;
 		}
 		self.poll_inflight = true;
@@ -49,7 +49,7 @@ impl Controller {
 	/// Keeps the polling schedule in step with the state: polls run only while another device
 	/// plays and the window shows, every few seconds, further apart after failures.
 	pub(super) fn reconcile_poll(&mut self) {
-		if !self.visible || !(self.state.wants_poll() || self.force_poll) {
+		if self.state.connect.session || !self.visible || !(self.state.wants_poll() || self.force_poll) {
 			self.poll_at = None;
 		} else if self.poll_at.is_none() && !self.poll_inflight {
 			self.poll_at = Some(Instant::now() + crate::app::connect::poll_delay(self.poll_failures));

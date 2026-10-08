@@ -9,6 +9,7 @@ Spotify Premium required.
 ## Features
 
 - Home, search, your library, artists, albums and playlists
+- Create, rename and edit playlists
 - Spotify Connect: play here or on your other devices
 - Queue, synced lyrics ([LRCLIB](https://lrclib.net/)), artist bios (Wikipedia)
 - 10-band equalizer, loudness normalization, mono audio

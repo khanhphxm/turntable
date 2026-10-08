@@ -1,10 +1,11 @@
 //! Application state for Spotify Connect: the device menu and playback on another device.
 //!
-//! turntable plays through its in-process engine. When another Connect device (a phone, a
-//! speaker) plays, the Web API takes over: [`State::apply_playback`]
-//! takes what `GET /me/player` says (the player polls it only while another device plays and
-//! the window shows), and the transport controls become Web API player commands
-//! ([`State::remote_update`]). Pure state: the requests are the effects it returns.
+//! turntable plays through its in-process engine. Its authenticated Dealer subscription
+//! supplies the account's devices and remote player through [`State::apply_connect_state`],
+//! without polling or transferring playback. When no session supplies that data,
+//! [`State::apply_playback`] uses `GET /me/player` while the window shows. Device picks use
+//! session transfers when available; remote transport controls remain Web API commands
+//! ([`State::remote_update`]). Pure state: the commands are the effects it returns.
 
 use std::time::{Duration, Instant};
 

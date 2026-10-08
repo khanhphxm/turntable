@@ -549,11 +549,7 @@ impl Forward {
 			return;
 		}
 		if snap.initial_cluster {
-			(self.deliver)(Incoming::LastPlayback {
-				account:           self.session.username(),
-				playback:          None,
-				playing_elsewhere: false,
-			});
+			(self.deliver)(Incoming::RestoreUnavailable { account: self.session.username() });
 			return;
 		}
 		// An inactive local player has no loaded context. Its empty snapshots must not

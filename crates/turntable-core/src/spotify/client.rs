@@ -107,6 +107,10 @@ impl Client {
 		}
 	}
 
+	pub(crate) fn web_api_enabled(&self) -> bool {
+		self.web_api
+	}
+
 	/// The profile and the subscription (`premium`, `free`, `open`). The subscription only comes
 	/// with the `user-read-private` permission, so a sign-in from before it has none.
 	pub fn me_with_plan(&self) -> Result<(User, Option<String>)> {

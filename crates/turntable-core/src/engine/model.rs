@@ -264,14 +264,15 @@ pub struct ConnectState {
 
 /// What the engine reports to its client.
 #[derive(Debug)]
+#[expect(
+	clippy::large_enum_variant,
+	reason = "decoder events and frequent Dealer snapshots share a stream without allocating for every update"
+)]
 pub enum Incoming {
 	Event(Event),
-	/// Startup's passive Connect cluster read. `None` permits the recently-played fallback;
-	/// a playing remote device instead keeps its normal remote transport controls.
-	LastPlayback {
-		account:           String,
-		playback:          Option<LastPlayback>,
-		playing_elsewhere: bool,
+	/// Registration supplied no cluster; permits the recently-played fallback for this account.
+	RestoreUnavailable {
+		account: String,
 	},
 	/// A passive account/player/device update from the session's Dealer subscription.
 	ConnectState(ConnectState),

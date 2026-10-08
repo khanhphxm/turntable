@@ -49,20 +49,12 @@ impl Controller {
 		changed
 	}
 
-	pub(super) fn on_last_playback(&mut self, account: String, playback: Option<LastPlayback>, playing_elsewhere: bool) -> bool {
+	pub(super) fn on_restore_unavailable(&mut self, account: String) {
 		self.restore.pending = false;
-		self.restore.idle_cluster = !playing_elsewhere;
 		self.restore.account = (!account.is_empty()).then_some(account);
-		self.restore.fallback = playback.is_none() && !playing_elsewhere;
-		let was_item = self.last_item.clone();
-		let changed = playback.is_some_and(|playback| self.state.restore_playback(playback));
-		self.item_changed(&was_item);
-		self.remember_playback(true);
+		self.restore.fallback = self.state.item.uri.is_empty();
 		self.request_last_playback();
-		if playing_elsewhere {
-			self.probe();
-		}
-		changed
+		self.probe();
 	}
 
 	pub(super) fn restore_without_session(&mut self) {
@@ -119,5 +111,82 @@ impl Controller {
 
 	pub(super) fn checkpoint_deadline(&self) -> Option<Instant> {
 		(self.state.playing() && self.restore.account.is_some()).then_some(self.restore.remember_at)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::sync::Arc;
+
+	use super::*;
+	use crate::{
+		Msg, Options, Paths,
+		app::Effect,
+		engine::{ClusterPlayback, Command, ConnectState, Entity, Options as PlaybackOptions, Position},
+	};
+
+	fn controller() -> (Controller, tempfile::TempDir) {
+		let root = tempfile::tempdir().unwrap();
+		let paths = Paths { config: root.path().join("config"), cache: root.path().join("cache") };
+		let controller = Controller::new(&paths, Options { web_api: false, ..Options::default() }, Arc::new(|| {})).unwrap();
+		(controller, root)
+	}
+
+	fn playback() -> LastPlayback {
+		let mut item = Entity { uri: "spotify:track:last".into(), ..Entity::default() };
+		item.decorations.playback.duration_ms = 248_000;
+		LastPlayback {
+			item,
+			context: Entity { uri: "spotify:playlist:context".into(), ..Entity::default() },
+			position_ms: 2_000,
+			options: PlaybackOptions::default(),
+		}
+	}
+
+	#[test]
+	fn native_startup_restore_never_requests_recent_history_or_web_player() {
+		let (mut controller, _root) = controller();
+		controller.state.library.conn = library::Conn::Ready;
+		controller.restore.pending = true;
+		controller.on_connect_state(ConnectState {
+			account:      "alex".into(),
+			devices:      Vec::new(),
+			local_active: false,
+			initial:      true,
+			playback:     Some(ClusterPlayback {
+				playback: playback(),
+				device:   None,
+				position: Position::default(),
+				status:   Status::Paused,
+			}),
+		});
+		assert!(!controller.restore.pending);
+		assert!(!controller.restore.requested, "the session supplied the last player, so no recent-history fallback");
+		assert!(!controller.poll_inflight);
+		assert!(controller.poll_at.is_none());
+		assert_eq!(controller.state.anchor.position_ms, 2_000);
+		assert_eq!(controller.state.anchor.speed, 0.0);
+		assert_eq!(controller.state.status, Status::Paused);
+		assert!(!controller.state.active);
+		assert!(matches!(controller.state.update(Msg::TogglePlay).as_slice(), [Effect::Player(Command::Load(
+			crate::spotify::PlayStart::Context { position_ms: 2_000, .. }
+		))]));
+	}
+
+	#[test]
+	fn recent_fallback_waits_for_the_session_then_stays_bound_to_its_account() {
+		let (mut controller, _root) = controller();
+		controller.state.library.conn = library::Conn::Ready;
+		controller.restore.pending = true;
+		controller.request_last_playback();
+		assert!(!controller.restore.requested);
+		controller.on_restore_unavailable("alex".into());
+		assert!(controller.restore.requested);
+		assert!(!controller.on_recent_playback("other".into(), Some(playback())));
+		assert!(controller.state.item.uri.is_empty());
+		assert!(controller.on_recent_playback("alex".into(), Some(playback())));
+		assert_eq!(controller.state.item.uri, "spotify:track:last");
+		assert_eq!(controller.state.position_ms(), 2_000);
+		assert!(!controller.state.active);
 	}
 }

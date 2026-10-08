@@ -79,7 +79,7 @@ fn from_recent(
 		.unwrap_or_default();
 	let mut context = Entity { uri: context_uri.to_owned(), ..Entity::default() };
 	context.decorations.identity.name = name.to_owned();
-	LastPlayback { item: entity_of(&track), context, position_ms, options: Options::default() }
+	LastPlayback { item: entity_of(track), context, position_ms, options: Options::default() }
 }
 
 #[cfg(test)]

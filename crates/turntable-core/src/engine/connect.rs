@@ -21,7 +21,8 @@ impl Forward {
 				if item.duration_ms() == 0 {
 					item.decorations.playback.duration_ms = u64::try_from(player.duration).unwrap_or_default();
 				}
-				let context = self.context(&player.context_uri).await;
+				// Explicit track lists use "-" rather than a playable context URI.
+				let context = self.context(if player.context_uri == "-" { "" } else { &player.context_uri }).await;
 				let device = devices.iter().find(|device| device.is_active && device.id != self.session.device_id()).cloned();
 				let status = if device.is_some() && player.is_playing && !player.is_paused { Status::Playing } else { Status::Paused };
 				let position_ms = u64::try_from(player.position_as_of_timestamp).unwrap_or_default();
@@ -60,7 +61,7 @@ impl Forward {
 		let device = if device.is_empty() { self.session.device_id() } else { device };
 		let request = librespot_core::spclient::TransferRequest {
 			transfer_options: librespot_core::dealer::protocol::TransferOptions {
-				restore_paused: Some(if play { "resume" } else { "pause" }.to_owned()),
+				restore_paused: play.then(|| "resume".to_owned()),
 				..Default::default()
 			},
 		};

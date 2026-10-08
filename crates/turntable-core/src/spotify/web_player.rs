@@ -1,11 +1,11 @@
-//! Spotify's web-player reads: search, account shelves and metadata the public Web API
-//! no longer exposes (artist pages, play counts, playlists of any owner and credits).
+//! Spotify's web-player search and metadata the public Web API no longer exposes
+//! (artist pages, play counts, playlists of any owner and credits).
 //!
-//! Public metadata uses the anonymous token carried by an embed page. Account shelves
-//! use the playback session's authenticated token. Persisted queries go to the web
-//! player's GraphQL endpoint ("pathfinder"), never the quota-limited Web API.
+//! An embed page carries the anonymous token used for persisted GraphQL queries at
+//! the web player's "pathfinder" endpoint, never the quota-limited Web API.
 //! These private endpoints can change: library callers keep Web API reads as fallback.
-//! Settings → Sources controls all web-player requests, including search and shelves.
+//! Settings → Sources controls all requests here. Home's authenticated collection and
+//! history reads live in `library::session`; its top shelves are cached daily.
 
 mod browse;
 

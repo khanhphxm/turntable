@@ -21,6 +21,7 @@ pub use account::{REDIRECT_URI, login, logout};
 pub use auth::{Token, TokenSource, open_browser};
 pub use client::{Client, MAX_ARTIST_ALBUMS, PlayStart, PlayerCommand};
 pub use error::{Error, Result};
+pub(crate) use http::urlencode;
 pub use http::{Priority, priority, set_priority};
 pub use model::{
 	Album, Artist, Copyright, Device, DeviceKind, Image, Page, PlayContext, Playback, Playlist, PlaylistChanges, RepeatMode, SearchResults,

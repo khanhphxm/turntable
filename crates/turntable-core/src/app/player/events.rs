@@ -93,11 +93,10 @@ impl Controller {
 				self.start_failures = self.start_failures.saturating_add(1);
 				self.retry_start_at = Some(Instant::now() + retry_wait(self.start_failures));
 				self.restore_without_session();
+				self.request_startup_home();
 			},
 			AppEvent::Player(Incoming::Event(event)) => return self.on_player_event(event),
-			AppEvent::Player(Incoming::LastPlayback { account, playback, playing_elsewhere }) => {
-				return self.on_last_playback(account, playback, playing_elsewhere);
-			},
+			AppEvent::Player(Incoming::RestoreUnavailable { account }) => self.on_restore_unavailable(account),
 			AppEvent::Player(Incoming::ConnectState(state)) => return self.on_connect_state(state),
 			AppEvent::Player(Incoming::CommandFailed(message)) => self.state.show_toast(message),
 			AppEvent::Player(Incoming::Closed(reason)) => {
@@ -144,6 +143,7 @@ impl Controller {
 		self.state.notice = None;
 		self.state.signed_in = true;
 		self.library.set_session(engine.session_reader());
+		self.request_startup_home();
 		if self.library_offline && self.library_retry_at.take().is_some() {
 			self.library.send(library::Request::Connect);
 		}
@@ -246,13 +246,19 @@ impl Controller {
 			if !self.restore.idle_cluster {
 				self.probe();
 			}
-			if self.state.library.route == Route::Home {
-				self.library.send(library::Request::Home);
+			if !(self.state.starting && self.engine.is_none()) {
+				self.request_startup_home();
 			}
 			self.library.send(library::Request::Albums);
 			self.library.send(library::Request::Following);
 			self.request_artist();
 		}
 		true
+	}
+
+	fn request_startup_home(&self) {
+		if self.state.web_ready() && self.state.library.route == Route::Home {
+			self.library.send(library::Request::Home);
+		}
 	}
 }

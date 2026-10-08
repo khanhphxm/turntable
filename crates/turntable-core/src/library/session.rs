@@ -2,6 +2,7 @@
 //! Playlist4 keeps raw page offsets; metadata resolves pages in batches.
 
 mod collection;
+mod home;
 mod playlist;
 #[cfg(test)]
 mod tests;
