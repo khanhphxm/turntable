@@ -67,6 +67,8 @@ pub struct Album {
 	/// Full album objects only: "© 2018 …" and "℗ 2018 …" lines, as Spotify lists them.
 	#[serde(default, deserialize_with = "or_default")]
 	pub copyrights:   Vec<Copyright>,
+	/// Record label, when supplied by album metadata.
+	pub label:        Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,11 +80,20 @@ pub struct Copyright {
 }
 
 impl Copyright {
-	/// The line as Spotify shows it: the text after its symbol, unless it already has one.
+	/// The footer line with its copyright symbol, including legacy `(P)`/`(C)` prefixes.
 	pub fn line(&self) -> String {
 		let text = self.text.trim();
-		let symbol = if self.kind == "P" { '℗' } else { '©' };
-		if text.starts_with(['©', '℗', '(']) { text.to_owned() } else { format!("{symbol} {text}") }
+		if text.starts_with(['©', '℗']) {
+			return text.to_owned();
+		}
+		let (symbol, text) = if let Some(text) = text.strip_prefix("(P)").or_else(|| text.strip_prefix("(p)")) {
+			('℗', text.trim_start())
+		} else if let Some(text) = text.strip_prefix("(C)").or_else(|| text.strip_prefix("(c)")) {
+			('©', text.trim_start())
+		} else {
+			(if self.kind == "P" { '℗' } else { '©' }, text)
+		};
+		format!("{symbol} {text}")
 	}
 }
 
@@ -91,6 +102,8 @@ pub struct Track {
 	pub uri:         String,
 	pub name:        String,
 	pub duration_ms: u32,
+	/// One-based album disc number; zero when unknown or not applicable.
+	pub disc_number: u32,
 	pub explicit:    bool,
 	/// Empty for podcast episodes.
 	pub artists:     Vec<Artist>,
@@ -109,6 +122,8 @@ struct RawTrack {
 	name:        String,
 	#[serde(default, deserialize_with = "or_default")]
 	duration_ms: u32,
+	#[serde(default, deserialize_with = "or_default")]
+	disc_number: u32,
 	#[serde(default, deserialize_with = "or_default")]
 	explicit:    bool,
 	#[serde(default, deserialize_with = "or_default")]
@@ -132,6 +147,7 @@ impl<'de> Deserialize<'de> for Track {
 			uri:         raw.uri,
 			name:        raw.name,
 			duration_ms: raw.duration_ms,
+			disc_number: raw.disc_number,
 			explicit:    raw.explicit,
 			artists:     raw.artists,
 			album:       raw.album.or(raw.show),

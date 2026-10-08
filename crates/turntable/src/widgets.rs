@@ -5,8 +5,8 @@ use std::{cell::Cell, rc::Rc};
 use gpui_kit::{
 	App, AppContext as _, Bounds, ClickEvent, Context, DispatchPhase, Div, ElementId, Entity, EventEmitter, FontWeight, Hsla,
 	InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render,
-	SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Svg, Window, canvas, div, prelude::FluentBuilder as _, px,
-	relative, rgb, svg,
+	SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Svg, Window, canvas, div,
+	prelude::FluentBuilder as _, px, relative, rgb, svg,
 };
 
 pub use crate::assets::Icon;
@@ -125,7 +125,7 @@ pub fn cover(image: Option<gpui_kit::ImageSource>, color: u32, size: Pixels, rad
 	let frame = div().size(size).flex_none().rounded(radius).overflow_hidden().bg(rgb(color));
 	match image {
 		// GPUI clips children to rectangles: the image rounds its own corners.
-		Some(src) => frame.child(gpui_kit::img(src).size_full().rounded(radius)),
+		Some(src) => frame.child(gpui_kit::img(src).size_full().object_fit(gpui_kit::ObjectFit::Cover).rounded(radius)),
 		None => frame,
 	}
 }

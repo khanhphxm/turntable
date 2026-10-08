@@ -1,4 +1,6 @@
 //! Library data and Playlist4 edits from the player's authenticated Session.
+//! Album listings carry full-release duration, label, release date, copyright lines,
+//! per-track disc numbers and other releases by the first artist, without Web API reads.
 //! Playlist4 keeps raw page offsets; metadata resolves pages in batches.
 
 mod collection;
@@ -47,8 +49,23 @@ pub(super) struct Reader {
 }
 
 struct AlbumData {
-	album:  Album,
-	tracks: Vec<String>,
+	album:       Album,
+	tracks:      Vec<Track>,
+	duration_ms: u64,
+	disc_count:  u32,
+	more_by:     Vec<Tile>,
+}
+
+impl AlbumData {
+	fn listing(&self, offset: u32, followed: Option<bool>) -> Listing {
+		let items = window(&self.tracks, offset, PAGE).to_vec();
+		let mut listing =
+			super::pages::album_listing(self.album.clone(), Some(page(items, offset, PAGE, self.album.total_tracks)), followed);
+		listing.duration_ms = Some(self.duration_ms);
+		listing.disc_count = self.disc_count;
+		listing.more_by.clone_from(&self.more_by);
+		listing
+	}
 }
 
 struct ArtistData {
@@ -190,17 +207,32 @@ impl Reader {
 			.remove(&entity)
 			.ok_or_else(|| spotify::Error::Parse("Spotify returned no album metadata".into()))?;
 		let album = album(&raw).map_err(network)?;
-		let tracks = raw.disc.iter().flat_map(|d| &d.track).map(|t| uri("track", t.gid())).collect::<Result<_, _>>().map_err(network)?;
-		let data = Arc::new(AlbumData { album, tracks });
+		let uris = raw.disc.iter().flat_map(|d| &d.track).map(|t| uri("track", t.gid())).collect::<Result<Vec<_>, _>>().map_err(network)?;
+		let tracks = self.shared.block_on(tracks(self.shared.session(), &uris, Some(&album))).map_err(network)?;
+		let duration_ms = tracks.iter().map(|track| u64::from(track.duration_ms)).sum();
+		let disc_count = u32::try_from(raw.disc.len()).unwrap_or(u32::MAX);
+		let more_by = if let Some(artist) = album.artists.first() {
+			let artist = self.artist_data(spotify::id_of(&artist.uri))?;
+			let uris = more_by_uris(&artist.groups, &album.uri);
+			let raw = self
+				.shared
+				.block_on(metadata::<metadata::Album>(self.shared.session(), &uris, ExtensionKind::ALBUM_V4))
+				.map_err(network)?;
+			let mut releases = release_models(&uris, &raw).map_err(network)?;
+			releases.sort_by(|a, b| b.release_date.cmp(&a.release_date));
+			releases.iter().map(Tile::release).collect()
+		} else {
+			Vec::new()
+		};
+		let data = Arc::new(AlbumData { album, tracks, duration_ms, disc_count, more_by });
 		self.albums.insert(entity, data.clone());
 		Ok(data)
 	}
 
-	pub(super) fn album(&mut self, id: &str, offset: u32) -> spotify::Result<(Album, Page<Track>)> {
+	pub(super) fn album(&mut self, id: &str, offset: u32) -> spotify::Result<Listing> {
 		let data = self.album_data(id)?;
-		let items =
-			self.shared.block_on(tracks(self.shared.session(), window(&data.tracks, offset, PAGE), Some(&data.album))).map_err(network)?;
-		Ok((data.album.clone(), page(items, offset, PAGE, data.album.total_tracks)))
+		let followed = self.contains(&data.album.uri).ok();
+		Ok(data.listing(offset, followed))
 	}
 
 	fn artist_data(&mut self, id: &str) -> spotify::Result<Arc<ArtistData>> {
@@ -436,6 +468,7 @@ fn album(raw: &metadata::Album) -> Result<Album, librespot_core::Error> {
 		artists:      raw.artist.iter().map(artist).collect::<Result<_, _>>()?,
 		total_tracks: u32::try_from(raw.disc.iter().map(|d| d.track.len()).sum::<usize>()).unwrap_or(u32::MAX),
 		release_date: date,
+		label:        raw.has_label().then(|| raw.label().to_owned()).filter(|label| !label.is_empty()),
 		album_type:   match raw.type_() {
 			metadata::album::Type::SINGLE | metadata::album::Type::EP => "single",
 			metadata::album::Type::COMPILATION => "compilation",
@@ -479,6 +512,7 @@ fn track(entity: &str, raw: &metadata::Track, known_album: Option<&Album>) -> Re
 		uri:         entity.to_owned(),
 		name:        raw.name().to_owned(),
 		duration_ms: u32::try_from(raw.duration()).unwrap_or_default(),
+		disc_number: u32::try_from(raw.disc_number()).unwrap_or_default(),
 		explicit:    raw.explicit(),
 		artists:     raw.artist.iter().map(artist).collect::<Result<_, _>>()?,
 		album:       match known_album {
@@ -496,6 +530,7 @@ fn episode(entity: &str, raw: &metadata::Episode) -> Result<Track, librespot_cor
 		uri:         entity.to_owned(),
 		name:        raw.name().to_owned(),
 		duration_ms: u32::try_from(raw.duration()).unwrap_or_default(),
+		disc_number: 0,
 		explicit:    raw.explicit(),
 		artists:     Vec::new(),
 		album:       Some(Album {
@@ -507,6 +542,7 @@ fn episode(entity: &str, raw: &metadata::Episode) -> Result<Track, librespot_cor
 			release_date: None,
 			album_type:   String::new(),
 			copyrights:   Vec::new(),
+			label:        None,
 		}),
 		is_local:    false,
 		is_episode:  true,
@@ -519,6 +555,7 @@ fn local(entity: &str) -> Option<Track> {
 		uri:         entity.to_owned(),
 		name:        track_title,
 		duration_ms: u32::try_from(duration.as_millis()).unwrap_or(u32::MAX),
+		disc_number: 0,
 		explicit:    false,
 		artists:     vec![Artist { name: artist, uri: String::new(), images: Vec::new(), genres: Vec::new() }],
 		album:       Some(Album {
@@ -530,10 +567,17 @@ fn local(entity: &str) -> Option<Track> {
 			release_date: None,
 			album_type:   String::new(),
 			copyrights:   Vec::new(),
+			label:        None,
 		}),
 		is_local:    true,
 		is_episode:  false,
 	})
+}
+
+/// A bounded shelf of the primary artist's own releases, never this album or duplicates.
+fn more_by_uris(groups: &[(&str, Vec<String>)], current: &str) -> Vec<String> {
+	let mut seen = HashSet::new();
+	groups.iter().flat_map(|(_, uris)| uris).filter(|uri| uri.as_str() != current && seen.insert(uri.as_str())).take(10).cloned().collect()
 }
 
 fn releases(groups: &[metadata::AlbumGroup]) -> Result<Vec<String>, librespot_core::Error> {

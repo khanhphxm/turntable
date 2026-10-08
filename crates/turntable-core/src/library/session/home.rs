@@ -85,6 +85,7 @@ mod tests {
 			uri:         uri.into(),
 			name:        "Song".into(),
 			duration_ms: 100,
+			disc_number: 1,
 			explicit:    false,
 			artists:     Vec::new(),
 			album:       None,

@@ -27,4 +27,4 @@ pub use model::{
 	Album, Artist, Copyright, Device, DeviceKind, Image, Page, PlayContext, Playback, Playlist, PlaylistChanges, RepeatMode, SearchResults,
 	Track, User, id_of, pick_image,
 };
-pub use web_player::{ArtistOverview, Credit, Pick, WebPlayer, WebPlaylist};
+pub use web_player::{ArtistOverview, City, Concert, Credit, Pick, WebPlayer, WebPlaylist};

@@ -311,6 +311,23 @@ pub struct Listing {
 	pub note:           Option<String>,
 	/// The album an album listing shows (its tracks lack it on the wire).
 	pub album:          Option<Album>,
+	/// Album release date with Spotify's precision: YYYY, YYYY-MM or YYYY-MM-DD.
+	#[serde(default)]
+	pub release_date:   Option<String>,
+	/// Album footer lines, including their ℗/© symbols, in Spotify's order.
+	#[serde(default)]
+	pub copyrights:     Vec<String>,
+	#[serde(default)]
+	pub label:          Option<String>,
+	/// Duration of the entire album, not just the currently loaded track page.
+	#[serde(default)]
+	pub duration_ms:    Option<u64>,
+	/// Album-wide disc count, even before later discs are paged in; zero when unknown.
+	#[serde(default)]
+	pub disc_count:     u32,
+	/// Other releases by the album's first artist, excluding this album.
+	#[serde(default)]
+	pub more_by:        Vec<Tile>,
 	/// Whether the user follows it (artists, others' playlists); `None` when it doesn't apply.
 	pub followed:       Option<bool>,
 	/// A playlist the user owns or collaborates on: songs can be removed.
@@ -328,7 +345,10 @@ pub struct Listing {
 	pub plays:          Vec<u64>,
 	/// Artist pages: whether the popular songs have arrived (the table is a placeholder until then).
 	pub popular_loaded: bool,
-	/// What the web player says about the artist: listeners, photos, related artists.
+	/// Artist pages: Spotify's verified badge, listener/world-rank/city stats, biography,
+	/// header/avatar/full gallery, latest release, artist pick (comment and backdrop),
+	/// concerts and related shelves. Filled with popular songs, including when they
+	/// arrive before the artist header. These extras never require a Web API request.
 	#[serde(skip)]
 	pub overview:       Option<spotify::ArtistOverview>,
 	/// The cover's dark tone, `#rrggbb`, for the header's gradient.
@@ -338,6 +358,16 @@ pub struct Listing {
 }
 
 impl Listing {
+	/// Keeps the pathfinder name when a quota-limited or unavailable artist header is blank.
+	pub(super) fn take_artist_overview(&mut self, overview: Option<spotify::ArtistOverview>) {
+		if self.title.is_empty()
+			&& let Some(overview) = &overview
+		{
+			self.title.clone_from(&overview.name);
+		}
+		self.overview = overview;
+	}
+
 	/// Shows a page of the web player's songs: its tracks, and where the next page starts.
 	pub(super) fn take_web_page(&mut self, page: spotify::WebPlaylist, offset: u32) {
 		let next = offset + page.items;

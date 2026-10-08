@@ -60,6 +60,8 @@ pub struct Popular {
 /// What the web player says about an artist beyond the Web API's name and genres.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ArtistOverview {
+	/// Pathfinder's display name, also available when the Web API header is unavailable.
+	pub name:              String,
 	pub monthly_listeners: Option<u64>,
 	/// Spotify's ranking of artists by listeners (1 = most listened).
 	pub world_rank:        Option<u32>,
@@ -72,7 +74,11 @@ pub struct ArtistOverview {
 	pub gallery:           Vec<String>,
 	pub cities:            Vec<City>,
 	pub related:           Vec<Related>,
+	/// Spotify's explicit "Latest release" selection, not inferred from discography order.
+	pub latest_release:    Option<Album>,
 	pub pick:              Option<Pick>,
+	/// Upcoming shows in Spotify's order; empty when none are returned.
+	pub concerts:          Vec<Concert>,
 	pub discovered_on:     Vec<PlaylistRef>,
 	/// The avatar's dominant color, `#rrggbb`.
 	pub color:             Option<String>,
@@ -95,12 +101,25 @@ pub struct Related {
 /// What the artist pinned to their page: an album or playlist, with a comment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pick {
-	pub uri:      String,
-	pub title:    String,
-	pub comment:  String,
+	pub uri:        String,
+	pub title:      String,
+	pub comment:    String,
 	/// "Album • New Release".
-	pub subtitle: String,
-	pub image:    Option<String>,
+	pub subtitle:   String,
+	pub image:      Option<String>,
+	/// The artist's custom backdrop, distinct from the pinned item's cover.
+	pub background: Option<String>,
+}
+
+/// A show linked from an artist's page. Dates retain Spotify's local time and UTC offset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Concert {
+	pub uri:        String,
+	pub title:      String,
+	pub start_date: String,
+	pub venue:      String,
+	pub city:       String,
+	pub festival:   bool,
 }
 
 /// A playlist in a shelf.
@@ -506,13 +525,14 @@ fn parse_overview(json: &Value) -> (ArtistOverview, Vec<Popular>) {
 		})
 		.collect();
 	let overview = ArtistOverview {
+		name:              text(a, "/profile/name").unwrap_or_default(),
 		monthly_listeners: a.pointer("/stats/monthlyListeners").and_then(Value::as_u64).filter(|n| *n > 0),
 		world_rank:        a.pointer("/stats/worldRank").and_then(Value::as_u64).filter(|n| *n > 0).and_then(|n| u32::try_from(n).ok()),
 		verified:          a.pointer("/onPlatformReputationTrait/verification/isVerified").and_then(Value::as_bool).unwrap_or(false),
 		biography:         text(a, "/profile/biography/text").map(|b| plain(&b)).filter(|b| !b.is_empty()),
 		header:            sources(a, "/headerImage/data/sources").and_then(|s| image(s, 1200)),
 		avatar:            sources(a, "/visuals/avatarImage/sources").and_then(|s| image(s, 640)),
-		gallery:           array(a, "/visuals/gallery/items").iter().filter_map(|i| image(sources(i, "/sources")?, 640)).take(12).collect(),
+		gallery:           array(a, "/visuals/gallery/items").iter().filter_map(|i| image(sources(i, "/sources")?, 640)).collect(),
 		cities:            array(a, "/stats/topCities/items")
 			.iter()
 			.filter_map(|c| {
@@ -534,6 +554,25 @@ fn parse_overview(json: &Value) -> (ArtistOverview, Vec<Popular>) {
 			})
 			.collect(),
 		pick:              a.pointer("/profile/pinnedItem").and_then(parse_pick),
+		latest_release:    a.pointer("/discography/latest").and_then(parse_latest_release),
+		concerts:          array(a, "/goods/concerts/items")
+			.iter()
+			.filter_map(|i| {
+				let c = i.get("data")?;
+				let uri = text(c, "/uri")?;
+				if !uri.starts_with("spotify:concert:") {
+					return None;
+				}
+				Some(Concert {
+					uri,
+					title: text(c, "/title")?,
+					start_date: text(c, "/startDateIsoString")?,
+					venue: text(c, "/location/name").unwrap_or_default(),
+					city: text(c, "/location/city").unwrap_or_default(),
+					festival: c.get("festival").and_then(Value::as_bool).unwrap_or(false),
+				})
+			})
+			.collect(),
 		discovered_on:     array(a, "/relatedContent/discoveredOnV2/items")
 			.iter()
 			.filter_map(|i| {
@@ -555,7 +594,7 @@ fn parse_overview(json: &Value) -> (ArtistOverview, Vec<Popular>) {
 fn parse_pick(p: &Value) -> Option<Pick> {
 	let item = p.pointer("/itemV2/data")?;
 	let uri = text(item, "/uri")?;
-	let image = sources(item, "/coverArt/sources")
+	let cover = sources(item, "/coverArt/sources")
 		.or_else(|| sources(item, "/images/items/0/sources"))
 		.and_then(|s| image(s, 300))
 		.or_else(|| sources(p, "/thumbnailImage/data/sources").and_then(|s| s.last()).and_then(|s| text(s, "/url")));
@@ -564,7 +603,48 @@ fn parse_pick(p: &Value) -> Option<Pick> {
 		comment: text(p, "/comment").unwrap_or_default(),
 		subtitle: text(p, "/subtitle").unwrap_or_default(),
 		uri,
-		image,
+		image: cover,
+		background: sources(p, "/backgroundImageV2/data/sources").and_then(|s| image(s, 640)),
+	})
+}
+
+/// The overview already carries the selected release; no extra album request is needed.
+fn parse_latest_release(a: &Value) -> Option<Album> {
+	let uri = text(a, "/uri")?;
+	if !uri.starts_with("spotify:album:") {
+		return None;
+	}
+	let images = array(a, "/coverArt/sources")
+		.iter()
+		.filter_map(|s| {
+			let size = |key: &str| s.get(key).and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok());
+			Some(Image { url: text(s, "/url")?, width: size("width"), height: size("height") })
+		})
+		.collect();
+	let release_date = a.get("date").and_then(|d| {
+		let year = d.get("year")?.as_u64()?;
+		let month = d.get("month").and_then(Value::as_u64);
+		let day = d.get("day").and_then(Value::as_u64);
+		Some(match d.get("precision")?.as_str()? {
+			"YEAR" => format!("{year:04}"),
+			"MONTH" => format!("{year:04}-{:02}", month?),
+			"DAY" => format!("{year:04}-{:02}-{:02}", month?, day?),
+			_ => return None,
+		})
+	});
+	Some(Album {
+		name: text(a, "/name")?,
+		uri,
+		images,
+		artists: Vec::new(),
+		total_tracks: a.pointer("/tracks/totalCount").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()).unwrap_or(0),
+		release_date,
+		album_type: a.pointer("/type").and_then(Value::as_str).map(str::to_ascii_lowercase).unwrap_or_default(),
+		copyrights: array(a, "/copyright/items")
+			.iter()
+			.filter_map(|c| Some(super::model::Copyright { text: text(c, "/text")?, kind: text(c, "/type").unwrap_or_default() }))
+			.collect(),
+		label: text(a, "/label"),
 	})
 }
 
@@ -600,6 +680,7 @@ fn web_track(t: &Value) -> Option<Track> {
 		release_date: text(t, "/albumOfTrack/date/isoString"),
 		album_type:   String::new(),
 		copyrights:   Vec::new(),
+		label:        text(t, "/albumOfTrack/label"),
 	};
 	Some(Track {
 		uri:         text(t, "/uri")?,
@@ -610,6 +691,7 @@ fn web_track(t: &Value) -> Option<Track> {
 			.and_then(Value::as_u64)
 			.and_then(|n| u32::try_from(n).ok())
 			.unwrap_or(0),
+		disc_number: t.pointer("/discNumber").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()).unwrap_or_default(),
 		explicit:    text(t, "/contentRating/label").as_deref() == Some("EXPLICIT"),
 		artists:     array(t, "/artists/items")
 			.iter()
@@ -754,7 +836,7 @@ mod tests {
 			r##"{"data":{"artistUnion":{
 			"stats":{"monthlyListeners":46860023,"worldRank":84,"topCities":{"items":[{"city":"London","country":"GB","numberOfListeners":740990}]}},
 			"onPlatformReputationTrait":{"verification":{"isVerified":true}},
-			"profile":{"biography":{"text":"Rock <a href=\"spotify:artist:x\">band</a> &amp; more"},
+			"profile":{"name":"Radiohead","biography":{"text":"Rock <a href=\"spotify:artist:x\">band</a> &amp; more"},
 			  "pinnedItem":{"title":"Pick","comment":"Hi","subtitle":"Album","itemV2":{"data":{"uri":"spotify:album:abc","coverArt":{"sources":[{"url":"u64","width":64},{"url":"u640","width":640},{"url":"u300","width":300}]}}}}},
 			"headerImage":{"data":{"sources":[{"url":"h1","maxWidth":1494},{"url":"h2","maxWidth":1920}]}},
 			"visuals":{"avatarImage":{"sources":[{"url":"a160","width":160},{"url":"a640","width":640}],"extractedColors":{"colorRaw":{"hex":"#C84000"}}},"gallery":{"items":[{"sources":[{"url":"g","width":640}]}]}},
@@ -763,6 +845,7 @@ mod tests {
 			"discography":{"topTracks":{"items":[{"track":{"uri":"spotify:track:t1","name":"Creep","playcount":"2617505374","duration":{"totalMilliseconds":238640},"artists":{"items":[{"profile":{"name":"Radiohead"},"uri":"spotify:artist:r"}]},"albumOfTrack":{"uri":"spotify:album:p","coverArt":{"sources":[{"url":"https://i.scdn.co/image/ab67616d00001e02ec548c00d3ac2f10be73366d"}]}}}}]}}}}}"##,
 		);
 		let (v, top) = parse_overview(&o);
+		assert_eq!(v.name, "Radiohead");
 		assert_eq!((v.monthly_listeners, v.world_rank, v.verified), (Some(46_860_023), Some(84), true));
 		assert_eq!(v.biography.as_deref(), Some("Rock band & more"));
 		assert_eq!(
@@ -774,11 +857,12 @@ mod tests {
 		assert_eq!(
 			v.pick,
 			Some(Pick {
-				uri:      "spotify:album:abc".into(),
-				title:    "Pick".into(),
-				comment:  "Hi".into(),
-				subtitle: "Album".into(),
-				image:    Some("u300".into()),
+				uri:        "spotify:album:abc".into(),
+				title:      "Pick".into(),
+				comment:    "Hi".into(),
+				subtitle:   "Album".into(),
+				image:      Some("u300".into()),
+				background: None,
 			})
 		);
 		assert_eq!(v.discovered_on, [PlaylistRef {
@@ -798,6 +882,85 @@ mod tests {
 		let (v, top) = parse_overview(&json(r#"{"errors":[]}"#));
 		assert_eq!(v, ArtistOverview::default());
 		assert!(top.is_empty());
+	}
+
+	#[test]
+	fn overview_exposes_latest_release_pick_background_and_concerts() {
+		let (v, _) = parse_overview(&json(
+			r#"{"data":{"artistUnion":{
+			"profile":{"pinnedItem":{"comment":"Training Season's Over","subtitle":"Album • New Release",
+				"backgroundImageV2":{"data":{"sources":[{"url":"backdrop"}]}},
+				"itemV2":{"data":{"uri":"spotify:album:pick","name":"Artist pick","coverArt":{"sources":[{"url":"cover","width":300}]}}}}},
+			"discography":{"latest":{"uri":"spotify:album:latest","name":"Latest release","type":"EP","label":"Label",
+				"date":{"year":2026,"month":9,"day":25,"precision":"DAY"},"tracks":{"totalCount":6},
+				"coverArt":{"sources":[{"url":"latest-cover","width":300,"height":300}]},
+				"copyright":{"items":[{"text":"℗ Label","type":"P"}]}}},
+			"goods":{"concerts":{"items":[{"data":{"__typename":"GenericError"}},
+				{"data":{"uri":"spotify:concert:show","title":"Show","startDateIsoString":"2027-06-08T19:00+09:00",
+				"location":{"city":"さいたま市中央区","name":"Arena"},"festival":true}}]}}
+		}}}"#,
+		));
+		let latest = v.latest_release.unwrap();
+		assert_eq!((latest.uri.as_str(), latest.name.as_str()), ("spotify:album:latest", "Latest release"));
+		assert_eq!((latest.album_type.as_str(), latest.total_tracks, latest.release_date.as_deref()), ("ep", 6, Some("2026-09-25")));
+		assert_eq!(latest.images[0].url, "latest-cover");
+		assert_eq!(latest.copyrights[0].line(), "℗ Label");
+		assert_eq!(latest.label.as_deref(), Some("Label"));
+		let pick = v.pick.unwrap();
+		assert_eq!((pick.title.as_str(), pick.comment.as_str()), ("Artist pick", "Training Season's Over"));
+		assert_eq!((pick.image.as_deref(), pick.background.as_deref()), (Some("cover"), Some("backdrop")));
+		assert_eq!(v.concerts, [Concert {
+			uri:        "spotify:concert:show".into(),
+			title:      "Show".into(),
+			start_date: "2027-06-08T19:00+09:00".into(),
+			venue:      "Arena".into(),
+			city:       "さいたま市中央区".into(),
+			festival:   true,
+		}]);
+	}
+
+	#[test]
+	fn overview_keeps_the_full_gallery_and_absent_extras_empty() {
+		let mut data = json(
+			r#"{"data":{"artistUnion":{"profile":{"pinnedItem":null},"discography":{"latest":null},"goods":{"concerts":{"items":[]}}}}}"#,
+		);
+		let items: Vec<_> = (0..18).map(|n| serde_json::json!({"sources":[{"url":format!("photo-{n}"),"width":640}]})).collect();
+		data["data"]["artistUnion"]["visuals"] = serde_json::json!({"gallery":{"items":items}});
+		let (v, _) = parse_overview(&data);
+		assert_eq!(v.gallery.len(), 18);
+		assert_eq!(v.gallery[17], "photo-17");
+		assert!(v.pick.is_none());
+		assert!(v.latest_release.is_none());
+		assert!(v.concerts.is_empty());
+		assert!(!v.verified);
+		assert!(v.world_rank.is_none());
+		assert!(v.cities.is_empty());
+	}
+
+	#[test]
+	fn latest_release_preserves_date_precision_and_rejects_non_albums() {
+		for (precision, expected) in [("YEAR", "2026"), ("MONTH", "2026-09"), ("DAY", "2026-09-25")] {
+			let release =
+				serde_json::json!({"uri":"spotify:album:a","name":"A","date":{"year":2026,"month":9,"day":25,"precision":precision}});
+			assert_eq!(parse_latest_release(&release).unwrap().release_date.as_deref(), Some(expected));
+		}
+		assert!(parse_latest_release(&json(r#"{"uri":"spotify:track:a","name":"A"}"#)).is_none());
+		assert!(parse_latest_release(&Value::Null).is_none());
+	}
+
+	/// Live diagnostic: embed token + pathfinder only, never the quota-limited Web API.
+	#[test]
+	#[ignore = "requires network access to Spotify's embed and pathfinder endpoints"]
+	fn artist_overviews_live() {
+		let web = WebPlayer::new();
+		for (name, id) in [("Radiohead", "4Z8W4fKeB5YxbusRsdQVPb"), ("Taylor Swift", "06HL4z0CvFAxyc27GXpf02")] {
+			let overview = web.overview(id).unwrap();
+			println!("{name} ({id}): {overview:#?}");
+			assert_eq!(overview.name, name);
+			assert!(overview.monthly_listeners.is_some(), "no listeners for {name}");
+			assert!(overview.header.is_some(), "no header for {name}");
+			assert!(!overview.cities.is_empty(), "no cities for {name}");
+		}
 	}
 
 	#[test]

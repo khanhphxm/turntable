@@ -26,6 +26,7 @@ fn album_proto() -> metadata::Album {
 fn album_keeps_release_precision_discs_ep_and_copyrights() -> Result<(), Error> {
 	let mut raw = album_proto();
 	raw.set_type(metadata::album::Type::EP);
+	raw.set_label("Test Records".into());
 	let mut date = metadata::Date::new();
 	date.set_year(2020);
 	raw.date = MessageField::some(date);
@@ -42,6 +43,7 @@ fn album_keeps_release_precision_discs_ep_and_copyrights() -> Result<(), Error> 
 	assert_eq!(converted.album_type, "single");
 	assert_eq!(converted.release_date.as_deref(), Some("2020"));
 	assert_eq!(converted.copyrights.first().map(|c| c.line()), Some("℗ Label".into()));
+	assert_eq!(converted.label.as_deref(), Some("Test Records"));
 	if let Some(date) = raw.date.as_mut() {
 		date.set_month(4);
 	}
@@ -60,6 +62,7 @@ fn track_preserves_original_uri_and_complete_row_metadata() -> Result<(), Error>
 	raw.set_name("Song".into());
 	raw.set_duration(180_000);
 	raw.set_explicit(true);
+	raw.set_disc_number(2);
 	let album = album_proto();
 	raw.artist = album.artist.clone();
 	raw.album = MessageField::some(album);
@@ -68,12 +71,15 @@ fn track_preserves_original_uri_and_complete_row_metadata() -> Result<(), Error>
 	assert_eq!(row.uri, original);
 	assert_eq!(row.name, "Song");
 	assert_eq!(row.duration_ms, 180_000);
+	assert_eq!(row.disc_number, 2);
 	assert!(row.explicit);
 	assert_eq!(row.artists.first().map(|a| a.name.as_str()), Some("Artist"));
 	assert_eq!(row.album.as_ref().map(|a| a.name.as_str()), Some("Album"));
 	assert!(!row.is_episode && !row.is_local);
 	raw.set_duration(-1);
 	assert_eq!(track(original, &raw, None)?.duration_ms, 0);
+	raw.set_disc_number(-1);
+	assert_eq!(track(original, &raw, None)?.disc_number, 0);
 	Ok(())
 }
 
@@ -219,4 +225,46 @@ fn playlist4_null_description_is_absent_but_normal_copy_is_preserved() {
 	assert_eq!(super::playlist("scratch", "alex", &attributes, 0).description, None);
 	attributes.set_description("A mix".into());
 	assert_eq!(super::playlist("scratch", "alex", &attributes, 0).description.as_deref(), Some("A mix"));
+}
+
+#[test]
+fn more_by_excludes_current_deduplicates_and_bounds_own_releases() {
+	let groups = vec![
+		("Albums", vec!["current".into(), "other".into(), "other".into()]),
+		("Singles and EPs", (0..20).map(|n| format!("single-{n}")).collect()),
+	];
+	let uris = super::more_by_uris(&groups, "current");
+	assert_eq!(uris.len(), 10);
+	assert_eq!(uris[0], "other");
+	assert_eq!(uris[1], "single-0");
+	assert_eq!(uris[9], "single-8");
+}
+
+#[test]
+fn paginated_album_keeps_full_duration_shelf_and_disc_numbers() -> Result<(), Error> {
+	let mut album = album(&album_proto())?;
+	album.total_tracks = 51;
+	let mut raw = metadata::Track::new();
+	raw.set_duration(100);
+	raw.set_disc_number(1);
+	let mut tracks = vec![track("spotify:track:one", &raw, Some(&album))?; 50];
+	raw.set_disc_number(2);
+	tracks.push(track("spotify:track:two", &raw, Some(&album))?);
+	let more_by = vec![crate::library::Tile::release(&album)];
+	let data = super::AlbumData { album, tracks, duration_ms: 5100, disc_count: 2, more_by: more_by.clone() };
+	let first = data.listing(0, None);
+	assert_eq!(first.tracks.len(), 50);
+	assert_eq!(first.next_offset, Some(50));
+	assert_eq!(first.duration_ms, Some(5100));
+	assert_eq!(first.disc_count, 2, "disc 2 is known before its track page arrives");
+	assert_eq!(first.more_by, more_by);
+	assert!(first.tracks.iter().all(|track| track.disc_number == 1));
+	let next = data.listing(50, None);
+	assert_eq!(next.tracks.len(), 1);
+	assert_eq!(next.tracks[0].disc_number, 2);
+	assert_eq!(next.next_offset, None);
+	assert_eq!(next.duration_ms, first.duration_ms);
+	assert_eq!(next.disc_count, first.disc_count);
+	assert_eq!(next.more_by, first.more_by);
+	Ok(())
 }

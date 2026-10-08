@@ -456,6 +456,7 @@ mod tests {
 				uri:         uri.into(),
 				name:        "Song".into(),
 				duration_ms: 200_000,
+				disc_number: 1,
 				explicit:    false,
 				artists:     vec![spotify::Artist {
 					name:   "Band".into(),

@@ -178,11 +178,7 @@ fn session_open(s: &mut Session, route: &Route, offset: u32) -> spotify::Result<
 			}
 			listing
 		},
-		Route::Album(id) => {
-			let (album, page) = player.album(id, offset)?;
-			let followed = player.contains(&album.uri).ok();
-			album_listing(album, Some(page), followed)
-		},
+		Route::Album(id) => player.album(id, offset)?,
 		Route::Artist(_) | Route::Home | Route::Search | Route::Library => return Ok(None),
 	};
 	Ok(Some(listing))
@@ -265,7 +261,7 @@ fn album_header(s: &Session, id: &str) -> spotify::Result<Listing> {
 	Ok(album_listing(album, page, followed))
 }
 
-fn album_listing(album: Album, page: Option<Page<spotify::Track>>, followed: Option<bool>) -> Listing {
+pub(super) fn album_listing(album: Album, page: Option<Page<spotify::Track>>, followed: Option<bool>) -> Listing {
 	let by = album.artists.iter().map(|a| a.name.as_str()).collect::<Vec<_>>().join(", ");
 	let year = album.release_date.as_deref().and_then(|d| d.get(..4)).unwrap_or_default();
 	let songs = songs(u64::from(album.total_tracks));
@@ -277,6 +273,9 @@ fn album_listing(album: Album, page: Option<Page<spotify::Track>>, followed: Opt
 		cover_url: spotify::pick_image(&album.images, 300).map(|i| i.url.clone()),
 		context_uri: Some(album.uri.clone()),
 		followed,
+		release_date: album.release_date.clone(),
+		copyrights: album.copyrights.iter().map(spotify::Copyright::line).collect(),
+		label: album.label.clone(),
 		album: Some(album),
 		..Listing::default()
 	};
@@ -352,5 +351,55 @@ mod tests {
 			Ok(Page { items: items.map(str::to_owned).into(), total: 3, offset, limit: 2, next: (offset == 0).then(|| "next".to_owned()) })
 		};
 		assert_eq!(all_pages(page, String::as_str).unwrap(), ["a", "b", "c"]);
+	}
+}
+
+#[cfg(test)]
+mod album_tests {
+	use super::*;
+
+	#[test]
+	fn album_listing_keeps_full_date_label_and_copyright_symbols() {
+		let album: Album = serde_json::from_value(serde_json::json!({
+			"uri": "spotify:album:album", "name": "Album", "total_tracks": 30,
+			"artists": [{"name": "Artist", "uri": "spotify:artist:artist"}],
+			"release_date": "2017-05-12", "label": "Test Records",
+			"copyrights": [{"text": "2017 Test Records", "type": "P"}, {"text": "© 2017 Artist", "type": "C"}]
+		}))
+		.unwrap();
+		let listing = album_listing(album, None, Some(true));
+		assert_eq!(listing.subtitle, "Artist • 2017 • 30 songs");
+		assert_eq!(listing.release_date.as_deref(), Some("2017-05-12"));
+		assert_eq!(listing.label.as_deref(), Some("Test Records"));
+		assert_eq!(listing.copyrights, ["℗ 2017 Test Records", "© 2017 Artist"]);
+		let restored: Listing = serde_json::from_value(serde_json::to_value(&listing).unwrap()).unwrap();
+		assert_eq!(restored.release_date, listing.release_date);
+		assert_eq!(restored.copyrights, listing.copyrights);
+		assert_eq!(restored.label, listing.label);
+	}
+
+	#[test]
+	fn old_track_snapshots_default_the_disc_and_new_snapshots_round_trip_it() {
+		let mut track: spotify::Track = serde_json::from_value(serde_json::json!({"uri": "spotify:track:a"})).unwrap();
+		assert_eq!(track.disc_number, 0);
+		track.disc_number = 2;
+		let restored: spotify::Track = serde_json::from_value(serde_json::to_value(&track).unwrap()).unwrap();
+		assert_eq!(restored.disc_number, 2);
+	}
+}
+
+#[cfg(test)]
+mod copyright_tests {
+	#[test]
+	fn footer_symbols_normalize_legacy_prefixes_without_duplicating_symbols() {
+		for (text, kind, expected) in [
+			("(P) 2016 Pink Floyd", "P", "℗ 2016 Pink Floyd"),
+			("(c) 2017 Artist", "C", "© 2017 Artist"),
+			("© 2017 Artist", "C", "© 2017 Artist"),
+			("℗ 2017 Artist", "P", "℗ 2017 Artist"),
+			("(Label) 2017 Artist", "P", "℗ (Label) 2017 Artist"),
+		] {
+			assert_eq!(crate::spotify::Copyright { text: text.into(), kind: kind.into() }.line(), expected);
+		}
 	}
 }

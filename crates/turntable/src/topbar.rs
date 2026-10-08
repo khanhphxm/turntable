@@ -58,6 +58,8 @@ impl Shell {
 			.child(
 				div()
 					.flex()
+					.flex_shrink(1.)
+					.min_w_0()
 					.items_center()
 					.gap_2()
 					.child(round_button(
@@ -73,6 +75,8 @@ impl Shell {
 			.child(
 				div()
 					.flex_1()
+					.flex_none()
+					.min_w_0()
 					.flex()
 					.items_center()
 					.justify_end()
@@ -118,7 +122,10 @@ impl Shell {
 			.id("search")
 			.group("search")
 			.h(px(48.))
+			// Spotify's width, giving way to the side clusters in a narrow window.
 			.w(px(474.))
+			.min_w(px(160.))
+			.flex_shrink(1.)
 			.flex()
 			.items_center()
 			.gap_3()

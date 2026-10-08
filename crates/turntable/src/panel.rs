@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use gpui_kit::{
 	Animation, AnimationExt as _, AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-	StatefulInteractiveElement as _, Styled as _, div, ease_out_quint, prelude::FluentBuilder as _, px,
+	StatefulInteractiveElement as _, Styled as _, StyledImage as _, div, ease_out_quint, prelude::FluentBuilder as _, px,
 };
 use turntable_core::{
 	LyricsState, Msg, Panel, Route,
@@ -137,7 +137,22 @@ impl Shell {
 						.relative()
 						.h(px(200.))
 						.bg(theme::raised_hover())
-						.when_some(photo, |s, src| s.child(gpui_kit::img(src).size_full().rounded_t(px(8.))))
+						// The photo fills the box, cropped; the label sits on a shade over its top.
+						.when_some(photo, |s, src| {
+							s.child(
+								gpui_kit::img(src)
+									.absolute()
+									.inset_0()
+									.size_full()
+									.object_fit(gpui_kit::ObjectFit::Cover)
+									.rounded_t(px(8.)),
+							)
+						})
+						.child(div().absolute().inset_0().rounded_t(px(8.)).bg(gpui_kit::linear_gradient(
+							180.,
+							gpui_kit::linear_color_stop(theme::alpha(theme::base(), 0.55), 0.),
+							gpui_kit::linear_color_stop(theme::alpha(theme::base(), 0.), 0.5),
+						)))
 						.child(
 							div().absolute().top_4().left_4().text_size(px(16.)).font_weight(FontWeight::BOLD).child("About the artist"),
 						),

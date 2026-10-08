@@ -83,6 +83,7 @@ fn web_album(value: &Value) -> Option<Album> {
 			.or_else(|| value.pointer("/date/year").and_then(Value::as_u64).map(|year| year.to_string())),
 		album_type: text(value, "/type").unwrap_or_default().to_ascii_lowercase(),
 		copyrights: Vec::new(),
+		label: text(value, "/label"),
 	})
 }
 

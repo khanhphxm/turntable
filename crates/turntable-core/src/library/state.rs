@@ -294,7 +294,7 @@ impl Library {
 					l.tracks = popular.tracks;
 					l.plays = popular.plays;
 					l.accent = popular.accent;
-					l.overview = popular.overview.clone();
+					l.take_artist_overview(popular.overview.clone());
 				}
 				if let Some(overview) = popular.overview {
 					self.remember_artist(&id);
@@ -496,7 +496,7 @@ impl Library {
 					&& early.popular_loaded
 				{
 					(listing.tracks, listing.plays, listing.popular_loaded) = (early.tracks, early.plays, true);
-					listing.overview = early.overview;
+					listing.take_artist_overview(early.overview);
 					listing.accent = early.accent;
 				}
 				self.listing = Some(listing);
@@ -542,6 +542,58 @@ mod tests {
 
 	fn titles(lib: &Library, filtered: bool) -> Vec<String> {
 		lib.entries(filtered).iter().map(|e| e.title().to_owned()).collect()
+	}
+
+	#[test]
+	fn artist_extras_reach_the_listing_in_either_response_order() {
+		let overview = spotify::ArtistOverview {
+			name: "Artist".into(),
+			verified: true,
+			world_rank: Some(84),
+			cities: vec![spotify::City { name: "London".into(), country: "GB".into(), listeners: 740_990 }],
+			header: Some("header".into()),
+			gallery: vec!["photo".into()],
+			latest_release: Some(album("latest", "Latest release", "Artist")),
+			pick: Some(spotify::Pick {
+				uri:        "spotify:album:pick".into(),
+				title:      "Pick".into(),
+				comment:    "Listen".into(),
+				subtitle:   "Album".into(),
+				image:      Some("cover".into()),
+				background: Some("backdrop".into()),
+			}),
+			concerts: vec![spotify::Concert {
+				uri:        "spotify:concert:show".into(),
+				title:      "Show".into(),
+				start_date: "2027-06-08T19:00+09:00".into(),
+				venue:      "Arena".into(),
+				city:       "City".into(),
+				festival:   false,
+			}],
+			..spotify::ArtistOverview::default()
+		};
+		for (popular_first, header_title) in [(false, ""), (true, ""), (false, "Header name"), (true, "Header name")] {
+			let route = Route::Artist("artist".into());
+			let mut lib = Library { route: route.clone(), listing: Some(Listing::default()), ..Library::default() };
+			let header = Response::Listing { route, offset: 0, listing: Listing { title: header_title.into(), ..Listing::default() } };
+			let popular = Response::ArtistPopular("artist".into(), super::super::Popularity {
+				overview: Some(overview.clone()),
+				..super::super::Popularity::default()
+			});
+			if popular_first {
+				lib.apply(popular);
+				assert_eq!(lib.listing.as_ref().unwrap().title, "Artist", "pathfinder names the page without any header response");
+				lib.apply(header);
+			} else {
+				lib.apply(header);
+				lib.apply(popular);
+			}
+			let listing = lib.listing.as_ref().unwrap();
+			assert_eq!(listing.title, if header_title.is_empty() { "Artist" } else { header_title });
+			assert!(listing.popular_loaded);
+			assert_eq!(listing.overview.as_ref(), Some(&overview));
+			assert_eq!(lib.overviews.get("artist"), Some(&overview));
+		}
 	}
 
 	#[test]

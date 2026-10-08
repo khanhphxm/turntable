@@ -1,8 +1,8 @@
 //! An artist: banner, popular tracks, discography and the shelves around it, and about.
 
 use gpui_kit::{
-	Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _, Styled as _, div,
-	linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px, rgb,
+	Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _, Styled as _,
+	StyledImage as _, div, linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px, rgb,
 };
 use turntable_core::{Msg, Route, library::Tile};
 
@@ -101,7 +101,13 @@ impl Shell {
 		let about = l.about.as_ref().and_then(|a| a.summary.clone().or(a.description.clone())).or(o.and_then(|o| o.biography.clone()));
 		let header_img = o.and_then(|o| o.header.clone().or(o.gallery.first().cloned()));
 		let more_than = l.tracks.len() > POPULAR;
-		page.child(self.page_header(&route, avatar.as_deref(), tint, "Artist".into(), l.title.clone().into(), meta, cx))
+		// The name, from whichever source answered first (the listing's, the artist's, the overview's).
+		let name = Some(l.title.clone())
+			.filter(|t| !t.is_empty())
+			.or_else(|| l.artist.as_ref().map(|a| a.name.clone()))
+			.or_else(|| self.known_artist_name(&route))
+			.unwrap_or_default();
+		page.child(self.page_header(&route, avatar.as_deref(), tint, "Artist".into(), name.into(), meta, cx))
 			.child(
 				self.wash(tint).child(self.action_bar(l.context_uri.clone(), follow, cx)).child(
 					div()
@@ -142,7 +148,9 @@ impl Shell {
 							.overflow_hidden()
 							.bg(theme::raised())
 							.child(match img {
-								Some(src) => div().h(px(320.)).child(gpui_kit::img(src).size_full().rounded_t(px(8.))),
+								Some(src) => div()
+									.h(px(320.))
+									.child(gpui_kit::img(src).size_full().object_fit(gpui_kit::ObjectFit::Cover).rounded_t(px(8.))),
 								None => div().h(px(120.)).bg(linear_gradient(
 									180.,
 									linear_color_stop(theme::alpha(rgb(tint), 0.6), 0.),
@@ -180,5 +188,21 @@ impl Shell {
 		)]
 		let fit = ((self.main_w - 24.) / theme::CARD_W).floor().max(1.) as usize;
 		tiles.iter().take(fit).enumerate().map(|(i, t)| self.card(gpui_kit::ElementId::NamedInteger(key.into(), i as u64), t, cx)).collect()
+	}
+}
+
+impl Shell {
+	/// An artist's name from what's already at hand: followed artists, artists seen in rows,
+	/// or the now-playing track's credits.
+	fn known_artist_name(&self, route: &Route) -> Option<String> {
+		let Route::Artist(id) = route else { return None };
+		let st = self.st();
+		let uri = format!("spotify:artist:{id}");
+		st.library
+			.artists
+			.get(id)
+			.map(|a| a.name.clone())
+			.or_else(|| st.library.followed.iter().find(|a| a.uri == uri).map(|a| a.name.clone()))
+			.or_else(|| st.item.decorations.creators.iter().find(|c| c.entity.uri == uri).map(|c| c.entity.name().to_owned()))
 	}
 }
