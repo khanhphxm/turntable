@@ -1,13 +1,15 @@
 //! Spotify's web-player search and metadata the public Web API no longer exposes
 //! (artist pages, play counts, playlists of any owner and credits).
 //!
-//! An embed page carries the anonymous token used for persisted GraphQL queries at
-//! the web player's "pathfinder" endpoint, never the quota-limited Web API.
-//! These private endpoints can change: library callers keep Web API reads as fallback.
-//! Settings → Sources controls all requests here. Home's authenticated collection and
-//! history reads live in `library::session`; its top shelves are cached daily.
+//! Embed pages carry an anonymous token for search and metadata at the web player's
+//! Pathfinder endpoint, never the quota-limited Web API. Personalised Home instead uses
+//! the playback Session's login5 bearer and native client-token; an anonymous answer
+//! is only an explicit diagnostic, never an account feed. Account-scoped disk feeds
+//! paint before refresh; native collection/history shelves remain the failure path.
+//! Settings → Sources controls all requests here. Private endpoints can change.
 
 mod browse;
+pub mod home;
 
 use std::{
 	collections::HashMap,
@@ -58,7 +60,7 @@ pub struct Popular {
 }
 
 /// What the web player says about an artist beyond the Web API's name and genres.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, Deserialize)]
 pub struct ArtistOverview {
 	/// Pathfinder's display name, also available when the Web API header is unavailable.
 	pub name:              String,
@@ -84,14 +86,14 @@ pub struct ArtistOverview {
 	pub color:             Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
 pub struct City {
 	pub name:      String,
 	pub country:   String,
 	pub listeners: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
 pub struct Related {
 	pub id:    String,
 	pub name:  String,
@@ -99,7 +101,7 @@ pub struct Related {
 }
 
 /// What the artist pinned to their page: an album or playlist, with a comment.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
 pub struct Pick {
 	pub uri:        String,
 	pub title:      String,
@@ -112,7 +114,7 @@ pub struct Pick {
 }
 
 /// A show linked from an artist's page. Dates retain Spotify's local time and UTC offset.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
 pub struct Concert {
 	pub uri:        String,
 	pub title:      String,
@@ -123,7 +125,7 @@ pub struct Concert {
 }
 
 /// A playlist in a shelf.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
 pub struct PlaylistRef {
 	pub id:    String,
 	pub name:  String,
@@ -338,6 +340,13 @@ impl WebPlayer {
 		Ok(parse_credits(&json))
 	}
 
+	/// Warms the shared transport/token while native startup is in progress; never calls the Web API.
+	pub fn warm(&self) {
+		if allowed().is_ok() {
+			let _ = self.token();
+		}
+	}
+
 	/// The anonymous token, from an embed page when none is valid. Callers that need one at the same
 	/// time wait for a single embed page instead of each fetching its own.
 	fn token(&self) -> Result<String, String> {
@@ -379,30 +388,39 @@ impl WebPlayer {
 	}
 
 	/// One persisted query. A refused token is dropped, so the next call gets a new one.
-	fn query(&self, token: &str, (op, hash): (&str, &str), variables: &str) -> Result<Value, String> {
-		let extensions = format!(r#"{{"persistedQuery":{{"version":1,"sha256Hash":"{hash}"}}}}"#);
-		let span = crate::net::trace::start();
-		let fetched: Result<Vec<u8>, String> = PROFILE
-			.get(PATHFINDER)
-			.header("Authorization", format!("Bearer {token}"))
-			.header("App-Platform", "WebPlayer")
-			.query("operationName", op)
-			.query("variables", variables)
-			.query("extensions", &extensions)
-			.call()
-			.map_err(|e| e.to_string())
-			.and_then(|mut r| r.body_mut().with_config().limit(BODY_LIMIT).read_to_vec().map_err(|e| e.to_string()));
-		span.done("web", "GET", &format!("{PATHFINDER}/{op}"), crate::net::trace::Reply {
-			status: if fetched.is_ok() { 200 } else { 0 },
-			bytes: fetched.as_ref().map_or(0, Vec::len),
-			..crate::net::trace::Reply::default()
-		});
-		let answer: Result<Value, String> = fetched.and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| e.to_string()));
+	fn query(&self, token: &str, operation: (&str, &str), variables: &str) -> Result<Value, String> {
+		let answer = query(token, None, operation, variables);
 		if answer.is_err() {
 			*self.token.lock().unwrap_or_else(PoisonError::into_inner) = None;
 		}
 		answer
 	}
+}
+
+/// Anonymous and session-authenticated Pathfinder requests share the same bounded transport.
+fn query(token: &str, client_token: Option<&str>, (op, hash): (&str, &str), variables: &str) -> Result<Value, String> {
+	let extensions = format!(r#"{{"persistedQuery":{{"version":1,"sha256Hash":"{hash}"}}}}"#);
+	let span = crate::net::trace::start();
+	let mut request = PROFILE
+		.get(PATHFINDER)
+		.header("Authorization", format!("Bearer {token}"))
+		.header("App-Platform", "WebPlayer")
+		.query("operationName", op)
+		.query("variables", variables)
+		.query("extensions", &extensions);
+	if let Some(token) = client_token {
+		request = request.header("client-token", token);
+	}
+	let fetched: Result<Vec<u8>, String> = request
+		.call()
+		.map_err(|e| e.to_string())
+		.and_then(|mut r| r.body_mut().with_config().limit(BODY_LIMIT).read_to_vec().map_err(|e| e.to_string()));
+	span.done("web", "GET", &format!("{PATHFINDER}/{op}"), crate::net::trace::Reply {
+		status: if fetched.is_ok() { 200 } else { 0 },
+		bytes: fetched.as_ref().map_or(0, Vec::len),
+		..crate::net::trace::Reply::default()
+	});
+	fetched.and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| e.to_string()))
 }
 
 /// Spotify's web player is asked only while the user allows it (Settings, "Data sources").
@@ -1003,7 +1021,7 @@ mod tests {
 	#[test]
 	fn the_web_player_is_not_asked_for_anything_while_it_is_off() {
 		use crate::app::settings::{Sources, allowed};
-		let off = Sources { lyrics: true, wikipedia: true, web_player: false };
+		let off = Sources { web_player: false };
 		allowed::only_with(off, || {
 			// Every public call answers before it asks for a token or a page.
 			let web = WebPlayer::new();

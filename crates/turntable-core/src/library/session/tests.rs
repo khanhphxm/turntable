@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use librespot_core::{Error, SpotifyId};
 use librespot_protocol::{
 	metadata,
-	playlist4_external::{ListAttributes, MetaItem},
+	playlist4_external::{Item, ItemAttributes, ListAttributes, MetaItem},
 };
 use protobuf::MessageField;
 
@@ -144,6 +144,12 @@ fn rootlist_keeps_followed_and_owned_playlists_but_not_folders_or_errors() {
 }
 
 #[test]
+fn rootlist_does_not_infer_privacy_from_profile_publication() {
+	let meta = MetaItem::default();
+	assert_eq!(root_playlist("spotify:playlist:0000000000000000000001", &meta).unwrap().public, None);
+}
+
+#[test]
 fn page_offsets_count_raw_entries_not_resolved_metadata_rows() {
 	let raw: Vec<_> = (0..121).collect();
 	assert_eq!(window(&raw, 100, 50).len(), 21);
@@ -259,6 +265,8 @@ fn paginated_album_keeps_full_duration_shelf_and_disc_numbers() -> Result<(), Er
 	assert_eq!(first.disc_count, 2, "disc 2 is known before its track page arrives");
 	assert_eq!(first.more_by, more_by);
 	assert!(first.tracks.iter().all(|track| track.disc_number == 1));
+	assert_eq!(first.added_at(0), None, "albums have no per-occurrence added date");
+	assert_eq!(first.added_by(0), None);
 	let next = data.listing(50, None);
 	assert_eq!(next.tracks.len(), 1);
 	assert_eq!(next.tracks[0].disc_number, 2);
@@ -266,5 +274,49 @@ fn paginated_album_keeps_full_duration_shelf_and_disc_numbers() -> Result<(), Er
 	assert_eq!(next.duration_ms, first.duration_ms);
 	assert_eq!(next.disc_count, first.disc_count);
 	assert_eq!(next.more_by, first.more_by);
+	Ok(())
+}
+
+#[test]
+fn playlist_added_attributes_survive_metadata_deduplication_and_unavailable_rows() -> Result<(), Error> {
+	let a = "spotify:track:0000000000000000000001";
+	let b = "spotify:track:0000000000000000000002";
+	let missing = "spotify:track:0000000000000000000003";
+	let entries: Vec<_> =
+		[(a, Some(1_781_001_234_567), Some("alex")), (missing, Some(1), None), (a, Some(1_781_001_235_000), Some("bo")), (b, None, None)]
+			.into_iter()
+			.map(|(uri, timestamp, added_by)| Item {
+				uri: Some(uri.into()),
+				attributes: MessageField::some(ItemAttributes { timestamp, added_by: added_by.map(str::to_owned), ..Default::default() }),
+				..Default::default()
+			})
+			.collect();
+	let uris = entries.iter().map(|item| item.uri().to_owned()).collect::<Vec<_>>();
+	let metadata = HashMap::from([(a.to_owned(), metadata::Track::new()), (b.to_owned(), metadata::Track::new())]);
+	let rows = resolve_rows(&uris, &metadata, &HashMap::new(), None)?;
+	let rows = super::added_page(rows, entries.iter().map(super::playlist::row_attributes), 0, 4);
+	let mut listing = crate::library::Listing::default();
+	super::super::pages::take_session_page(&mut listing, rows);
+	assert_eq!(listing.tracks.iter().map(|row| row.uri.as_str()).collect::<Vec<_>>(), [a, a, b]);
+	assert_eq!(listing.added_at, [Some(1_781_001_234), Some(1_781_001_235), None]);
+	assert_eq!(listing.added_by(0).as_deref(), Some("alex"));
+	assert_eq!(listing.added_by(1).as_deref(), Some("bo"));
+	assert_eq!(listing.added_by(2), None);
+	Ok(())
+}
+
+#[test]
+fn liked_added_attributes_keep_collection_seconds_and_skip_missing_metadata() -> Result<(), Error> {
+	let a = "spotify:track:0000000000000000000001";
+	let b = "spotify:track:0000000000000000000002";
+	let items = [CollectionItem { uri: a.into(), added_at: 123, ..Default::default() }, CollectionItem {
+		uri: b.into(),
+		added_at: 456,
+		..Default::default()
+	}];
+	let rows = vec![track(b, &metadata::Track::new(), None)?];
+	let rows = super::added_page(rows, items.iter().map(|item| (item.uri.as_str(), Some(item.added_at), None)), 0, 2);
+	assert_eq!(rows.added_at, [Some(456)]);
+	assert_eq!(rows.added_by, [None]);
 	Ok(())
 }

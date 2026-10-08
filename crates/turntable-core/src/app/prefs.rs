@@ -19,11 +19,6 @@ impl State {
 					self.panel = None;
 				}
 			},
-			Pref::Lyrics(_) => {
-				// Looked up again (or not at all) the next time the panel is open.
-				self.prefs.set(&pref);
-				self.lyrics = None;
-			},
 			Pref::WebPlayer(false) => {
 				self.prefs.set(&pref);
 				// What the page being shown took from the web player goes with it.
@@ -70,16 +65,6 @@ mod tests {
 		s.update(Msg::Pref(Pref::NowPlayingView(true)));
 		assert!(s.now_playing_view);
 		assert_eq!(s.panel, Some(Panel::Queue), "other panels stay");
-	}
-
-	#[test]
-	fn lyrics_are_asked_for_again_when_the_source_changes() {
-		let mut s = State { lyrics: Some(("spotify:track:a".into(), crate::app::LyricsState::Missing)), ..State::default() };
-		s.update(Msg::Pref(Pref::Lyrics(false)));
-		assert!(s.lyrics.is_none() && !s.prefs.sources.lyrics);
-		s.lyrics = Some(("spotify:track:a".into(), crate::app::LyricsState::Missing));
-		s.update(Msg::Pref(Pref::Lyrics(true)));
-		assert!(s.lyrics.is_none() && s.prefs.sources.lyrics);
 	}
 
 	#[test]

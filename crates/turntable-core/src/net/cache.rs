@@ -36,6 +36,17 @@ impl<K: Hash + Eq + Clone, V: Clone> Cache<K, V> {
 		self.get_at(key, Instant::now())
 	}
 
+	/// Borrows an unexpired entry without cloning a whole listing; still updates its LRU use.
+	pub fn get_ref(&mut self, key: &K) -> Option<&V> {
+		self.tick += 1;
+		let slot = self.map.get_mut(key)?;
+		if slot.at.elapsed() >= self.ttl {
+			return None;
+		}
+		slot.used = self.tick;
+		Some(&slot.value)
+	}
+
 	pub fn get_at(&mut self, key: &K, now: Instant) -> Option<V> {
 		match self.get_stale_at(key, now) {
 			Some((value, true)) => Some(value),
@@ -203,6 +214,19 @@ mod tests {
 		cache.insert("c", 3);
 		assert_eq!((cache.get(&"a"), cache.get(&"b"), cache.get(&"c")), (Some(1), None, Some(3)));
 		assert_eq!(cache.len(), 2);
+	}
+
+	#[test]
+	fn borrowed_hits_update_lru_and_expired_values_are_not_borrowed() {
+		let mut cache = Cache::new(2, TTL);
+		cache.insert("a", 1);
+		cache.insert("b", 2);
+		assert_eq!(cache.get_ref(&"a"), Some(&1));
+		cache.insert("c", 3);
+		assert_eq!(cache.get_ref(&"b"), None);
+		let mut expired = Cache::new(1, Duration::ZERO);
+		expired.insert("x", 4);
+		assert_eq!(expired.get_ref(&"x"), None);
 	}
 
 	#[test]

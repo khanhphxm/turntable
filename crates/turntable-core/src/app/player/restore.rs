@@ -40,6 +40,7 @@ impl Controller {
 		self.restore.pending = false;
 		self.restore.idle_cluster = !update.playback.as_ref().is_some_and(|player| player.status == Status::Playing);
 		self.restore.fallback = startup && update.playback.is_none() && !update.local_active;
+		self.state.recent_searches.load(&self.paths.config, Some(update.account.clone()));
 		self.restore.account = Some(update.account);
 		let was_item = self.last_item.clone();
 		let changed = self.state.apply_connect_state(update.devices, update.playback, update.local_active);
@@ -51,6 +52,7 @@ impl Controller {
 
 	pub(super) fn on_restore_unavailable(&mut self, account: String) {
 		self.restore.pending = false;
+		self.state.recent_searches.load(&self.paths.config, (!account.is_empty()).then(|| account.clone()));
 		self.restore.account = (!account.is_empty()).then_some(account);
 		self.restore.fallback = self.state.item.uri.is_empty();
 		self.request_last_playback();

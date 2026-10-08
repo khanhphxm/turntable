@@ -8,6 +8,7 @@ use protobuf::{CodedInputStream, CodedOutputStream};
 pub(super) enum Set {
 	Saved,
 	Artists,
+	IgnoreInRecs,
 }
 
 impl Set {
@@ -15,6 +16,7 @@ impl Set {
 		match self {
 			Self::Saved => "collection",
 			Self::Artists => "artist",
+			Self::IgnoreInRecs => "ignoreinrecs",
 		}
 	}
 }
@@ -41,6 +43,25 @@ pub(super) fn request(username: &str, set: Set, token: &str) -> protobuf::Result
 			out.write_string(3, token)?;
 		}
 		out.write_int32(4, 1000)?;
+		out.flush()?;
+	}
+	Ok(bytes)
+}
+
+/// One collection2 WriteRequest. Removals are tombstones in the same set as saves.
+pub(super) fn write_request(username: &str, set: Set, item: &CollectionItem, update_id: &str) -> protobuf::Result<Vec<u8>> {
+	let entry_size = protobuf::rt::string_size(1, &item.uri) + protobuf::rt::int64_size(2, item.added_at) + protobuf::rt::tag_size(3) + 1;
+	let mut bytes = Vec::with_capacity(username.len() + item.uri.len() + update_id.len() + 48);
+	{
+		let mut out = CodedOutputStream::vec(&mut bytes);
+		out.write_string(1, username)?;
+		out.write_string(2, set.name())?;
+		out.write_tag(3, protobuf::rt::WireType::LengthDelimited)?;
+		out.write_raw_varint64(entry_size)?;
+		out.write_string(1, &item.uri)?;
+		out.write_int64(2, item.added_at)?;
+		out.write_bool(3, item.is_removed)?;
+		out.write_string(4, update_id)?;
 		out.flush()?;
 	}
 	Ok(bytes)
@@ -106,6 +127,36 @@ mod tests {
 		assert_eq!(input.read_raw_tag_or_eof()?, Some(18));
 		assert_eq!(input.read_string()?, "artist");
 		assert_eq!(input.read_raw_tag_or_eof()?, Some(32));
+		Ok(())
+	}
+
+	#[test]
+	fn write_fields_keep_saved_collection_and_artist_tombstones_separate() -> protobuf::Result<()> {
+		for (set, name, uri) in [
+			(Set::Saved, "collection", "spotify:track:track"),
+			(Set::Saved, "collection", "spotify:album:album"),
+			(Set::Artists, "artist", "spotify:artist:artist"),
+			(Set::IgnoreInRecs, "ignoreinrecs", "spotify:playlist:playlist"),
+			(Set::IgnoreInRecs, "ignoreinrecs", "spotify:track:track"),
+		] {
+			for removed in [false, true] {
+				let item = CollectionItem { uri: uri.into(), added_at: 1_700_000_000, is_removed: removed };
+				let bytes = write_request("alice", set, &item, "update")?;
+				let mut input = CodedInputStream::from_bytes(&bytes);
+				assert_eq!(input.read_raw_tag_or_eof()?, Some(10));
+				assert_eq!(input.read_string()?, "alice");
+				assert_eq!(input.read_raw_tag_or_eof()?, Some(18));
+				assert_eq!(input.read_string()?, name);
+				assert_eq!(input.read_raw_tag_or_eof()?, Some(26));
+				let decoded = CollectionItem::parse(&input.read_bytes()?)?;
+				assert_eq!(decoded.uri, uri);
+				assert_eq!(decoded.added_at, item.added_at);
+				assert_eq!(decoded.is_removed, removed);
+				assert_eq!(input.read_raw_tag_or_eof()?, Some(34));
+				assert_eq!(input.read_string()?, "update");
+				assert_eq!(input.read_raw_tag_or_eof()?, None);
+			}
+		}
 		Ok(())
 	}
 

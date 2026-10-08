@@ -127,14 +127,12 @@ impl Default for Display {
 	}
 }
 
-/// The outside services turntable may ask.
+/// Optional metadata sources outside Spotify's authenticated player session.
+/// Retired `lyrics` and `wikipedia` keys in saved settings are ignored on load and
+/// omitted on the next save; unrelated preferences and `web_player` retain their values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Sources {
-	/// Synced lyrics from LRCLIB.
-	pub lyrics:     bool,
-	/// Artist biographies from Wikidata and Wikipedia.
-	pub wikipedia:  bool,
 	/// Listeners, photos, credits, play counts and other people's playlists from Spotify's
 	/// anonymous web player.
 	pub web_player: bool,
@@ -142,7 +140,7 @@ pub struct Sources {
 
 impl Default for Sources {
 	fn default() -> Self {
-		Self { lyrics: true, wikipedia: true, web_player: true }
+		Self { web_player: true }
 	}
 }
 
@@ -199,8 +197,6 @@ pub enum Pref {
 	NowPlayingView(bool),
 	Compact(bool),
 	PlayCounts(bool),
-	Lyrics(bool),
-	Wikipedia(bool),
 	WebPlayer(bool),
 }
 
@@ -219,8 +215,6 @@ impl Prefs {
 			Pref::CacheMb(mb) => self.device.cache_mb = sanitize_cache(*mb),
 			Pref::Compact(on) => self.display.compact = *on,
 			Pref::PlayCounts(on) => self.display.play_counts = *on,
-			Pref::Lyrics(on) => self.sources.lyrics = *on,
-			Pref::Wikipedia(on) => self.sources.wikipedia = *on,
 			Pref::WebPlayer(on) => self.sources.web_player = *on,
 			Pref::NowPlayingView(_) => return false,
 		}
@@ -243,7 +237,7 @@ impl Settings {
 	}
 }
 
-/// What the worker threads (lyrics, open data, the web player) may ask: the current [`Sources`],
+/// What the optional metadata workers may ask: the current [`Sources`],
 /// readable from any thread. The UI thread sets it whenever the preference changes, and every
 /// request those threads make checks it first, so a source that is off is never contacted.
 pub mod allowed {
@@ -251,24 +245,10 @@ pub mod allowed {
 
 	use super::Sources;
 
-	static LYRICS: AtomicBool = AtomicBool::new(true);
-	static WIKIPEDIA: AtomicBool = AtomicBool::new(true);
 	static WEB_PLAYER: AtomicBool = AtomicBool::new(true);
 
 	pub fn set(sources: Sources) {
-		LYRICS.store(sources.lyrics, Ordering::Relaxed);
-		WIKIPEDIA.store(sources.wikipedia, Ordering::Relaxed);
 		WEB_PLAYER.store(sources.web_player, Ordering::Relaxed);
-	}
-
-	/// Lyrics from LRCLIB.
-	pub fn lyrics() -> bool {
-		LYRICS.load(Ordering::Relaxed)
-	}
-
-	/// Artist biographies from Wikidata and Wikipedia.
-	pub fn wikipedia() -> bool {
-		WIKIPEDIA.load(Ordering::Relaxed)
 	}
 
 	/// Spotify's anonymous web player.
@@ -312,6 +292,26 @@ mod tests {
 	}
 
 	#[test]
+	fn retired_sources_do_not_reset_saved_preferences() {
+		let dir = scratch("source-migration");
+		fs::write(
+			dir.join("settings.json"),
+			br#"{"eq_preset":"rock","sources":{"lyrics":false,"wikipedia":false,"web_player":false},"audio":{"mono":true}}"#,
+		)
+		.unwrap();
+		let settings = Settings::load(&dir);
+		assert_eq!(settings.eq_preset.as_deref(), Some("rock"));
+		assert!(settings.prefs.audio.mono);
+		assert!(!settings.prefs.sources.web_player);
+		settings.save(&dir).unwrap();
+		let saved: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("settings.json")).unwrap()).unwrap();
+		assert!(saved["sources"].get("wikipedia").is_none());
+		assert!(saved["sources"].get("lyrics").is_none());
+		assert_eq!(Settings::load(&dir), settings);
+		fs::remove_dir_all(dir).unwrap();
+	}
+
+	#[test]
 	fn an_unknown_normalize_level_costs_nothing_else() {
 		let dir = scratch("future");
 		fs::write(dir.join("settings.json"), br#"{"eq_preset":"rock","audio":{"normalize":"ultra","mono":true},"future_thing":[1,2]}"#)
@@ -349,7 +349,7 @@ mod tests {
 	fn each_change_lands_in_its_own_preference_and_stays_in_range() {
 		let mut p = Prefs::default();
 		let out = Output { uid: "u".into(), name: "n".into() };
-		let checks: [(Pref, Check); 18] = [
+		let checks: [(Pref, Check); 16] = [
 			(Pref::Autoplay(false), |p| !p.playback.autoplay),
 			(Pref::Explicit(false), |p| !p.playback.explicit),
 			(Pref::Crossfade(255), |p| p.playback.crossfade == MAX_CROSSFADE),
@@ -365,8 +365,6 @@ mod tests {
 			(Pref::CacheMb(0), |p| p.device.cache_mb == 0),
 			(Pref::Compact(true), |p| p.display.compact),
 			(Pref::PlayCounts(false), |p| !p.display.play_counts),
-			(Pref::Lyrics(false), |p| !p.sources.lyrics),
-			(Pref::Wikipedia(false), |p| !p.sources.wikipedia),
 			(Pref::WebPlayer(false), |p| !p.sources.web_player),
 		];
 		for (pref, check) in checks {

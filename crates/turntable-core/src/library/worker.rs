@@ -3,16 +3,16 @@
 use std::{
 	collections::HashMap,
 	path::{Path, PathBuf},
-	sync::{Arc, Mutex, PoisonError, mpsc},
+	sync::{Arc, LazyLock, Mutex, PoisonError, mpsc},
 	thread,
 	time::{Duration, Instant},
 };
 
 use super::{
-	Home, Listing, Popularity, Request, Response, Route,
+	Facet, Home, HomeFeed, Listing, Popularity, Request, Response, Route,
 	added::Membership,
-	artist::{about, artist, popularity},
-	home::home,
+	artist::{artist, popularity},
+	home::refresh as refresh_home,
 	pages::{accent, all_albums, all_followed, all_playlists, open},
 	session::Reader,
 	snapshot::{self, Store},
@@ -20,14 +20,29 @@ use super::{
 use crate::{
 	engine::SessionReader,
 	net::{cache::Cache, par, trace},
-	sources::external,
 	spotify::{self, Artist, Client, Playlist, id_of},
 };
 
+mod dispatch;
+mod folders;
+#[cfg(test)]
+mod live;
+#[cfg(test)]
+mod native_only_tests;
+#[cfg(test)]
+mod premium_tests;
+mod schedule;
+#[cfg(test)]
+mod session_tests;
+#[cfg(test)]
+mod speed_tests;
+
 pub struct Worker {
-	tx:        mpsc::Sender<Inbox>,
-	snapshots: Arc<Mutex<Store>>,
-	deliver:   Arc<dyn Fn(Response) + Send + Sync>,
+	tx:         mpsc::Sender<Inbox>,
+	snapshots:  Arc<Mutex<Store>>,
+	deliver:    Arc<dyn Fn(Response) + Send + Sync>,
+	prefetches: Mutex<Cache<Route, ()>>,
+	urgent:     tokio::sync::watch::Sender<()>,
 }
 
 enum Inbox {
@@ -38,119 +53,131 @@ enum Inbox {
 impl Worker {
 	/// Starts the worker. Disk listings can also be delivered by `send`, without waiting for
 	/// an in-flight network request; every snapshot is followed by the worker's fresh answer.
-	/// `web_api` false keeps native session reads enabled but refuses Web API traffic.
+	/// `web_api` false keeps native session library reads/writes enabled but refuses Web API traffic.
 	pub fn spawn(config_dir: PathBuf, cache_dir: &Path, web_api: bool, deliver: impl Fn(Response) + Send + Sync + 'static) -> Self {
 		let (tx, rx) = mpsc::channel::<Inbox>();
-		let snapshots = Arc::new(Mutex::new(Store::new(cache_dir)));
+		let (urgent, interrupted) = tokio::sync::watch::channel(());
+		let mut store = Store::new(cache_dir);
+		let account = saved_account(&config_dir);
+		store.load(account.as_deref());
+		let cached = store.connected();
+		let snapshots = Arc::new(Mutex::new(store));
 		let deliver: Arc<dyn Fn(Response) + Send + Sync> = Arc::new(deliver);
-		let mut added = Membership::new(cache_dir);
-		let worker = Self { tx, snapshots: snapshots.clone(), deliver: deliver.clone() };
-		let _ = thread::Builder::new().name("library".into()).stack_size(512 * 1024).spawn(move || {
-			let mut session: Option<Session> = None;
-			let mut player: Option<Reader> = None;
-			let mut refresh_added = false;
-			let mut waiting = None;
-			while let Some(request) = waiting.take().or_else(|| rx.recv().ok()) {
-				match request {
-					Inbox::Session(reader) => {
-						added.attach(reader.clone(), deliver.as_ref());
-						refresh_added = reader.is_some();
-						player = reader.map(Reader::new);
-						deliver(Response::LikedTracks(Arc::from([])));
-						if let Some(s) = &mut session {
-							let matched = player.as_ref().is_some_and(|p| p.matches(&s.me));
-							s.attach(if matched { player.take() } else { None }, deliver.as_ref());
-						}
-						if let Some(reader) = &mut player
-							&& let Ok(Some(tracks)) = reader.liked_update()
-						{
-							deliver(Response::LikedTracks(tracks));
-						}
-					},
-					Inbox::Request(request) => {
-						if matches!(request, Request::Connect | Request::Login)
-							&& let Some(s) = &mut session
-							&& s.player.is_some()
-						{
-							player = s.player.take();
-						}
-						serve(
-							&config_dir,
-							&snapshots,
-							&mut session,
-							&mut player,
-							&mut added,
-							&mut refresh_added,
-							web_api,
-							request,
-							deliver.as_ref(),
-						);
-					},
-				}
-				// At the end of a request burst, drop shared answers and stale listings.
-				waiting = rx.try_recv().ok();
-				if waiting.is_none() {
-					if let Some(s) = &mut session {
-						s.client.forget_recent();
-						s.pages.evict_expired();
-					}
-					if std::mem::take(&mut refresh_added) {
-						added.refresh(deliver.as_ref());
-					}
-				}
-			}
-		});
+		if let Some(cached) = cached {
+			deliver(cached);
+		}
+		let runner = dispatch::Runner::new(config_dir, cache_dir, web_api, snapshots.clone(), deliver.clone(), interrupted);
+		let worker = Self { tx, snapshots, deliver, prefetches: Mutex::new(Cache::new(snapshot::LISTINGS_KEPT, PAGES_TTL)), urgent };
+		let _ = thread::Builder::new().name("library".into()).stack_size(512 * 1024).spawn(move || runner.run(&rx));
 		worker.send(Request::Connect);
 		worker
 	}
 
 	pub fn send(&self, request: Request) {
+		if let Request::Prefetch(route) = &request {
+			if matches!(route, Route::Search | Route::Library | Route::Folder(_)) {
+				return;
+			}
+			let mut prefetches = self.prefetches.lock().unwrap_or_else(PoisonError::into_inner);
+			if prefetches.get(route).is_some() {
+				return;
+			}
+			prefetches.insert(route.clone(), ());
+		}
 		if let Request::Open(route, 0) = &request {
 			let listing = self.snapshots.lock().unwrap_or_else(PoisonError::into_inner).listing(route);
 			if let Some(listing) = listing {
 				trace::hit("page", &format!("{route:?}"), "disk");
 				(self.deliver)(Response::Listing { route: route.clone(), offset: 0, listing });
 			}
+		} else if let request @ (Request::Home | Request::HomeFacet(_)) = &request {
+			let facet = match request {
+				Request::HomeFacet(facet) => *facet,
+				_ => Facet::All,
+			};
+			let (home, feed) = {
+				let store = self.snapshots.lock().unwrap_or_else(PoisonError::into_inner);
+				(store.home(), store.home_feed(facet))
+			};
+			if let Some(home) = home {
+				(self.deliver)(Response::Home(home));
+			}
+			if let Some(feed) = feed {
+				trace::hit("library", "HomeFeed", "disk");
+				(self.deliver)(Response::HomeFeed { facet, feed });
+			}
+		} else if let Request::Search(query) = &request {
+			let results = self.snapshots.lock().unwrap_or_else(PoisonError::into_inner).search(query);
+			if let Some(results) = results {
+				trace::hit("search", query.trim(), "disk");
+				(self.deliver)(Response::Search { query: query.trim().to_owned(), results });
+			}
 		} else if matches!(request, Request::Logout | Request::ForgetSnapshot | Request::Login) {
 			self.snapshots.lock().unwrap_or_else(PoisonError::into_inner).clear();
+			self.prefetches.lock().unwrap_or_else(PoisonError::into_inner).clear();
 		}
+		let foreground = schedule::foreground(&request);
 		let _ = self.tx.send(Inbox::Request(request));
+		if foreground {
+			self.urgent.send_replace(());
+		}
 	}
 
-	/// Shares the player's authenticated session; before it arrives reads use the Web API.
+	/// Shares the player's authenticated session for library/profile/Connect I/O; API fallback requires no session.
 	pub fn set_session(&self, session: Option<SessionReader>) {
+		self.prefetches.lock().unwrap_or_else(PoisonError::into_inner).clear();
 		let _ = self.tx.send(Inbox::Session(session));
+		self.urgent.send_replace(());
 	}
+}
+
+/// Identity comes from saved session authorization, never from a library snapshot or Keychain.
+fn saved_account(config: &Path) -> Option<String> {
+	if !config.join("credentials.json").is_file() {
+		return None;
+	}
+	librespot_core::cache::Cache::new(Some(config), Some(config), None::<&Path>, None).ok()?.credentials()?.username
 }
 
 /// Library state, its fallback Web API client and its optional player session.
 pub(super) struct Session {
-	pub(super) client:    Client,
-	pub(super) player:    Option<Reader>,
-	pub(super) me:        String,
-	pub(super) me_name:   Option<String>,
-	pub(super) snapshots: Arc<Mutex<Store>>,
+	pub(super) client:     Client,
+	pub(super) player:     Option<Reader>,
+	pub(super) me:         String,
+	pub(super) me_name:    Option<String>,
+	pub(super) snapshots:  Arc<Mutex<Store>>,
 	/// The user's playlists, to name recently played ones without a request.
-	pub(super) playlists: Vec<Playlist>,
+	pub(super) playlists:  Vec<Playlist>,
 	/// Artists and others' playlists fetched before. Each map keeps at most 128
 	/// entries, then starts a fresh batch; every insertion uses the budget helpers.
-	pub(super) artists:   HashMap<String, Artist>,
-	pub(super) others:    HashMap<String, Option<Playlist>>,
+	pub(super) artists:    HashMap<String, Artist>,
+	pub(super) others:     HashMap<String, Option<Playlist>>,
 	/// The last home page and when it was built: revisits within a minute reuse it.
-	pub(super) home:      Option<(Instant, Home)>,
+	pub(super) home:       Option<(Instant, Home)>,
+	pub(super) home_feeds: Cache<Facet, HomeFeed>,
 	/// The first page of the listings opened lately (an album, a playlist, Liked Songs, an artist's
 	/// header), so visiting one again costs no request. A write drops what it changes.
-	pub(super) pages:     Cache<Route, Listing>,
-	pub(super) external:  external::Client,
-	pub(super) web:       spotify::WebPlayer,
+	pub(super) pages:      Cache<Route, Listing>,
+	pub(super) searches:   Cache<String, spotify::SearchResults>,
+	pub(super) web:        Arc<spotify::WebPlayer>,
 	/// Artist pages' popular songs and About, and the tint of a cover (`None`: Spotify had no color for it).
-	pub(super) popular:   Cache<String, Popularity>,
-	pub(super) abouts:    Cache<String, external::About>,
-	pub(super) colors:    Cache<String, Option<String>>,
+	pub(super) popular:    Cache<String, Popularity>,
+	pub(super) colors:     Cache<String, Option<String>>,
 }
 
 /// How long the first page of a listing is reused, and how many listings are kept.
 const PAGES_TTL: Duration = Duration::from_secs(180);
+
+// These are anonymous/public metadata, not account data. Reconnects reuse the token and transport.
+static WEB: LazyLock<Arc<spotify::WebPlayer>> = LazyLock::new(|| {
+	let web = Arc::new(spotify::WebPlayer::new());
+	#[cfg(not(test))]
+	{
+		let warming = web.clone();
+		let _ = thread::Builder::new().name("library-warm".into()).stack_size(512 * 1024).spawn(move || warming.warm());
+	}
+	web
+});
 
 impl Session {
 	fn new(client: Client, me: spotify::User, playlists: Vec<Playlist>, snapshots: Arc<Mutex<Store>>) -> Self {
@@ -164,11 +191,11 @@ impl Session {
 			artists: HashMap::new(),
 			others: HashMap::new(),
 			home: None,
+			home_feeds: Cache::new(Facet::ALL.len(), Duration::from_secs(300)),
 			pages: Cache::new(snapshot::LISTINGS_KEPT, PAGES_TTL),
-			external: external::Client::new(),
-			web: spotify::WebPlayer::new(),
+			searches: Cache::new(snapshot::LISTINGS_KEPT, PAGES_TTL),
+			web: WEB.clone(),
 			popular: Cache::new(12, Duration::from_secs(1800)),
-			abouts: Cache::new(24, Duration::from_secs(24 * 3600)),
 			colors: Cache::new(64, Duration::from_secs(24 * 3600)),
 		}
 	}
@@ -190,6 +217,7 @@ impl Session {
 	fn attach(&mut self, player: Option<Reader>, deliver: &dyn Fn(Response)) {
 		self.player = player;
 		self.home = None;
+		self.home_feeds.clear();
 		self.pages.clear();
 		self.popular.clear();
 		if self.player.is_some()
@@ -199,6 +227,13 @@ impl Session {
 			let response = Response::Playlists(playlists);
 			let mut snapshots = self.snapshots.lock().unwrap_or_else(PoisonError::into_inner);
 			snapshots.record(&response);
+			if let Some(player) = &mut self.player
+				&& let Ok(entries) = player.rootlist()
+			{
+				let rootlist = Response::Rootlist { account: self.me.clone(), entries };
+				snapshots.record(&rootlist);
+				deliver(rootlist);
+			}
 			deliver(response);
 			let _ = snapshots.save();
 		}
@@ -218,7 +253,7 @@ impl Session {
 		let mut playlists = reader.playlists()?;
 		for playlist in &mut playlists {
 			if let Some(known) = self.playlists.iter().find(|known| known.id == playlist.id) {
-				playlist.public = known.public;
+				playlist.public = playlist.public.or(known.public);
 				playlist.owner.display_name.clone_from(&known.owner.display_name);
 				if playlist.images.is_empty() {
 					playlist.images.clone_from(&known.images);
@@ -252,6 +287,7 @@ fn serve(
 	request: Request,
 	deliver: &dyn Fn(Response),
 ) {
+	let label = trace::enabled().then(|| request.label());
 	let output = |response| {
 		let changed = snapshots.lock().unwrap_or_else(PoisonError::into_inner).record(&response);
 		deliver(response);
@@ -270,43 +306,52 @@ fn serve(
 			let reader = session.as_mut().and_then(|s| s.player.as_mut()).or(player.as_mut());
 			output(queue_context(reader, &route));
 		},
-		Request::RememberPlayback(position) => {
-			if let Err(error) = super::restore::remember(config, position) {
-				deliver(Response::Error { route: None, message: format!("Couldn't save playback position: {error}") });
-			}
+		Request::AddContextToPlaylist(route) => {
+			let reader = session.as_mut().and_then(|s| s.player.as_mut()).or(player.as_mut());
+			output(add_context_to_playlist(reader, route));
 		},
+		Request::RememberPlayback(position) => remember_playback(config, position, deliver),
 		Request::Logout => {
 			snapshots.lock().unwrap_or_else(PoisonError::into_inner).clear();
 			*session = None;
 			let _ = spotify::logout(config);
 			deliver(Response::NeedsLogin);
 		},
-		Request::ForgetSnapshot => snapshots.lock().unwrap_or_else(PoisonError::into_inner).clear(),
+		Request::ForgetSnapshot => forget_library(snapshots, session, player, added, refresh_added, deliver),
 		other => {
+			let speculative = matches!(other, Request::Prefetch(_));
 			let Some(s) = session.as_mut() else {
 				// Nothing can load without an account: say so, so no view keeps
 				// waiting for an answer that will never come.
-				deliver(Response::NeedsLogin);
+				if !speculative {
+					deliver(Response::NeedsLogin);
+				}
 				return;
 			};
 			let route = match &other {
-				Request::Open(route, _) => Some(route.clone()),
+				Request::Open(route, _) | Request::Prefetch(route) => Some(route.clone()),
 				_ => None,
 			};
 			// Writes need permissions a sign-in from an older turntable lacks.
-			let write = matches!(
-				other,
-				Request::SetFollowed(..)
-					| Request::CreatePlaylist(..)
-					| Request::RenamePlaylist(..)
-					| Request::AddToPlaylist(..)
-					| Request::RemoveFromPlaylist(..)
-					| Request::MovePlaylistRow(..)
-			);
+			let write = is_write(&other);
 			let result = match other {
 				Request::LastPlayback => last_playback(config, s, s.player.as_ref().or(player.as_ref())).map(Some),
-				other => run(s, added, refresh_added, other, deliver),
-			};
+				Request::Pins => pins_response(&s.me, "load", super::pins::load(config, &s.me)),
+				Request::SetPinned { uri, pinned } => pins_response(&s.me, "save", super::pins::set(config, &s.me, &uri, pinned)),
+				Request::FolderExpansion => super::folders::load(config, &s.me)
+					.map(|expanded| Some(Response::FolderExpansion { account: s.me.clone(), expanded }))
+					.map_err(|error| spotify::Error::Parse(format!("Couldn't load folder expansion: {error}"))),
+				Request::SetFolderExpanded { id, expanded } => super::folders::set(config, &s.me, &id, expanded)
+					.map(|expanded| Some(Response::FolderExpansion { account: s.me.clone(), expanded }))
+					.map_err(|error| spotify::Error::Parse(format!("Couldn't save folder expansion: {error}"))),
+				other => run(s, added, refresh_added, other, &output),
+			}
+			.and_then(|response| {
+				if matches!(&response, Some(Response::Playlists(_) | Response::Created(_))) {
+					folders::publish(s, &output)?;
+				}
+				Ok(response)
+			});
 			match result {
 				Ok(Some(response)) => {
 					// What the Web API lacks of a page follows it, so nothing waits for it: an album's play
@@ -319,20 +364,11 @@ fn serve(
 					};
 					output(response);
 					if let Some((route, offset, cover)) = follow {
-						if let Route::Album(id) = &route
-							&& let Ok(plays) = s.web.album_plays(id)
-						{
-							deliver(Response::Plays(route.clone(), plays));
-						}
-						if offset == 0
-							&& let Some(url) = cover
-							&& let Some(accent) = accent(s, &url)
-						{
-							deliver(Response::Accent(route, accent));
-						}
+						enrich_listing(s, route, offset, cover.as_deref(), &output);
 					}
 				},
 				Ok(None) => {},
+				Err(_) if speculative => {},
 				Err(spotify::Error::AuthRequired | spotify::Error::AuthExpired) => {
 					snapshots.lock().unwrap_or_else(PoisonError::into_inner).clear();
 					*session = None;
@@ -351,6 +387,73 @@ fn serve(
 			}
 		},
 	}
+	if let Some(label) = label {
+		trace::mark("served", &label);
+	}
+}
+
+fn pins_response(account: &str, operation: &str, result: std::io::Result<Vec<String>>) -> spotify::Result<Option<Response>> {
+	result
+		.map(|uris| Some(Response::Pins { account: account.to_owned(), uris }))
+		.map_err(|error| spotify::Error::Parse(format!("Couldn't {operation} library pins: {error}")))
+}
+
+/// Pending native requests have finished before this account's caches are removed.
+fn forget_library(
+	snapshots: &Mutex<Store>,
+	session: &mut Option<Session>,
+	player: &mut Option<Reader>,
+	added: &mut Membership,
+	refresh_added: &mut bool,
+	deliver: &dyn Fn(Response),
+) {
+	snapshots.lock().unwrap_or_else(PoisonError::into_inner).clear();
+	*session = None;
+	*player = None;
+	*refresh_added = false;
+	added.forget(deliver);
+}
+
+fn remember_playback(config: &Path, position: super::PlaybackPosition, deliver: &dyn Fn(Response)) {
+	if let Err(error) = super::restore::remember(config, position) {
+		deliver(Response::Error { route: None, message: format!("Couldn't save playback position: {error}") });
+	}
+}
+
+fn is_write(request: &Request) -> bool {
+	matches!(
+		request,
+		Request::SetFollowed(..)
+			| Request::CreatePlaylist(..)
+			| Request::RenamePlaylist(..)
+			| Request::SetCollaborative(..)
+			| Request::CreateFolder
+			| Request::RenameFolder(..)
+			| Request::DeleteFolder(_)
+			| Request::MoveToFolder { .. }
+			| Request::SetExcluded { .. }
+			| Request::AddToPlaylist(..)
+			| Request::RemoveFromPlaylist(..)
+			| Request::MovePlaylistRow(..)
+	)
+}
+
+fn enrich_listing(s: &mut Session, route: Route, offset: u32, cover: Option<&str>, deliver: &dyn Fn(Response)) {
+	let web = &s.web;
+	let colors = &mut s.colors;
+	let (plays, color) = par::join(
+		|| match &route {
+			Route::Album(id) => web.album_plays(id).ok(),
+			_ => None,
+		},
+		|| if offset == 0 { cover.and_then(|url| accent(web, colors, url)) } else { None },
+	);
+	if let Some(plays) = plays {
+		deliver(Response::Plays(route.clone(), plays));
+	}
+	if let Some(color) = color {
+		deliver(Response::Accent(route, color));
+	}
 }
 
 fn connect(
@@ -361,6 +464,18 @@ fn connect(
 	web_api: bool,
 	deliver: &dyn Fn(Response),
 ) {
+	if let Some(reader) = player.take() {
+		connect_session(config, snapshots, session, reader, web_api, deliver);
+		return;
+	}
+	// Wait for the engine's native session instead of opening the separate
+	// OAuth account: Keychain can block this worker before Session arrives.
+	if !web_api {
+		if saved_account(config).is_none() {
+			deliver(Response::NeedsLogin);
+		}
+		return;
+	}
 	if !config.join("client_id").is_file() {
 		deliver(Response::NeedsClientId);
 		return;
@@ -378,10 +493,10 @@ fn connect(
 		},
 	};
 	let user_id = account.user_id();
-	let (cached, home) = {
+	let (cached, home, feed, roots) = {
 		let mut store = snapshots.lock().unwrap_or_else(PoisonError::into_inner);
 		store.load(user_id.as_deref());
-		(store.connected(), store.home())
+		(store.connected(), store.home(), store.home_feed(Facet::All), store.rootlist())
 	};
 	let client = Client::open(account.source(), web_api);
 	let has_snapshot = cached.is_some();
@@ -389,9 +504,16 @@ fn connect(
 		*session = Some(Session::new(client, me.clone(), playlists.clone(), snapshots.clone()));
 		trace::hit("library", "Connected", "disk");
 		deliver(Response::Connected { me, playlists });
+		if let Some(roots) = roots {
+			deliver(roots);
+		}
 		if let Some(home) = home {
 			trace::hit("library", "Home", "disk");
 			deliver(Response::Home(home));
+		}
+		if let Some(feed) = feed {
+			trace::hit("library", "HomeFeed", "disk");
+			deliver(Response::HomeFeed { facet: Facet::All, feed });
 		}
 	} else {
 		*session = Some(Session::new(client, spotify::User { id: String::new(), display_name: None }, Vec::new(), snapshots.clone()));
@@ -399,13 +521,7 @@ fn connect(
 	let Some(s) = session.as_mut() else { return };
 	let client = &s.client;
 	// The profile and the playlists don't wait for each other, nor do the playlists' later pages.
-	let (profile, playlists) = par::join(
-		|| client.me_with_plan(),
-		|| match player {
-			Some(player) if user_id.as_deref().is_some_and(|id| player.matches(id)) => player.playlists(),
-			_ => all_playlists(client),
-		},
-	);
+	let (profile, playlists) = par::join(|| client.me_with_plan(), || all_playlists(client));
 	let loaded = profile.and_then(|(me, plan)| {
 		let playlists = if is_free(plan.as_deref()) { Vec::new() } else { playlists? };
 		Ok((me, plan, playlists))
@@ -429,9 +545,6 @@ fn connect(
 			}
 			s.playlists = playlists.clone();
 			deliver(Response::Connected { me, playlists });
-			if player.as_ref().is_some_and(|p| p.matches(&s.me)) {
-				s.attach(player.take(), deliver);
-			}
 		},
 		Err(spotify::Error::AuthRequired | spotify::Error::AuthExpired) => {
 			snapshots.lock().unwrap_or_else(PoisonError::into_inner).clear();
@@ -449,6 +562,93 @@ fn connect(
 		},
 	}
 }
+
+/// A player session needs neither the separate Web API login nor `/me` to open the library.
+fn connect_session(
+	config: &Path,
+	snapshots: &Arc<Mutex<Store>>,
+	session: &mut Option<Session>,
+	mut reader: Reader,
+	web_api: bool,
+	deliver: &dyn Fn(Response),
+) {
+	let (identity, plan) = reader.identity();
+	if is_free(plan.as_deref()) {
+		snapshots.lock().unwrap_or_else(PoisonError::into_inner).clear();
+		*session = None;
+		deliver(Response::LoginFailed(spotify::Error::PremiumRequired.user_message()));
+		return;
+	}
+	let (cached, home, feed, roots) = {
+		let mut store = snapshots.lock().unwrap_or_else(PoisonError::into_inner);
+		store.load(Some(&identity.id));
+		(store.connected(), store.home(), store.home_feed(Facet::All), store.rootlist())
+	};
+	let client = match session.take().filter(|previous| previous.me == identity.id) {
+		Some(previous) => previous.client,
+		None => {
+			let source = if web_api {
+				spotify::account::Account::open(config)
+					.ok()
+					.filter(|account| account.user_id().as_deref() == Some(&identity.id))
+					.map_or_else(|| -> spotify::TokenSource { Arc::new(|| Err(spotify::Error::AuthRequired)) }, |account| account.source())
+			} else {
+				Arc::new(|| Err(spotify::Error::AuthRequired))
+			};
+			Client::open(source, web_api)
+		},
+	};
+	let (me, playlists) = if let Some(Response::Connected { me, playlists }) = cached {
+		trace::hit("library", "Connected", "disk");
+		deliver(Response::Connected { me: me.clone(), playlists: playlists.clone() });
+		if let Some(roots) = roots {
+			deliver(roots);
+		}
+		if let Some(home) = home {
+			trace::hit("library", "Home", "disk");
+			deliver(Response::Home(home));
+		}
+		if let Some(feed) = feed {
+			trace::hit("library", "HomeFeed", "disk");
+			deliver(Response::HomeFeed { facet: Facet::All, feed });
+		}
+		(me, playlists)
+	} else {
+		(identity, Vec::new())
+	};
+	let mut s = Session::new(client, me, playlists, snapshots.clone());
+	let loaded = reader.profile(s.me_name.as_deref()).and_then(|(me, plan)| {
+		if is_free(plan.as_deref()) {
+			return Err(spotify::Error::PremiumRequired);
+		}
+		Ok((me, reader.playlists()?, reader.rootlist()?))
+	});
+	match loaded {
+		Ok((me, mut playlists, entries)) => {
+			for playlist in &mut playlists {
+				playlist.normalize(&me.id, me.display_name.as_deref());
+			}
+			s.me = me.id.clone();
+			s.me_name.clone_from(&me.display_name);
+			s.playlists = playlists.clone();
+			deliver(Response::Offline(false));
+			deliver(Response::Connected { me, playlists });
+			deliver(Response::Rootlist { account: s.me.clone(), entries });
+		},
+		Err(spotify::Error::PremiumRequired) => {
+			snapshots.lock().unwrap_or_else(PoisonError::into_inner).clear();
+			deliver(Response::LoginFailed(spotify::Error::PremiumRequired.user_message()));
+			return;
+		},
+		Err(error) => {
+			deliver(Response::Offline(matches!(error, spotify::Error::Network(_))));
+			deliver(Response::Error { route: None, message: error.user_message() });
+		},
+	}
+	s.player = Some(reader);
+	s.publish_liked(deliver);
+	*session = Some(s);
+}
 /// A player request's outcome as the UI shows it: a sign-in problem still ends the session (the
 /// caller's `?`), anything else becomes a sentence for the user.
 fn player_reply<T>(result: spotify::Result<T>) -> spotify::Result<Result<T, String>> {
@@ -460,26 +660,26 @@ fn player_reply<T>(result: spotify::Result<T>) -> spotify::Result<Result<T, Stri
 	}
 }
 
-/// Whether a subscription (`/me`'s `product`) is Spotify's free plan. Unknown (a sign-in from before
-/// turntable asked for it) counts as fine: playing then fails with its own sentence.
+/// Whether a subscription (session `type`/`product`, or fallback `/me`) is Spotify's free plan.
+/// Unknown attributes are not a reason to spend Web API quota; playback supplies its own error.
 fn is_free(plan: Option<&str>) -> bool {
 	matches!(plan, Some("free" | "open"))
 }
 
-/// Queue every native page, preserving duplicate occurrences and omitting local files.
-fn queue_context_pages(
-	mut page: impl FnMut(u32) -> spotify::Result<(String, Vec<spotify::Track>, Option<u32>)>,
+/// Resolve every native page without losing duplicates or raw playlist offsets.
+fn context_pages(
+	mut page: impl FnMut(u32) -> spotify::Result<(String, Vec<String>, Option<u32>)>,
 ) -> spotify::Result<(Vec<String>, String)> {
 	let mut offset = 0;
 	let mut uris = Vec::new();
 	let mut title = None;
 	loop {
-		let (name, tracks, next) = page(offset)?;
+		let (name, items, next) = page(offset)?;
 		title.get_or_insert(name);
-		uris.extend(tracks.into_iter().filter(|t| !t.is_local).map(|t| t.uri));
+		uris.extend(items);
 		match next {
 			Some(next) if next > offset => offset = next,
-			Some(_) => return Err(spotify::Error::Parse("Spotify returned a non-advancing queue page.".into())),
+			Some(_) => return Err(spotify::Error::Parse("Spotify returned a non-advancing context page.".into())),
 			None => return Ok((uris, title.unwrap_or_default())),
 		}
 	}
@@ -489,20 +689,70 @@ fn queue_context(player: Option<&mut Reader>, route: &Route) -> Response {
 	let Some(player) = player else {
 		return Response::Error { route: None, message: "Start the player before adding a context to its queue.".into() };
 	};
-	let result = queue_context_pages(|offset| match route {
-		Route::Album(id) => player.album(id, offset).map(|listing| (listing.title, listing.tracks, listing.next_offset)),
-		Route::Playlist(id) => {
-			let (playlist, _, page) = player.playlist(id, offset, true)?;
-			let page = page.ok_or_else(|| spotify::Error::Parse("Spotify returned no playlist tracks".into()))?;
-			let next = page.next_offset();
-			Ok((playlist.name, page.items, next))
-		},
-		_ => Err(spotify::Error::Parse("Only albums and playlists can be queued as a context.".into())),
-	});
+	let result = context_pages(|offset| player.context_page(route, offset));
 	match result {
-		Ok((uris, title)) => Response::Queue(uris, title),
+		Ok((mut uris, title)) => {
+			uris.retain(|uri| uri.starts_with("spotify:track:") || uri.starts_with("spotify:episode:"));
+			Response::Queue(uris, title)
+		},
 		Err(error) => Response::Error { route: None, message: error.user_message() },
 	}
+}
+
+fn add_context_to_playlist(player: Option<&mut Reader>, route: Route) -> Response {
+	let Some(player) = player else {
+		return Response::Error { route: None, message: "Start the player before adding an album or playlist to a playlist.".into() };
+	};
+	match context_pages(|offset| player.context_page(&route, offset)) {
+		Ok((mut uris, title)) => {
+			uris.retain(|uri| uri.starts_with("spotify:track:"));
+			Response::ContextToPlaylist(route, uris, title)
+		},
+		Err(error) => Response::Error { route: None, message: error.user_message() },
+	}
+}
+
+fn playlist_details(s: &mut Session, id: &str) -> spotify::Result<Playlist> {
+	let mut playlist = match &mut s.player {
+		Some(player) => {
+			// Playlist4 and base permissions carry the full current header.
+			player.playlists()?;
+			player.playlist(id, 0, false)?.0
+		},
+		None => s.client.playlist(id)?,
+	};
+	playlist.normalize(&s.me, s.me_name.as_deref());
+	if let Some(known) = s.playlists.iter_mut().find(|known| known.id == id) {
+		*known = playlist.clone();
+	}
+	Ok(playlist)
+}
+
+fn set_collaborative(s: &mut Session, id: &str, collaborative: bool) -> spotify::Result<Response> {
+	match &mut s.player {
+		Some(player) => player.set_collaborative(id, collaborative)?,
+		None => {
+			if s.client.playlist(id)?.owner.id != s.me {
+				return Err(spotify::Error::Parse("Only the owner can change playlist collaboration.".into()));
+			}
+			s.client.set_collaborative(id, collaborative)?;
+		},
+	}
+	s.forget(&Route::Playlist(id.to_owned()));
+	s.playlists = s.load_playlists()?;
+	Ok(Response::Playlists(s.playlists.clone()))
+}
+
+fn exclusions(s: &mut Session) -> spotify::Result<Option<Response>> {
+	let Some(player) = &mut s.player else { return Ok(None) };
+	Ok(Some(Response::Exclusions { account: s.me.clone(), uris: player.excluded()? }))
+}
+
+fn set_excluded(s: &mut Session, uri: &str, excluded: bool) -> spotify::Result<Response> {
+	let player =
+		s.player.as_mut().ok_or_else(|| spotify::Error::Parse("Start the player before changing taste-profile exclusions.".into()))?;
+	player.set_excluded(uri, excluded)?;
+	Ok(Response::Exclusions { account: s.me.clone(), uris: player.excluded()? })
 }
 
 fn last_playback(config: &Path, s: &Session, player: Option<&Reader>) -> spotify::Result<Response> {
@@ -518,7 +768,25 @@ fn run(
 	deliver: &dyn Fn(Response),
 ) -> spotify::Result<Option<Response>> {
 	Ok(Some(match request {
-		Request::Home => Response::Home(home(s)?),
+		Request::Prefetch(route) => match route {
+			Route::Home => return refresh_home(s, Facet::All, deliver),
+			Route::Search | Route::Library | Route::Folder(_) => return Ok(None),
+			route => open_page(s, route, 0, deliver)?,
+		},
+		request @ (Request::CreateFolder | Request::RenameFolder(..) | Request::DeleteFolder(_) | Request::MoveToFolder { .. }) => {
+			return folders::request(s, request, deliver);
+		},
+		Request::Home => return refresh_home(s, Facet::All, deliver),
+		Request::HomeFacet(facet) => return refresh_home(s, facet, deliver),
+		Request::HomeSectionMore { uri, offset } => match s
+			.player
+			.as_ref()
+			.ok_or_else(|| "Start the player before opening a Home section.".to_owned())
+			.and_then(|player| player.home_section(&uri, offset))
+		{
+			Ok((section, next_offset)) => Response::HomeSection { section, offset, next_offset },
+			Err(message) => Response::HomeSectionFailed { uri, message },
+		},
 		Request::Albums => Response::Albums(match &mut s.player {
 			Some(player) => player.albums(500)?,
 			None => all_albums(&s.client)?,
@@ -527,22 +795,17 @@ fn run(
 			Some(player) => player.followed(500)?,
 			None => all_followed(&mut s.client)?,
 		}),
-		Request::Artist(id) => Response::Artist(artist(s, &id)?),
-		Request::ArtistPopular(id) => Response::ArtistPopular(id.clone(), popularity(s, &id)?),
-		Request::ArtistAbout(id) => Response::ArtistAbout(id.clone(), about(s, &id)),
-		Request::ArtistCard(id) => match s.web.overview(&id) {
-			Ok(overview) => Response::ArtistCard(id, overview),
-			Err(_) => return Ok(None),
-		},
-		Request::Credits(uri) => match s.web.credits(id_of(&uri)) {
-			Ok(credits) => Response::Credits(uri, credits),
-			Err(_) => return Ok(None),
+		request @ (Request::Artist(_) | Request::ArtistPopular(_) | Request::ArtistCard(_) | Request::Credits(_)) => {
+			return artist_request(s, request);
 		},
 		Request::SetFollowed(uri, follow) => {
 			let response = set_followed(s, &uri, follow)?;
 			*refresh_added |= uri.starts_with("spotify:playlist:");
 			if !follow && uri.starts_with("spotify:playlist:") {
 				added.deleted(&uri, deliver);
+			}
+			if !follow {
+				deliver(Response::Done("Removed from Your Library".into()));
 			}
 			response
 		},
@@ -559,6 +822,10 @@ fn run(
 			*refresh_added = true;
 			response
 		},
+		Request::PlaylistDetails(id) => Response::PlaylistDetails(playlist_details(s, &id)?),
+		Request::SetCollaborative(id, collaborative) => set_collaborative(s, &id, collaborative)?,
+		Request::Exclusions => return exclusions(s),
+		Request::SetExcluded { uri, excluded } => set_excluded(s, &uri, excluded)?,
 		Request::AddToPlaylist(id, name, uris) => {
 			let response = append_playlist(s, added, id, &name, &uris, deliver)?;
 			*refresh_added = true;
@@ -577,29 +844,10 @@ fn run(
 		Request::MovePlaylistRow(id, from, to) => move_playlist_row(s, id, from, to)?,
 		Request::CheckLiked(uri) => check_liked(s, uri, deliver)?,
 		Request::SetLiked(uri, liked) => set_liked(s, &uri, liked, deliver)?,
-		Request::Open(route, offset) => {
-			let listing = open(s, &route, offset)?;
-			if route == Route::Liked {
-				s.publish_liked(deliver);
-			}
-			Response::Listing { route, offset, listing }
-		},
-		Request::Search(query) => {
-			let results = match s.web.search(&query, 0) {
-				Ok(results) => results,
-				Err(_) => s.client.search(&query, 0)?,
-			};
-			Response::Search { query, results }
-		},
-		Request::Devices => Response::Devices(player_reply(s.client.devices())?),
-		Request::Playback => Response::Playback(player_reply(s.client.playback())?),
-		Request::Transfer { id, play } => match player_reply(s.client.transfer(&id, play))? {
-			Ok(()) => Response::Transferred,
-			Err(message) => Response::PlayerError(message),
-		},
-		Request::Control { device, command } => match player_reply(s.client.control(&device, &command))? {
-			Ok(()) => return Ok(None),
-			Err(message) => Response::PlayerError(message),
+		Request::Open(route, offset) => open_page(s, route, offset, deliver)?,
+		Request::Search(query) => search(s, query)?,
+		request @ (Request::Devices | Request::Playback | Request::Transfer { .. } | Request::Control { .. }) => {
+			return connect_request(s, request);
 		},
 		Request::Connect
 		| Request::Login
@@ -607,7 +855,88 @@ fn run(
 		| Request::ForgetSnapshot
 		| Request::RememberPlayback(_)
 		| Request::LastPlayback
+		| Request::Pins
+		| Request::SetPinned { .. }
+		| Request::FolderExpansion
+		| Request::SetFolderExpanded { .. }
+		| Request::AddContextToPlaylist(_)
 		| Request::QueueContext(_) => return Ok(None),
+	}))
+}
+
+fn artist_request(s: &mut Session, request: Request) -> spotify::Result<Option<Response>> {
+	Ok(Some(match request {
+		Request::Artist(id) => Response::Artist(artist(s, &id)?),
+		Request::ArtistPopular(id) => {
+			let popular = popularity(s, &id)?;
+			Response::ArtistPopular(id, popular)
+		},
+		Request::ArtistCard(id) => match s.web.overview(&id) {
+			Ok(overview) => Response::ArtistCard(id, overview),
+			Err(_) => return Ok(None),
+		},
+		Request::Credits(uri) => match s.web.credits(id_of(&uri)) {
+			Ok(credits) => Response::Credits(uri, credits),
+			Err(_) => return Ok(None),
+		},
+		_ => return Ok(None),
+	}))
+}
+
+fn open_page(s: &mut Session, route: Route, offset: u32, deliver: &dyn Fn(Response)) -> spotify::Result<Response> {
+	let listing = open(s, &route, offset, &|listing| {
+		if offset == 0 {
+			deliver(Response::Listing { route: route.clone(), offset, listing });
+		}
+	})?;
+	if route == Route::Liked {
+		s.publish_liked(deliver);
+	}
+	Ok(Response::Listing { route, offset, listing })
+}
+
+fn search(s: &mut Session, query: String) -> spotify::Result<Response> {
+	let trimmed = query.trim();
+	let query = if trimmed.len() == query.len() { query } else { trimmed.to_owned() };
+	let results = match s.searches.get(&query) {
+		Some(results) => results,
+		None => {
+			let results = match s.web.search(&query, 0) {
+				Ok(results) => results,
+				Err(_) => s.client.search(&query, 0)?,
+			};
+			s.searches.insert(query.clone(), results.clone());
+			results
+		},
+	};
+	Ok(Response::Search { query, results })
+}
+
+fn connect_request(s: &Session, request: Request) -> spotify::Result<Option<Response>> {
+	Ok(Some(match request {
+		Request::Devices => Response::Devices(player_reply(match &s.player {
+			Some(player) => player.devices(),
+			None => s.client.devices(),
+		})?),
+		Request::Playback => Response::Playback(player_reply(match &s.player {
+			Some(player) => player.playback(),
+			None => s.client.playback(),
+		})?),
+		Request::Transfer { id, play } => match player_reply(match &s.player {
+			Some(player) => player.transfer(&id, play),
+			None => s.client.transfer(&id, play),
+		})? {
+			Ok(()) => Response::Transferred,
+			Err(message) => Response::PlayerError(message),
+		},
+		Request::Control { device, command } => match player_reply(match &s.player {
+			Some(player) => player.control(&device, command),
+			None => s.client.control(&device, &command),
+		})? {
+			Ok(()) => return Ok(None),
+			Err(message) => Response::PlayerError(message),
+		},
+		_ => return Ok(None),
 	}))
 }
 
@@ -621,29 +950,22 @@ fn check_liked(s: &mut Session, uri: String, deliver: &dyn Fn(Response)) -> spot
 }
 
 fn set_liked(s: &mut Session, uri: &str, liked: bool, deliver: &dyn Fn(Response)) -> spotify::Result<Response> {
-	if liked {
-		s.client.save(&[uri])?;
-	} else {
-		s.client.unsave(&[uri])?;
+	match &mut s.player {
+		Some(player) => player.set_saved(uri, liked)?,
+		None if liked => s.client.save(&[uri])?,
+		None => s.client.unsave(&[uri])?,
 	}
 	s.pages.remove(&Route::Liked);
 	s.snapshots.lock().unwrap_or_else(PoisonError::into_inner).forget(&Route::Liked);
-	if let Some(player) = &mut s.player {
-		player.saved(uri, liked);
-	}
 	s.publish_liked(deliver);
 	Ok(Response::Liked(uri.to_owned(), liked))
 }
 
 fn set_followed(s: &mut Session, uri: &str, follow: bool) -> spotify::Result<Response> {
-	if let Some(player) = &mut s.player
-		&& uri.starts_with("spotify:playlist:")
-	{
-		player.follow_playlist(uri, follow)?;
-	} else if follow {
-		s.client.save(&[uri])?;
-	} else {
-		s.client.unsave(&[uri])?;
+	match &mut s.player {
+		Some(player) => player.set_saved(uri, follow)?,
+		None if follow => s.client.save(&[uri])?,
+		None => s.client.unsave(&[uri])?,
 	}
 	if !follow && uri.starts_with("spotify:playlist:") {
 		let id = id_of(uri);
@@ -657,9 +979,6 @@ fn set_followed(s: &mut Session, uri: &str, follow: bool) -> spotify::Result<Res
 		return Ok(Response::Playlists(s.playlists.clone()));
 	}
 	s.pages.clear();
-	if let Some(player) = &mut s.player {
-		player.saved(uri, follow);
-	}
 	s.snapshots.lock().unwrap_or_else(PoisonError::into_inner).forget_listings();
 	Ok(if uri.starts_with("spotify:playlist:") {
 		s.playlists = s.load_playlists()?;
@@ -705,8 +1024,8 @@ fn rename_playlist(
 	deliver: &dyn Fn(Response),
 ) -> spotify::Result<Response> {
 	match &mut s.player {
-		Some(player) if changes.public.is_none() => player.rename_playlist(&id, changes)?,
-		_ => s.client.rename_playlist(&id, changes)?,
+		Some(player) => player.rename_playlist(&id, changes)?,
+		None => s.client.rename_playlist(&id, changes)?,
 	}
 	if let Some(name) = &changes.name {
 		added.renamed(&format!("spotify:playlist:{id}"), name, deliver);
@@ -762,26 +1081,11 @@ mod tests {
 	}
 
 	#[test]
-	fn queue_context_reads_all_pages_preserving_order_and_duplicates() -> spotify::Result<()> {
+	fn context_actions_read_all_pages_preserving_order_and_duplicates() -> spotify::Result<()> {
 		let mut requested = Vec::new();
-		let (uris, title) = queue_context_pages(|offset| {
+		let (uris, title) = context_pages(|offset| {
 			requested.push(offset);
-			let track = |uri: &str, is_local| spotify::Track {
-				uri: uri.into(),
-				name: "Track".into(),
-				duration_ms: 1_000,
-				disc_number: 0,
-				explicit: false,
-				artists: Vec::new(),
-				album: None,
-				is_local,
-				is_episode: false,
-			};
-			Ok((
-				"Album".into(),
-				vec![track("spotify:track:a", false), track("spotify:local:b", true)],
-				if offset == 0 { Some(50) } else { None },
-			))
+			Ok(("Album".into(), vec!["spotify:track:a".into()], if offset == 0 { Some(50) } else { None }))
 		})?;
 		assert_eq!(requested, [0, 50]);
 		assert_eq!(uris, ["spotify:track:a", "spotify:track:a"]);
@@ -790,11 +1094,23 @@ mod tests {
 	}
 
 	#[test]
-	fn queue_context_does_not_succeed_with_a_partial_page_failure() {
-		let result = queue_context_pages(|offset| {
+	fn context_actions_do_not_succeed_with_a_partial_page_failure() {
+		let result = context_pages(|offset| {
 			if offset == 0 { Ok(("Playlist".into(), Vec::new(), Some(50))) } else { Err(spotify::Error::Parse("page failed".into())) }
 		});
 		assert!(result.is_err());
+	}
+
+	#[test]
+	fn context_to_playlist_requires_a_session_and_never_opens_a_web_client() {
+		assert!(
+			matches!(add_context_to_playlist(None, Route::Playlist("p".into())), Response::Error { message, .. } if message.contains("Start the player"))
+		);
+	}
+
+	#[test]
+	fn context_pages_reject_nonadvancing_offsets() {
+		assert!(context_pages(|offset| Ok(("Album".into(), Vec::new(), Some(offset)))).is_err());
 	}
 
 	#[test]

@@ -1,35 +1,27 @@
 //! Session-first Home shelves. Recent contexts use native history (latest song per context),
-//! followed artists and saved albums use collection2. Web API reads remain fallback;
-//! top artists/tracks are persisted per account and attempted only once every 24 hours.
+//! followed artists and saved albums use collection2. Web API reads remain no-session fallback.
 
 use std::{
 	collections::HashSet,
-	sync::{Mutex, PoisonError},
-	time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+	sync::PoisonError,
+	thread,
+	time::{Duration, Instant},
 };
 
-use super::{
-	Home, Tile,
-	artist::artist,
-	pages::optional,
-	snapshot::{Store, TopShelves},
-	worker::Session,
-};
+use super::{Facet, Home, Response, Tile, artist::artist, pages::optional, worker::Session};
 use crate::{
 	net::par,
-	spotify::{self, Client, PlayContext, Track, id_of},
+	spotify::{self, PlayContext, Track, id_of},
 };
 
 /// How long a built home page is reused (navigating back and forth costs no requests).
 const HOME_TTL: Duration = Duration::from_secs(60);
 /// Recently played playlists/albums/artists shown on the home page.
 const RECENTS: usize = 12;
-/// Items per home shelf fetched.
-const SHELF: u32 = 12;
 /// Shelf items shown from a longer page.
 const SHELF_ITEMS: usize = 12;
 
-pub(super) fn home(s: &mut Session) -> spotify::Result<Home> {
+pub(super) fn home(s: &mut Session, deliver: &dyn Fn(Response)) -> spotify::Result<Home> {
 	if let Some((at, h)) = &s.home
 		&& at.elapsed() < HOME_TTL
 	{
@@ -37,42 +29,24 @@ pub(super) fn home(s: &mut Session) -> spotify::Result<Home> {
 	}
 	let client = &s.client;
 	let player = &mut s.player;
-	let (top, (played, (followed, albums))) = par::join(
-		|| top_shelves(client, &s.snapshots, &s.me),
-		|| {
-			let played = match player.as_ref() {
-				Some(player) => player.recently_played(50).or_else(|_| client.recently_played(50)),
-				None => client.recently_played(50),
-			};
-			let library = match player {
-				Some(player) => {
-					let followed = player
-						.followed(50)
-						.map(Some)
-						.or_else(|_| optional(client.followed_artists(None, 50)).map(|page| page.map(|page| page.items)));
-					let albums = player.albums(50).or_else(|_| client.saved_albums(0, 50).map(|page| page.items));
-					(followed, albums)
-				},
-				None => par::join(
-					|| optional(client.followed_artists(None, 50)).map(|page| page.map(|page| page.items)),
-					|| client.saved_albums(0, 50).map(|page| page.items),
-				),
-			};
-			(played, library)
-		},
-	);
-	let played = played?;
-	let top_artists = top.artists;
-	let top_tracks = top.tracks;
+	let played = match player.as_ref() {
+		Some(player) => player.recently_played(50),
+		None => client.recently_played(50),
+	}?;
+	let recent_tracks = recent_tracks(&played);
+	deliver(Response::HomeRecentTracks(recent_tracks.clone()));
+	let (followed, albums) = match player {
+		Some(player) => (player.followed(50).map(Some), player.albums(50)),
+		None => par::join(
+			|| optional(client.followed_artists(None, 50)).map(|page| page.map(|page| page.items)),
+			|| client.saved_albums(0, 50).map(|page| page.items),
+		),
+	};
 	let followed = followed?.map(|artists| artists.iter().take(SHELF_ITEMS).map(Tile::artist).collect());
 	let albums = albums?.iter().take(SHELF_ITEMS).map(Tile::album).collect();
 	learn_contexts(s, &played);
 	let (mut recents, mut seen) = (Vec::new(), HashSet::new());
-	let (mut recent_tracks, mut seen_tracks) = (Vec::new(), HashSet::new());
 	for (track, context) in &played {
-		if recent_tracks.len() < 20 && seen_tracks.insert(track.uri.clone()) {
-			recent_tracks.push(track.clone());
-		}
 		if let Some(context) = context
 			&& recents.len() < RECENTS
 			&& seen.insert(context.uri.clone())
@@ -82,38 +56,56 @@ pub(super) fn home(s: &mut Session) -> spotify::Result<Home> {
 			recents.push(tile);
 		}
 	}
-	let h = Home { recents, top_artists, top_tracks, followed, albums, recent_tracks, loaded: true };
+	let h = Home { recents, followed, albums, recent_tracks, loaded: true };
 	s.home = Some((Instant::now(), h.clone()));
 	Ok(h)
 }
 
-fn top_shelves(client: &Client, snapshots: &Mutex<Store>, me: &str) -> TopShelves {
-	let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| time.as_secs());
-	let mut top = snapshots.lock().unwrap_or_else(PoisonError::into_inner).top(me);
-	if top.fresh(now) || !client.web_api_enabled() {
-		return top;
+/// Cached feeds paint immediately. Independent Pathfinder and native history/collection
+/// reads overlap, so a rejected personalised client never adds a round trip to Home.
+pub(super) fn refresh(s: &mut Session, facet: Facet, deliver: &dyn Fn(Response)) -> spotify::Result<Option<Response>> {
+	if let Some(feed) = s.home_feeds.get(&facet) {
+		deliver(Response::HomeFeed { facet, feed });
+		return home(s, deliver).map(|home| Some(Response::Home(home)));
 	}
-	// Persist the attempt before I/O. An unavailable endpoint retains yesterday's content,
-	// and neither another Home refresh nor another launch can spend the quota again today.
-	top.checked_at = Some(now);
-	{
-		let mut store = snapshots.lock().unwrap_or_else(PoisonError::into_inner);
-		store.record_top(me, top.clone());
-		let _ = store.save();
+	let Some(reader) = s.player.as_ref().map(super::session::Reader::session_reader) else {
+		deliver(Response::HomeUnavailable { facet });
+		return home(s, deliver).map(|home| Some(Response::Home(home)));
+	};
+	let priority = spotify::priority();
+	let (native, feed) = thread::scope(|scope| {
+		let feed = scope.spawn(|| {
+			spotify::set_priority(priority);
+			spotify::home_feed::fetch(&reader, facet)
+		});
+		let native = home(s, deliver);
+		let feed = match feed.join() {
+			Ok(feed) => feed,
+			Err(panic) => std::panic::resume_unwind(panic),
+		};
+		(native, feed)
+	});
+	let personalised = feed.is_ok();
+	match feed {
+		Ok(feed) => {
+			s.home_feeds.insert(facet, feed.clone());
+			deliver(Response::HomeFeed { facet, feed });
+		},
+		Err(error) => {
+			crate::net::trace::mark("home", &error);
+			deliver(Response::HomeUnavailable { facet });
+		},
 	}
-	let (artists, tracks) = par::join(|| client.top_artists(SHELF), || client.top_tracks(SHELF));
-	if let Ok(artists) = artists {
-		top.artists = Some(artists.iter().map(Tile::artist).collect());
+	match native {
+		Ok(home) => Ok(Some(Response::Home(home))),
+		Err(_) if personalised => Ok(None),
+		Err(error) => Err(error),
 	}
-	if let Ok(tracks) = tracks {
-		top.tracks = Some(tracks);
-	}
-	{
-		let mut store = snapshots.lock().unwrap_or_else(PoisonError::into_inner);
-		store.record_top(me, top.clone());
-		let _ = store.save();
-	}
-	top
+}
+
+pub(super) fn recent_tracks(played: &[(Track, Option<PlayContext>)]) -> Vec<Track> {
+	let mut seen = HashSet::new();
+	played.iter().filter(|(track, _)| seen.insert(track.uri.as_str())).take(20).map(|(track, _)| track.clone()).collect()
 }
 
 /// What the recent plays came from needs the artists and the others' playlists not met before:
@@ -204,64 +196,5 @@ fn context_tile(s: &mut Session, context: &PlayContext, track: &Track) -> Option
 		"album" => track.album.as_ref().filter(|a| a.uri == context.uri).map(Tile::album),
 		"artist" => artist(s, id).ok().map(|a| Tile::artist(&a)),
 		_ => None,
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use std::sync::{
-		Arc,
-		atomic::{AtomicU32, Ordering},
-	};
-
-	use super::*;
-	use crate::{
-		library::Response,
-		spotify::{TokenSource, User},
-	};
-
-	#[test]
-	fn cache_only_top_reads_preserve_shelves_without_consuming_a_daily_attempt() {
-		let dir = tempfile::tempdir().unwrap();
-		let mut store = Store::new(dir.path());
-		store.record(&Response::Connected { me: User { id: "u".into(), display_name: None }, playlists: Vec::new() });
-		store.record_top("u", TopShelves { artists: Some(vec![Tile::liked()]), ..TopShelves::default() });
-		let snapshots = Mutex::new(store);
-		let minted = Arc::new(AtomicU32::new(0));
-		let counter = minted.clone();
-		let source: TokenSource = Arc::new(move || {
-			counter.fetch_add(1, Ordering::Relaxed);
-			Err(spotify::Error::AuthRequired)
-		});
-		let client = Client::open(source, false);
-		let top = top_shelves(&client, &snapshots, "u");
-		assert!(top.checked_at.is_none());
-		assert_eq!(top.artists.unwrap(), [Tile::liked()]);
-		assert!(snapshots.into_inner().unwrap().top("u").checked_at.is_none());
-		assert_eq!(minted.load(Ordering::Relaxed), 0);
-	}
-
-	#[test]
-	fn a_failed_daily_attempt_is_persisted_and_not_repeated_after_restart() {
-		let dir = tempfile::tempdir().unwrap();
-		let mut store = Store::new(dir.path());
-		store.record(&Response::Connected { me: User { id: "u".into(), display_name: None }, playlists: Vec::new() });
-		let snapshots = Mutex::new(store);
-		let minted = Arc::new(AtomicU32::new(0));
-		let counter = minted.clone();
-		let source: TokenSource = Arc::new(move || {
-			counter.fetch_add(1, Ordering::Relaxed);
-			Err(spotify::Error::AuthRequired)
-		});
-		let client = Client::open(source, true);
-		let first = top_shelves(&client, &snapshots, "u");
-		assert!(first.checked_at.is_some());
-		let attempts = minted.load(Ordering::Relaxed);
-		assert_eq!(attempts, 2, "one token attempt for each top shelf, with no network");
-		let mut restored = Store::new(dir.path());
-		restored.load(Some("u"));
-		let again = top_shelves(&client, &Mutex::new(restored), "u");
-		assert_eq!(again.checked_at, first.checked_at);
-		assert_eq!(minted.load(Ordering::Relaxed), attempts);
 	}
 }

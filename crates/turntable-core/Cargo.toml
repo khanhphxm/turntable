@@ -27,11 +27,15 @@ librespot-playback = { version = "0.8", default-features = false, features = ["r
 tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 http = "1"
+iana-time-zone = "0.1"
 protobuf = "3.7"
 smallvec = "1"
 rand = "0.9"
 tempfile = "3"
 thiserror = "2"
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 
 
 # The library app's refresh token in the OS credential store: macOS Keychain, Linux Secret

@@ -11,6 +11,7 @@ pub mod player;
 mod playlist;
 mod prefs;
 pub mod queue;
+mod recent_searches;
 pub mod rules;
 pub mod settings;
 mod state;

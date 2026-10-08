@@ -121,7 +121,8 @@ impl Shell {
 	}
 
 	fn search_field(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-		let on = self.page == Page::Core(Route::Search);
+		let on = self.search_open || self.page == Page::Core(Route::Search);
+		let dropdown = self.search_dropdown(cx);
 		div()
 			.id("search")
 			.group("search")
@@ -129,6 +130,7 @@ impl Shell {
 			// Spotify's width, giving way to the side clusters in a narrow window.
 			.w(px(474.))
 			.min_w(px(160.))
+			.relative()
 			.flex_shrink(1.)
 			.flex()
 			.items_center()
@@ -139,12 +141,11 @@ impl Shell {
 			.border_2()
 			.border_color(if on { theme::text() } else { gpui_kit::transparent_black().into() })
 			.hover(|s| s.bg(theme::raised_hover()))
-			.on_click(cx.listener(|this, _, window, cx| {
-				this.search.update(cx, |s, cx| s.focus(window, cx));
-				this.go(Route::Search, cx);
-			}))
+			// Focusing only: the page changes when a search is made (Enter or a suggestion).
+			.on_click(cx.listener(|this, _, window, cx| this.search.update(cx, |s, cx| s.focus(window, cx))))
 			.child(icon(Icon::Search, px(24.), if on { theme::text() } else { theme::subdued() }))
 			.child(div().flex_1().text_size(px(16.)).child(Input::new(&self.search).appearance(false).cleanable(true)))
+			.children(dropdown)
 	}
 }
 

@@ -4,9 +4,13 @@ use gpui_kit::{
 	AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
 	Styled as _, div, linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px, rgb,
 };
-use turntable_core::library::Tile;
+use turntable_core::{Msg, library::Tile};
 
-use crate::{shell::Shell, theme, widgets::play_disc};
+use crate::{
+	shell::Shell,
+	theme,
+	widgets::{eq_bars, play_disc},
+};
 
 /// "Good morning" until noon, "Good afternoon" until six, else "Good evening" (local time).
 fn greeting() -> &'static str {
@@ -24,8 +28,14 @@ impl Shell {
 		let playing = self.playing_context(t.play.as_deref());
 		let route = t.route.clone();
 		let play = t.play.clone();
+		let hovered = t.route.clone();
 		div()
 			.id(("pick", i))
+			.on_hover(cx.listener(move |this, over: &bool, _, cx| {
+				if *over {
+					this.send(Msg::Prefetch(hovered.clone()), cx);
+				}
+			}))
 			.group("pick")
 			.h(px(64.))
 			.min_w_0()
@@ -50,16 +60,36 @@ impl Shell {
 					.line_clamp(2)
 					.child(t.title.clone()),
 			)
+			// Playing: Spotify's bars, swapped for the pause disc on hover. Hover only changes
+			// visibility: GPUI must lay out, prepaint and paint the same elements every frame.
 			.when_some(play, |s, uri| {
-				s.child(div().when(!playing, |s| s.invisible().group_hover("pick", |s| s.visible())).child(play_disc(
-					("pick-play", i),
-					px(32.),
-					playing,
-					cx.listener(move |this, _, _, cx| {
-						cx.stop_propagation();
-						this.play_context(&uri, cx);
-					}),
-				)))
+				s.child(
+					div()
+						.relative()
+						.size(px(32.))
+						.flex_none()
+						.when(playing, |s| {
+							s.child(
+								div()
+									.absolute()
+									.inset_0()
+									.flex()
+									.items_center()
+									.justify_center()
+									.group_hover("pick", |s| s.invisible())
+									.child(eq_bars(("pick-bars", i), px(16.))),
+							)
+						})
+						.child(div().absolute().inset_0().invisible().group_hover("pick", |s| s.visible()).child(play_disc(
+							("pick-play", i),
+							px(32.),
+							playing,
+							cx.listener(move |this, _, _, cx| {
+								cx.stop_propagation();
+								this.play_context(&uri, cx);
+							}),
+						))),
+				)
 			})
 			.into_any_element()
 	}

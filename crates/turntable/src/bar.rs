@@ -164,7 +164,7 @@ impl Shell {
 		let side = self.side();
 		let muted = self.st().volume == 0;
 		let remote = self.st().remote().map(|d| d.name.clone());
-		let lyrics = self.st().prefs.sources.lyrics;
+		let mini = self.mini.is_some();
 		let panel_button = |id: &'static str, glyph: Icon, s: Side, cx: &mut Context<'_, Self>| {
 			icon_button(id, glyph, px(16.), side == Some(s), cx.listener(move |this, _, _, cx| this.toggle_side(s, cx)))
 		};
@@ -180,8 +180,9 @@ impl Shell {
 					.items_center()
 					.justify_end()
 					.pr_2()
-					.child(panel_button("np", Icon::NowPlaying, Side::Core(Panel::NowPlaying), cx))
-					.when(lyrics, |s| s.child(panel_button("lyrics", Icon::Mic, Side::Core(Panel::Lyrics), cx)))
+					// Spotify's order: lyrics, queue, devices, volume, miniplayer, full screen. Now
+					// playing is the panel's resting state, so it has no button of its own.
+					.child(panel_button("lyrics", Icon::Mic, Side::Core(Panel::Lyrics), cx))
 					.child(panel_button("queue", Icon::Queue, Side::Core(Panel::Queue), cx))
 					.child(panel_button("devices", Icon::Device, Side::Devices, cx))
 					.child(icon_button(
@@ -191,7 +192,24 @@ impl Shell {
 						false,
 						cx.listener(|this, _, _, cx| this.send(Msg::ToggleMute, cx)),
 					))
-					.child(div().w(px(93.)).child(self.volume_slider.clone())),
+					.child(div().w(px(93.)).child(self.volume_slider.clone()))
+					.child(icon_button(
+						"miniplayer",
+						Icon::Miniplayer,
+						px(16.),
+						mini,
+						cx.listener(|_, _, _, cx| {
+							let shell = cx.entity();
+							cx.defer(move |cx| crate::miniplayer::MiniPlayer::toggle(&shell, cx));
+						}),
+					))
+					.child(icon_button(
+						"fullscreen",
+						Icon::Fullscreen,
+						px(16.),
+						false,
+						cx.listener(|this, _, window, cx| this.toggle_full_screen(window, cx)),
+					)),
 			)
 			// Playing on another device: Spotify's green strip names it.
 			.when_some(remote, |s, name| {

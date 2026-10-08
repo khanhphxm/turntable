@@ -24,11 +24,12 @@ pub fn has_sign_in(paths: &Paths) -> bool {
 	engine::has_sign_in(&paths.config)
 }
 
-/// Deletes the saved playback sign-in and the account-scoped library snapshot.
+/// Deletes the saved playback sign-in and account-scoped library snapshots/indexes.
 /// Does not delete preferences, covers, audio cache or the separate Web API sign-in.
 /// A running host should dispatch [`Msg::SignOut`] instead, to stop playback too.
 pub fn forget_sign_in(paths: &Paths) -> std::io::Result<()> {
 	let credentials = engine::forget_sign_in(&paths.config);
 	let snapshot = library::snapshot::clear(&paths.cache);
-	credentials.and(snapshot)
+	let membership = library::added::clear(&paths.cache);
+	credentials.and(snapshot).and(membership)
 }

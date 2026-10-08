@@ -28,6 +28,10 @@ use turntable_core::Cover;
 const DEFAULT_BUDGET: usize = 24 * 1024 * 1024;
 const BUCKETS: [u32; 4] = [64, 128, 320, 640];
 const MAX_DECODES: usize = 2;
+/// A blurred backdrop is decoded this small, then blurred: stretched over a panel it reads as
+/// soft colour, like Apple Music's lyrics.
+const BLUR_SIDE: u32 = 96;
+const BLUR_SIGMA: f32 = 10.;
 
 /// Select the smallest physical-pixel bucket that covers the logical side.
 /// Large requests are capped at 640; small source images are never enlarged.
@@ -40,11 +44,16 @@ fn bucket(size_px: u32, scale_factor: f32) -> u32 {
 struct Key {
 	source: usize,
 	side:   u32,
+	blur:   bool,
 }
 
 impl Key {
 	fn new(cover: &Arc<Cover>, side: u32) -> Self {
-		Self { source: Arc::as_ptr(cover) as usize, side }
+		Self { source: Arc::as_ptr(cover) as usize, side, blur: false }
+	}
+
+	fn blurred(cover: &Arc<Cover>) -> Self {
+		Self { source: Arc::as_ptr(cover) as usize, side: BLUR_SIDE, blur: true }
 	}
 }
 
@@ -92,7 +101,15 @@ impl CoverCache {
 	/// cached by the host for this frame. Keep source Arc identities stable across
 	/// snapshots. Decode/resize/BGRA conversion run off the UI thread.
 	pub fn get<V: 'static>(cover: &Arc<Cover>, size_px: u32, scale_factor: f32, cx: &mut Context<'_, V>) -> Option<Arc<RenderImage>> {
-		let key = Key::new(cover, bucket(size_px, scale_factor));
+		Self::lookup_or_queue(cover, Key::new(cover, bucket(size_px, scale_factor)), cx)
+	}
+
+	/// The cover small and heavily blurred, for a backdrop (cached like any size).
+	pub fn blurred<V: 'static>(cover: &Arc<Cover>, cx: &mut Context<'_, V>) -> Option<Arc<RenderImage>> {
+		Self::lookup_or_queue(cover, Key::blurred(cover), cx)
+	}
+
+	fn lookup_or_queue<V: 'static>(cover: &Arc<Cover>, key: Key, cx: &mut Context<'_, V>) -> Option<Arc<RenderImage>> {
 		let requester = cx.entity().into_any().downgrade();
 		if !cx.has_global::<Self>() {
 			cx.set_global(Self::default());
@@ -127,7 +144,8 @@ impl CoverCache {
 		loop {
 			let next = cx.update_global::<Self, _>(|cache, _| cache.next_decode());
 			let Some((key, source)) = next else { break };
-			let work = cx.background_executor().spawn(async move { decode(&source, key.side) });
+			let work =
+				cx.background_executor().spawn(async move { if key.blur { decode_blurred(&source) } else { decode(&source, key.side) } });
 			// App-scoped: shared artwork must finish if its first window closes.
 			cx.spawn(async move |cx| {
 				let decoded = work.await;
@@ -237,6 +255,22 @@ impl CoverCache {
 }
 
 fn decode(cover: &Cover, side: u32) -> Option<Arc<RenderImage>> {
+	Some(render(decode_rgba(cover, side)?))
+}
+
+fn decode_blurred(cover: &Cover) -> Option<Arc<RenderImage>> {
+	Some(render(image::imageops::blur(&decode_rgba(cover, BLUR_SIDE)?, BLUR_SIGMA)))
+}
+
+/// GPUI draws BGRA.
+fn render(mut bgra: RgbaImage) -> Arc<RenderImage> {
+	for pixel in bgra.pixels_mut() {
+		pixel.0.swap(0, 2);
+	}
+	Arc::new(RenderImage::new([Frame::new(bgra)]))
+}
+
+fn decode_rgba(cover: &Cover, side: u32) -> Option<RgbaImage> {
 	let format = ImageFormat::from_mime_type(&cover.mime)?;
 	if !matches!(format, ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::WebP) {
 		return None;
@@ -249,11 +283,7 @@ fn decode(cover: &Cover, side: u32) -> Option<Arc<RenderImage>> {
 		};
 		if source.width() > side || source.height() > side { source.thumbnail(side, side) } else { source }
 	};
-	let mut bgra: RgbaImage = resized.into_rgba8();
-	for pixel in bgra.pixels_mut() {
-		pixel.0.swap(0, 2);
-	}
-	Some(Arc::new(RenderImage::new([Frame::new(bgra)])))
+	Some(resized.into_rgba8())
 }
 
 fn decode_jpeg(bytes: &[u8], side: u32) -> Option<DynamicImage> {

@@ -30,6 +30,22 @@ fn cmds(effects: Vec<Effect>) -> Vec<Command> {
 }
 
 #[test]
+fn prefetch_never_navigates_closes_controls_or_starts_playback() {
+	let mut state = State { focus: Some(Field::Search), library_menu: true, ..State::default() };
+	state.library.selected = Some(3);
+	let route = Route::Album("album".into());
+	let effects = state.update(Msg::Prefetch(route.clone()));
+	assert!(matches!(effects.as_slice(), [Effect::Library(library::Request::Prefetch(known))] if known == &route));
+	assert_eq!(state.library.route, Route::Home);
+	assert_eq!(state.library.selected, Some(3));
+	assert_eq!(state.focus, Some(Field::Search));
+	assert!(state.library_menu);
+	for route in [Route::Home, Route::Search, Route::Library, Route::Folder("folder".into())] {
+		assert!(state.update(Msg::Prefetch(route)).is_empty());
+	}
+}
+
+#[test]
 fn absolute_seek_clamps_to_the_track() {
 	let mut s = playing(240_000, 0.0);
 	assert_eq!(cmds(s.update(Msg::Seek(120_000))), vec![Command::Seek { position_ms: 120_000 }]);

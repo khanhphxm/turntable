@@ -9,10 +9,9 @@ use gpui_kit::{
 	px,
 };
 use turntable_core::{
-	LyricsState, Msg, Panel, Route,
+	Msg, Panel, Route,
 	app::connect::DeviceList,
 	engine::{CoverSize, Entity},
-	sources::external::Lyrics,
 	spotify::{id_of, pick_image},
 };
 
@@ -36,7 +35,61 @@ fn note(text: impl Into<gpui_kit::SharedString>) -> AnyElement {
 	div().p_4().text_size(px(14.)).text_color(theme::subdued()).child(text.into()).into_any_element()
 }
 
+/// Now playing with nothing loaded: Spotify's prompt to go find something.
+fn empty_panel(cx: &mut Context<'_, Shell>) -> AnyElement {
+	div()
+		.pt_16()
+		.px_6()
+		.flex()
+		.flex_col()
+		.items_center()
+		.gap_4()
+		.text_center()
+		.child(div().text_size(px(16.)).font_weight(FontWeight::BOLD).child("Find something to play"))
+		.child(div().text_size(px(14.)).text_color(theme::subdued()).child("Search for songs, artists, albums and playlists."))
+		.child(
+			div()
+				.id("panel-search")
+				.h(px(40.))
+				.px_6()
+				.flex()
+				.items_center()
+				.rounded_full()
+				.bg(theme::accent())
+				.hover(|s| s.bg(theme::accent_hover()))
+				.text_color(theme::base())
+				.text_size(px(14.))
+				.font_weight(FontWeight::BOLD)
+				.cursor_pointer()
+				.on_click(cx.listener(|this, _, window, cx| this.search.update(cx, |s, cx| s.focus(window, cx))))
+				.child("Search"),
+		)
+		.into_any_element()
+}
+
 impl Shell {
+	/// The right panel folded to a strip (a crowded window with Your Library open): a chevron
+	/// unfolds it.
+	#[expect(clippy::unused_self, reason = "view builders share Shell's method-call convention")]
+	pub fn folded_panel(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+		div()
+			.id("panel-folded")
+			.w(theme::RIGHT_FOLDED_W)
+			.flex_none()
+			.h_full()
+			.relative()
+			.rounded(theme::RADIUS)
+			.bg(theme::panel())
+			.hover(|s| s.bg(theme::raised()))
+			.cursor_pointer()
+			.flex()
+			.justify_center()
+			.pt_4()
+			.on_click(cx.listener(|this, _, _, cx| this.unfold_panel(cx)))
+			.child(icon(Icon::Back, px(16.), theme::subdued()))
+			.child(crate::widgets::corner_mask())
+	}
+
 	pub fn right_panel(&mut self, side: Side, cx: &mut Context<'_, Self>) -> impl IntoElement {
 		let st = self.st();
 		let title: String = match side {
@@ -49,37 +102,60 @@ impl Shell {
 		};
 		let body = match side {
 			Side::Core(Panel::NowPlaying) => self.now_playing_body(cx),
-			Side::Core(Panel::Lyrics) => self.lyrics_body(),
+			Side::Core(Panel::Lyrics) => self.lyric_lines(24., 16., cx),
 			Side::Devices => self.devices_body(cx),
 			Side::Core(_) => self.queue_body(cx),
 		};
+		// Lyrics sit on the song's cover, blurred (Apple Music's look).
+		let backdrop = (side == Side::Core(Panel::Lyrics)).then(|| self.lyrics_backdrop(cx));
 		div()
-			.w(theme::RIGHT_W)
+			.w(self.right_w())
 			.flex_none()
 			.h_full()
 			.relative()
 			.rounded(theme::RADIUS)
 			.bg(theme::panel())
+			.children(backdrop)
 			.overflow_hidden()
 			.flex()
 			.flex_col()
+			.group("right-panel")
 			.child(
 				div()
 					.h(px(56.))
 					.flex_none()
 					.flex()
 					.items_center()
-					.justify_between()
+					.gap_1()
 					.pl_4()
 					.pr_2()
-					.child(div().text_size(px(16.)).font_weight(FontWeight::BOLD).truncate().child(title))
-					.child(icon_button(
-						"panel-close",
-						Icon::Close,
+					// Spotify's header: the fold button shows on hover; the queue, lyrics and
+					// devices go back to now playing with it, now playing folds to the strip.
+					// Shown while the panel is hovered, as Spotify's is (visibility only: hover must
+					// never change layout, or GPUI paints what it didn't prepaint).
+					.child(div().invisible().group_hover("right-panel", |s| s.visible()).child(icon_button(
+						"panel-fold",
+						Icon::PanelClose,
 						px(16.),
 						false,
-						cx.listener(move |this, _, _, cx| this.toggle_side(side, cx)),
-					)),
+						cx.listener(move |this, _, _, cx| {
+							if side == Side::Core(Panel::NowPlaying) {
+								this.fold_panel(cx);
+							} else {
+								this.toggle_side(Side::Core(Panel::NowPlaying), cx);
+							}
+						}),
+					)))
+					.child(div().flex_1().min_w_0().text_size(px(16.)).font_weight(FontWeight::BOLD).truncate().child(title))
+					.when(side == Side::Core(Panel::NowPlaying) && !self.st().item.uri.is_empty(), |s| {
+						s.child(div().invisible().group_hover("right-panel", |s| s.visible()).child(icon_button(
+							"panel-full",
+							Icon::Expand,
+							px(16.),
+							false,
+							cx.listener(|this, _, _, cx| this.set_full_view(true, cx)),
+						)))
+					}),
 			)
 			// Lyrics scroll themselves (to follow the sung line); the rest scroll here.
 			.child(
@@ -101,7 +177,7 @@ impl Shell {
 		let st = self.st();
 		let item = st.item.clone();
 		if item.uri.is_empty() {
-			return note("Nothing playing");
+			return empty_panel(cx);
 		}
 		let added = st.liked().map(|liked| liked || st.added(&item.uri));
 		let artist_id = item.decorations.creators.first().map(|c| id_of(&c.entity.uri).to_owned());
@@ -109,7 +185,7 @@ impl Shell {
 		let overview = artist_id.as_ref().and_then(|id| st.library.overviews.get(id).cloned());
 		let next = st.upcoming.first().map(|q| q.item.clone());
 		let big = item.cover(CoverSize::Large).map(str::to_owned);
-		let cover_w = f32::from(theme::RIGHT_W) - 32.;
+		let cover_w = f32::from(self.right_w()) - 32.;
 		#[expect(
 			clippy::cast_possible_truncation,
 			clippy::cast_sign_loss,
@@ -137,6 +213,8 @@ impl Shell {
 					div()
 						.relative()
 						.h(px(200.))
+						// GPUI clips to rectangles: the backdrop rounds its own corners too.
+						.rounded_t(px(8.))
 						.bg(theme::raised_hover())
 						// The photo fills the box, cropped; the label sits on a shade over its top.
 						.when_some(photo, |s, src| {
@@ -337,50 +415,6 @@ impl Shell {
 			.when(!rest.is_empty(), |s| {
 				s.child(heading(if context.is_empty() { "Next up".to_owned() } else { format!("Next from: {context}") })).children(rest)
 			})
-			.into_any_element()
-	}
-
-	fn lyrics_body(&mut self) -> AnyElement {
-		let st = self.st();
-		let lines: Vec<String> = match st.lyrics_state() {
-			None | Some(LyricsState::Loading) => return note("Loading lyrics…"),
-			Some(LyricsState::Missing) => return note("No lyrics for this song."),
-			Some(LyricsState::Failed) => return note("Couldn't load lyrics."),
-			Some(LyricsState::Found(Lyrics::Plain(text))) => text.lines().map(str::to_owned).collect(),
-			Some(LyricsState::Found(Lyrics::Synced(lines))) => {
-				lines.iter().map(|(_, l)| if l.trim().is_empty() { "♪".to_owned() } else { l.clone() }).collect()
-			},
-		};
-		let synced = st.synced_lyrics().is_some();
-		let line = st.lyric_line();
-		// Keep the sung line in view, a couple of lines down from the top.
-		if let Some(line) = line
-			&& self.lyrics_line != Some(line)
-		{
-			self.lyrics_line = Some(line);
-			self.lyrics_scroll.scroll_to_top_of_item(line.saturating_sub(2));
-		}
-		div()
-			.id("lyrics")
-			.size_full()
-			.overflow_y_scroll()
-			.track_scroll(&self.lyrics_scroll)
-			.flex()
-			.flex_col()
-			.gap_4()
-			.px_4()
-			.pb_8()
-			.text_size(px(24.))
-			.font_weight(FontWeight::BOLD)
-			.children(lines.into_iter().enumerate().map(|(i, l)| {
-				let color = match line.map(|n| i.cmp(&n)) {
-					_ if !synced => theme::text().into(),
-					Some(std::cmp::Ordering::Equal) => theme::text().into(),
-					Some(std::cmp::Ordering::Less) => theme::alpha(theme::text(), 0.55),
-					_ => theme::alpha(theme::text(), 0.3),
-				};
-				div().text_color(color).child(l)
-			}))
 			.into_any_element()
 	}
 

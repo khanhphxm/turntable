@@ -36,7 +36,7 @@ fn scratch_playlist_round_trip() -> Result<(), Box<dyn Error>> {
 	};
 	runtime.block_on(session.connect(credentials, false))?;
 	let (_stop, rx) = tokio::sync::watch::channel(false);
-	let mut reader = Reader::new(SessionReader::for_test(session.clone(), runtime.handle().clone(), rx));
+	let mut reader = Reader::new(SessionReader::from_session(session.clone(), runtime.handle().clone(), rx));
 	let directory = tempfile::tempdir()?;
 	let mut membership = Membership::new(directory.path());
 	membership.attach(Some(reader.shared.clone()), &|_| {});

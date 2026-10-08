@@ -1,17 +1,17 @@
 //! Requests to the authenticated library worker and responses delivered to the app.
-//! Playlist edits prefer Playlist4 on the playback Session; visibility changes
-//! and edits without that Session use the Web API.
+//! Playlist attributes and library writes use the authenticated playback Session.
+//! Only operations without that Session may fall back to the Web API.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+	collections::{HashMap, HashSet},
+	sync::Arc,
+};
 
 use super::{
-	Home, Listing, Popularity, Route,
+	Facet, Home, HomeFeed, HomeSection, Listing, Popularity, RootEntry, Route,
 	added::{RefreshStats, TrackId},
 };
-use crate::{
-	sources::external,
-	spotify::{self, Album, Artist, Playlist, SearchResults, User},
-};
+use crate::spotify::{self, Album, Artist, Playlist, SearchResults, Track, User};
 
 #[derive(Debug, Clone)]
 pub enum Request {
@@ -21,6 +21,13 @@ pub enum Request {
 	Login,
 	/// Load the home page.
 	Home,
+	/// Select and load a personalised Home facet.
+	HomeFacet(Facet),
+	/// Show all in a Home section; offsets count raw Spotify items, including unmapped ones.
+	HomeSectionMore {
+		uri:    String,
+		offset: u32,
+	},
 	/// Load the albums saved to the library.
 	Albums,
 	/// Load the artists the user follows.
@@ -29,8 +36,6 @@ pub enum Request {
 	Artist(String),
 	/// An artist page's popular songs and overview (Spotify's web player).
 	ArtistPopular(String),
-	/// An artist page's About (open data: Wikidata, Wikipedia): slow, so it comes last.
-	ArtistAbout(String),
 	/// An artist's overview alone, for the now-playing card.
 	ArtistCard(String),
 	/// Who made a song (its URI).
@@ -40,6 +45,36 @@ pub enum Request {
 	/// Create a playlist and add these tracks to it.
 	CreatePlaylist(String, Vec<String>),
 	RenamePlaylist(String, spotify::PlaylistChanges),
+	/// Native rootlist folders; no Web API equivalent.
+	CreateFolder,
+	RenameFolder(String, String),
+	/// Remove markers only; children move to the containing folder or top level.
+	DeleteFolder(String),
+	MoveToFolder {
+		uri:    String,
+		folder: Option<String>,
+	},
+	FolderExpansion,
+	SetFolderExpanded {
+		id:       String,
+		expanded: bool,
+	},
+	/// Resolve the current editable header without opening its playlist page.
+	PlaylistDetails(String),
+	SetCollaborative(String, bool),
+	/// Every native context page, for the playlist picker rather than playback.
+	AddContextToPlaylist(Route),
+	/// Restore local account-scoped pin preferences.
+	Pins,
+	SetPinned {
+		uri:    String,
+		pinned: bool,
+	},
+	Exclusions,
+	SetExcluded {
+		uri:      String,
+		excluded: bool,
+	},
 	/// Append tracks to a playlist (id, name for the notice, URIs).
 	AddToPlaylist(String, String, Vec<String>),
 	/// Remove one occurrence (playlist id, URI, absolute zero-based row).
@@ -53,6 +88,8 @@ pub enum Request {
 	/// Add `uri` to (true) or remove it from (false) Liked Songs.
 	SetLiked(String, bool),
 	Open(Route, u32),
+	/// Speculative first-page read; duplicate hovers are coalesced and failures do not alter the UI.
+	Prefetch(Route),
 	Search(String),
 	/// The Connect devices of the account (the device menu).
 	Devices,
@@ -90,6 +127,11 @@ impl Response {
 		match self {
 			Self::Connected { playlists, .. } => format!("Connected({})", playlists.len()),
 			Self::Home(_) => "Home".into(),
+			Self::HomeRecentTracks(tracks) => format!("HomeRecentTracks({})", tracks.len()),
+			Self::HomeFeed { facet, feed } => format!("HomeFeed({facet:?}, {})", feed.sections.len()),
+			Self::HomeSection { section, offset, .. } => format!("HomeSection({}@{offset})", section.uri),
+			Self::HomeUnavailable { facet } => format!("HomeUnavailable({facet:?})"),
+			Self::HomeSectionFailed { uri, message } => format!("HomeSectionFailed({uri}, {message})"),
 			Self::Albums(albums) => format!("Albums({})", albums.len()),
 			Self::Following(artists) => format!("Following({})", artists.len()),
 			Self::Playlists(playlists) => format!("Playlists({})", playlists.len()),
@@ -98,7 +140,6 @@ impl Response {
 			Self::Listing { route, offset, .. } => format!("Listing({route:?}@{offset})"),
 			Self::Search { query, .. } => format!("Search({query})"),
 			Self::ArtistPopular(id, _) => format!("ArtistPopular({id})"),
-			Self::ArtistAbout(id, _) => format!("ArtistAbout({id})"),
 			Self::Error { message, .. } => format!("Error({message})"),
 			_ => "other".into(),
 		}
@@ -120,11 +161,29 @@ pub enum Response {
 	/// The authorization URL, for when no browser opens by itself.
 	LoginUrl(String),
 	Home(Home),
+	/// First usable native Home rows; keep every cached shelf until full enrichment arrives.
+	HomeRecentTracks(Vec<Track>),
+	HomeFeed {
+		facet: Facet,
+		feed:  HomeFeed,
+	},
+	HomeSection {
+		section:     HomeSection,
+		offset:      u32,
+		next_offset: Option<u32>,
+	},
+	/// A failed personalised refresh leaves cached data visible; first load uses legacy shelves.
+	HomeUnavailable {
+		facet: Facet,
+	},
+	HomeSectionFailed {
+		uri:     String,
+		message: String,
+	},
 	Albums(Vec<Album>),
 	Following(Vec<Artist>),
 	Artist(Artist),
 	ArtistPopular(String, Popularity),
-	ArtistAbout(String, external::About),
 	ArtistCard(String, spotify::ArtistOverview),
 	Credits(String, Vec<spotify::Credit>),
 	/// The cover color of the listing for `route`, `#rrggbb`.
@@ -133,6 +192,28 @@ pub enum Response {
 	Plays(Route, HashMap<String, u64>),
 	Playlists(Vec<Playlist>),
 	Created(Playlist),
+	Rootlist {
+		account: String,
+		entries: Vec<RootEntry>,
+	},
+	FolderCreated {
+		id:   String,
+		name: String,
+	},
+	FolderExpansion {
+		account:  String,
+		expanded: HashSet<String>,
+	},
+	PlaylistDetails(Playlist),
+	ContextToPlaylist(Route, Vec<String>, String),
+	Pins {
+		account: String,
+		uris:    Vec<String>,
+	},
+	Exclusions {
+		account: String,
+		uris:    Vec<String>,
+	},
 	Removed(String, String, u32),
 	Moved(String, u32, u32),
 	/// Track URIs to add to the queue, and what they came from.

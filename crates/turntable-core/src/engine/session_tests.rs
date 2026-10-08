@@ -18,7 +18,7 @@ fn runtime() -> std::io::Result<Runtime> {
 
 fn reader(runtime: &Runtime, stop: watch::Receiver<bool>) -> SessionReader {
 	let _context = runtime.enter();
-	SessionReader { session: Session::new(SessionConfig::default(), None), runtime: runtime.handle().clone(), stop }
+	SessionReader::from_session(Session::new(SessionConfig::default(), None), runtime.handle().clone(), stop)
 }
 
 #[test]

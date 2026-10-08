@@ -365,3 +365,29 @@ pub fn menu_icon(id: impl Into<ElementId>, glyph: Icon, size: Pixels) -> MenuTri
 			.child(icon(glyph, size * OPTICAL, theme::subdued()).group_hover("menu-icon", |s| s.text_color(theme::text()))),
 	)
 }
+
+/// Spotify's playing indicator: four green bars bouncing out of step (not synced to the audio).
+pub fn eq_bars(id: impl Into<ElementId>, size: Pixels) -> impl IntoElement {
+	use std::time::Duration;
+
+	use gpui_kit::{Animation, AnimationExt as _};
+	// Each bar's period and phase, so they never line up.
+	const BARS: [(u64, f32); 4] = [(900, 0.0), (700, 0.45), (1100, 0.2), (800, 0.7)];
+	let id: ElementId = id.into();
+	let bar_w = size * 0.16;
+	div().size(size).flex_none().flex().items_end().justify_center().gap(size * 0.08).children(BARS.iter().enumerate().map(
+		move |(i, (ms, phase))| {
+			let phase = *phase;
+			div().w(bar_w).h(size).flex().items_end().child(div().w_full().h(size * 0.3).bg(theme::accent()).with_animation(
+				ElementId::NamedInteger(format!("{id:?}-{i}").into(), 0),
+				Animation::new(Duration::from_millis(*ms)).repeat(),
+				move |el, t| {
+					let x = (t + phase).fract();
+					// Up and back down, never quite flat.
+					let level = 0.25 + 0.75 * (1. - (2. * x - 1.).abs());
+					el.h(size * level)
+				},
+			))
+		},
+	))
+}

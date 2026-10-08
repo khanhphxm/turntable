@@ -11,6 +11,7 @@
 //! A persistence failure leaves the refreshed in-memory index usable and dirty,
 //! so the next `persist`/`refresh` retries the write. Unix cache files are 0600 in
 //! a 0700 subdirectory; Windows uses the cache directory's inherited ACL.
+//! Detach retains disk data for reconnects; sign-out/Premium rejection forgets it.
 
 use std::{
 	collections::{HashMap, hash_map::Entry},
@@ -38,6 +39,14 @@ use crate::engine::SessionReader;
 const CACHE_MAGIC: &[u8; 8] = b"PLINDEX\x01";
 const ROOTLIST_PAGE_SIZE: usize = 120;
 const PLAYLIST_PAGE_SIZE: usize = 1000;
+
+/// Deletes account-scoped playlist indexes; a running worker must be detached first.
+pub(crate) fn clear(cache_dir: &Path) -> io::Result<()> {
+	match fs::remove_dir_all(cache_dir.join("playlist-index")) {
+		Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+		result => result,
+	}
+}
 
 /// A typed, allocation-free Spotify track ID (librespot 0.8 has only `SpotifyId`).
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -492,12 +501,27 @@ impl Membership {
 		}
 	}
 
-	pub(super) fn refresh(&mut self, deliver: &dyn Fn(Response)) {
-		let (Some(reader), Some(index)) = (&self.reader, &mut self.index) else { return };
+	/// Runs after pending requests finish, so they cannot recreate the signed-out cache.
+	pub(super) fn forget(&mut self, deliver: &dyn Fn(Response)) {
+		self.attach(None, deliver);
+		if let Err(error) = clear(&self.cache_dir) {
+			Self::failed(&IndexError::from(error), deliver);
+		}
+	}
+
+	/// Cancel idle network work for foreground navigation; staged results never partially update the index.
+	/// `false` means interrupted and should be resumed at the next idle boundary.
+	pub(super) fn refresh(&mut self, urgent: tokio::sync::watch::Receiver<()>, deliver: &dyn Fn(Response)) -> bool {
+		let (Some(reader), Some(index)) = (&self.reader, &mut self.index) else { return true };
 		let started = crate::net::trace::enabled().then(Instant::now);
-		let result = reader.block_on(index.refresh(reader.session(), NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN)));
+		let result = reader.block_on(async {
+			crate::net::par::interruptible(urgent, index.refresh(reader.session(), NonZeroUsize::new(4).unwrap_or(NonZeroUsize::MIN)))
+				.await
+				.transpose()
+		});
 		match result {
-			Ok(stats) => {
+			Ok(None) => return false,
+			Ok(Some(stats)) => {
 				if let Some(started) = started {
 					crate::net::trace::mark("added", &format!("{}ms {stats:?}", started.elapsed().as_millis()));
 				}
@@ -513,6 +537,7 @@ impl Membership {
 				Self::failed(&error, deliver);
 			},
 		}
+		true
 	}
 
 	pub(super) fn created(&mut self, playlist_uri: &str, name: &str, uris: &[String], deliver: &dyn Fn(Response)) {
@@ -1143,6 +1168,25 @@ mod tests {
 		assert!(matches!(responses.borrow().as_slice(), [super::Response::Added { tracks, stats: None }] if tracks.is_empty()));
 		assert!(membership.index.is_none());
 		assert!(PlaylistIndex::load(directory.path(), "alice")?.contains(&TrackId(1)));
+		Ok(())
+	}
+
+	#[test]
+	fn premium_rejection_forgets_membership_and_deletes_account_cache() -> Result<(), IndexError> {
+		let directory = tempfile::tempdir()?;
+		let mut index = PlaylistIndex::load(directory.path(), "alice")?;
+		index.replace_playlist(PlaylistId(1), record(1, &[1]), &mut RefreshStats::default());
+		index.persist()?;
+		let mut membership = Membership::new(directory.path());
+		membership.index = Some(index);
+		membership.snapshot();
+		let responses = std::cell::RefCell::new(Vec::new());
+		membership.forget(&|response| responses.borrow_mut().push(response));
+		assert!(matches!(responses.borrow().as_slice(), [super::Response::Added { tracks, stats: None }] if tracks.is_empty()));
+		assert!(membership.reader.is_none());
+		assert!(membership.index.is_none());
+		assert!(!directory.path().join("playlist-index").exists());
+		membership.forget(&|_| {}); // Forgetting twice is harmless and cannot resurrect the index.
 		Ok(())
 	}
 

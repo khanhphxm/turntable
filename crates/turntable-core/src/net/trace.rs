@@ -10,6 +10,9 @@
 //!   an ETag.
 //! - `k:"hit"`: something answered without a request (`via` `mem` or `disk`).
 //! - `k:"mark"`: what the UI loop saw (a request sent, a page drawn, the covers done).
+//!   The worker's `served` mark closes the complete request including optional enrichment.
+//!   The read-only `route-load` example adds `bench`, `first-content`, `full-content` and
+//!   `first-decoded-cover` marks; its content times measure core delivery, not UI painting.
 //!
 //! `t` is milliseconds since the process started and `th` the thread.
 

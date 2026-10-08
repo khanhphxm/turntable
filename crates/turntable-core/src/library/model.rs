@@ -2,10 +2,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize, de};
 
-use crate::{
-	sources::external,
-	spotify::{self, Album, Artist, Playlist, Track, id_of},
-};
+use crate::spotify::{self, Album, Artist, Playlist, Track, id_of};
 
 /// Rows fetched per page of a track listing.
 pub const PAGE: u32 = 50;
@@ -19,6 +16,7 @@ pub enum Route {
 	Library,
 	Liked,
 	Playlist(String),
+	Folder(String),
 	Album(String),
 	Artist(String),
 }
@@ -37,6 +35,21 @@ pub struct Tile {
 }
 
 impl Tile {
+	/// A song opens its album, while its play button plays this track.
+	/// Recent searches dedupe by album route, not by track URI.
+	/// Tracks without album metadata cannot supply an album route.
+	pub fn track(track: &Track) -> Option<Self> {
+		let album = track.album.as_ref()?;
+		let by = track.artists.iter().map(|artist| artist.name.as_str()).collect::<Vec<_>>().join(", ");
+		Some(Self {
+			route: Route::Album(id_of(&album.uri).to_owned()),
+			play:  Some(track.uri.clone()),
+			title: track.name.clone(),
+			sub:   format!("Song • {by}"),
+			image: spotify::pick_image(&album.images, 300).map(|image| image.url.clone()),
+		})
+	}
+
 	pub fn playlist(p: &Playlist) -> Self {
 		let owner = p.owner_name();
 		Self {
@@ -175,6 +188,11 @@ pub enum Entry<'a> {
 	/// Liked Songs, with the name of whose they are (empty while unknown).
 	Liked(&'a str),
 	Playlist(&'a Playlist),
+	Folder {
+		id:    &'a str,
+		name:  &'a str,
+		count: usize,
+	},
 	Album(&'a Album),
 	Artist(&'a Artist),
 }
@@ -184,6 +202,7 @@ impl Entry<'_> {
 		match self {
 			Self::Liked(_) => Route::Liked,
 			Self::Playlist(p) => Route::Playlist(p.id.clone()),
+			Self::Folder { id, .. } => Route::Folder((*id).to_owned()),
 			Self::Album(a) => Route::Album(id_of(&a.uri).to_owned()),
 			Self::Artist(a) => Route::Artist(id_of(&a.uri).to_owned()),
 		}
@@ -193,6 +212,7 @@ impl Entry<'_> {
 		match self {
 			Self::Liked(_) => "Liked Songs",
 			Self::Playlist(p) => &p.name,
+			Self::Folder { name, .. } => name,
 			Self::Album(a) => &a.name,
 			Self::Artist(a) => &a.name,
 		}
@@ -203,6 +223,7 @@ impl Entry<'_> {
 		match self {
 			Self::Liked(owner) => owner,
 			Self::Playlist(p) => p.owner_name(),
+			Self::Folder { .. } => "",
 			Self::Album(a) => a.artists.first().map_or("", |x| x.name.as_str()),
 			Self::Artist(a) => &a.name,
 		}
@@ -211,7 +232,7 @@ impl Entry<'_> {
 	/// The cover's URL: the smallest picture at least `px` wide.
 	pub fn image(&self, px: u32) -> Option<&str> {
 		let images = match self {
-			Self::Liked(_) => return None,
+			Self::Liked(_) | Self::Folder { .. } => return None,
 			Self::Playlist(p) => &p.images,
 			Self::Album(a) => &a.images,
 			Self::Artist(a) => &a.images,
@@ -228,6 +249,7 @@ impl Entry<'_> {
 			},
 			Self::Album(a) => album_sub(a),
 			Self::Artist(_) => "Artist".to_owned(),
+			Self::Folder { count, .. } => format!("Folder • {count} playlists"),
 		}
 	}
 
@@ -236,6 +258,7 @@ impl Entry<'_> {
 		match (self, route) {
 			(Self::Liked(_), Route::Liked) => true,
 			(Self::Playlist(p), Route::Playlist(id)) => p.id == *id,
+			(Self::Folder { id, .. }, Route::Folder(current)) => *id == current,
 			(Self::Album(a), Route::Album(id)) => id_of(&a.uri) == id.as_str(),
 			(Self::Artist(a), Route::Artist(id)) => id_of(&a.uri) == id.as_str(),
 			_ => false,
@@ -248,15 +271,81 @@ pub(super) fn fold(s: &str) -> impl Iterator<Item = char> + '_ {
 	s.chars().flat_map(char::to_lowercase)
 }
 
-/// The home page: what was played lately and what the user plays most.
+/// Spotify's Home filter chips, in desktop order.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Facet {
+	#[default]
+	All,
+	Music,
+	Podcasts,
+	Audiobooks,
+}
+
+impl Facet {
+	pub const ALL: [Self; 4] = [Self::All, Self::Music, Self::Podcasts, Self::Audiobooks];
+
+	pub const fn label(self) -> &'static str {
+		match self {
+			Self::All => "All",
+			Self::Music => "Music",
+			Self::Podcasts => "Podcasts",
+			Self::Audiobooks => "Audiobooks",
+		}
+	}
+
+	/// Pathfinder's facet value; All is the empty string, not `all`.
+	pub const fn value(self) -> &'static str {
+		match self {
+			Self::All => "",
+			Self::Music => "music-chip",
+			Self::Podcasts => "podcasts-chip",
+			Self::Audiobooks => "audiobooks-chip",
+		}
+	}
+}
+
+/// The personalised Home answer, preserving Spotify's section and item order.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HomeFeed {
+	pub greeting: String,
+	pub sections: Vec<HomeSection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HomeStyle {
+	Shortcuts,
+	Shelf,
+	Feed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HomeSection {
+	pub uri:    String,
+	pub title:  String,
+	pub kicker: Option<String>,
+	pub style:  HomeStyle,
+	pub items:  Vec<HomeItem>,
+	/// Spotify has a Show all destination or another page, not an inferred item count.
+	pub more:   bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HomeItem {
+	pub tile:        Tile,
+	pub label:       Option<String>,
+	pub description: Option<String>,
+	/// The large card's background, distinct from its square cover.
+	pub backdrop:    Option<String>,
+	/// Packed RGB (`0xRRGGBB`), without an alpha byte.
+	pub color:       Option<u32>,
+}
+
+/// The home page: recent plays, followed artists and saved albums.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Home {
 	/// Recently played playlists, albums and artists, newest first, each once.
 	pub recents:       Vec<Tile>,
-	/// `None`: the sign-in predates the `user-top-read` permission (reconnect to see these).
-	pub top_artists:   Option<Vec<Tile>>,
-	pub top_tracks:    Option<Vec<Track>>,
-	/// `None` as for top artists (`user-follow-read`).
+	/// `None`: the fallback sign-in lacks `user-follow-read`.
 	pub followed:      Option<Vec<Tile>>,
 	/// Saved albums, most recently added first.
 	pub albums:        Vec<Tile>,
@@ -266,16 +355,19 @@ pub struct Home {
 }
 
 impl Home {
-	/// The songs shelf: top songs when Spotify gives them, else recently played.
+	/// The native history stage is usable before slower context/shelf enrichment.
+	pub(super) fn take_recent_tracks(&mut self, tracks: Vec<Track>) {
+		self.recent_tracks = tracks;
+		self.loaded = true;
+	}
+
+	/// The songs shelf contains recently played songs only.
 	pub fn songs(&self) -> (&'static str, &[Track]) {
-		match &self.top_tracks {
-			Some(t) if !t.is_empty() => ("Your top songs", t),
-			_ => ("Recently played songs", &self.recent_tracks),
-		}
+		("Recently played songs", &self.recent_tracks)
 	}
 }
 
-/// Whether the Web API side is usable.
+/// Whether the account's library is connected (native Session or no-session Web API fallback).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Conn {
 	/// No `client_id` yet: the setup flow asks for one.
@@ -304,6 +396,12 @@ pub struct Listing {
 	/// The playable context (playlist/album URI); `None` for Liked Songs.
 	pub context_uri:    Option<String>,
 	pub tracks:         Vec<Track>,
+	/// Per-occurrence Unix seconds, aligned with `tracks`; empty means unknown (old caches/albums).
+	#[serde(default)]
+	pub added_at:       Vec<Option<i64>>,
+	/// Spotify usernames that added these occurrences, aligned with `tracks` when available.
+	#[serde(default)]
+	pub added_by:       Vec<Option<String>>,
 	pub total:          u32,
 	pub next_offset:    Option<u32>,
 	pub loading:        bool,
@@ -334,14 +432,11 @@ pub struct Listing {
 	pub editable:       bool,
 	/// Artist pages: releases by kind ("Albums", "Singles and EPs"), releases it
 	/// appears on, and the artist for the About card.
-	#[serde(skip)]
+	#[serde(default, deserialize_with = "discography")]
 	pub discography:    Vec<(&'static str, Vec<Tile>)>,
 	pub appears_on:     Vec<Tile>,
 	pub artist:         Option<Artist>,
-	/// Artist pages: Wikipedia's summary, and Spotify's play counts of `tracks`
-	/// (empty: the counts are unknown). Albums: the counts of their songs.
-	#[serde(skip)]
-	pub about:          Option<external::About>,
+	/// Spotify's play counts of `tracks` (empty: unknown), for artists and albums.
 	pub plays:          Vec<u64>,
 	/// Artist pages: whether the popular songs have arrived (the table is a placeholder until then).
 	pub popular_loaded: bool,
@@ -349,7 +444,7 @@ pub struct Listing {
 	/// header/avatar/full gallery, latest release, artist pick (comment and backdrop),
 	/// concerts and related shelves. Filled with popular songs, including when they
 	/// arrive before the artist header. These extras never require a Web API request.
-	#[serde(skip)]
+	#[serde(default)]
 	pub overview:       Option<spotify::ArtistOverview>,
 	/// The cover's dark tone, `#rrggbb`, for the header's gradient.
 	pub accent:         Option<String>,
@@ -358,6 +453,18 @@ pub struct Listing {
 }
 
 impl Listing {
+	/// When this occurrence was added, in Unix seconds. Albums and old snapshots return `None`.
+	pub fn added_at(&self, row: usize) -> Option<i64> {
+		self.tracks.get(row)?;
+		self.added_at.get(row).copied().flatten()
+	}
+
+	/// The Spotify username that added this occurrence (not a profile display name).
+	pub fn added_by(&self, row: usize) -> Option<String> {
+		self.tracks.get(row)?;
+		self.added_by.get(row).cloned().flatten()
+	}
+
 	/// Keeps the pathfinder name when a quota-limited or unavailable artist header is blank.
 	pub(super) fn take_artist_overview(&mut self, overview: Option<spotify::ArtistOverview>) {
 		if self.title.is_empty()
@@ -374,9 +481,27 @@ impl Listing {
 		self.total = page.total;
 		self.next_offset = (page.items > 0 && next < page.total).then_some(next);
 		self.tracks = page.tracks;
+		self.added_at.clear();
+		self.added_by.clear();
 		self.web = true;
 		self.note = None;
 	}
+}
+
+/// Only fixed group labels are borrowed statically; cache data never leaks arbitrary strings.
+fn discography<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<(&'static str, Vec<Tile>)>, D::Error> {
+	Vec::<(String, Vec<Tile>)>::deserialize(deserializer)?
+		.into_iter()
+		.map(|(title, tiles)| {
+			let title = match title.as_str() {
+				"Albums" => "Albums",
+				"Singles and EPs" => "Singles and EPs",
+				"Compilations" => "Compilations",
+				_ => return Err(de::Error::custom("unknown artist release group")),
+			};
+			Ok((title, tiles))
+		})
+		.collect()
 }
 
 /// Listing kinds are fixed UI labels; a snapshot never owns or leaks a new static string.

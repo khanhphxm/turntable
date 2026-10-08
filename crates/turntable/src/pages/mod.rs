@@ -3,8 +3,9 @@
 mod artist;
 pub mod eq;
 pub mod finder;
+mod folder;
 mod home;
 mod listing;
-mod search;
+pub mod search;
 mod settings;
 mod welcome;

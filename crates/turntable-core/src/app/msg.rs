@@ -38,6 +38,42 @@ pub enum Msg {
 	/// Follow or unfollow an artist (id, name) from a card.
 	FollowArtist(String, String),
 	CreatePlaylist,
+	/// Create "New Folder" at the top level and enter inline rename state.
+	CreateFolder,
+	/// Enter plain inline rename state for an existing native folder.
+	StartRenameFolder(String),
+	RenameFolder(String, String),
+	/// Delete markers, preserving contents one level up.
+	DeleteFolder(String),
+	MoveToFolder {
+		uri:    String,
+		folder: Option<String>,
+	},
+	ToggleFolder(String),
+	/// Edit an owned playlist's details without changing the current route.
+	EditPlaylist(String),
+	/// Remove an owned or followed playlist from Your Library (Spotify's Delete).
+	DeletePlaylist(String),
+	SetPlaylistPublic(String, bool),
+	/// Save/follow or remove an album, playlist or artist without opening it.
+	SetSaved {
+		uri:   String,
+		saved: bool,
+	},
+	/// Pin at most four library entries; pins are persisted separately for each account.
+	SetPinned {
+		uri:    String,
+		pinned: bool,
+	},
+	/// Resolve every native album/playlist page before opening the playlist picker.
+	AddContextToPlaylist(Route),
+	/// Only the playlist's owner may change collaboration.
+	SetCollaborative(String, bool),
+	/// Spotify taste-profile exclusions apply to playlists and tracks, not albums/artists.
+	ExcludeFromTaste {
+		uri:      String,
+		excluded: bool,
+	},
 	/// Open the playlist picker for row `n` of the listing, or for what's playing.
 	AddRowToPlaylist(usize),
 	AddNowPlayingToPlaylist,
@@ -73,6 +109,12 @@ pub enum Msg {
 	ClearLibraryFilter,
 	/// Show a home shelf's every item instead of one row, or one row again.
 	ToggleShelf(&'static str),
+	/// Select Spotify's personalised Home filter chip.
+	HomeFacet(library::Facet),
+	/// Open a Home section's Show all page (URI from `HomeSection`).
+	HomeSectionMore(String),
+	/// Return from a Show all page to the selected Home feed without refetching it.
+	CloseHomeSection,
 	EqEnabled(bool),
 	/// Set band `0..10` to step `0..=EQ_STEPS` (bottom to top).
 	EqBand(usize, u8),
@@ -82,6 +124,14 @@ pub enum Msg {
 	/// Open a link in the browser (the cover's link back to Spotify).
 	OpenUrl(String),
 	Navigate(Route),
+	/// Warm a tile's first page on hover/visibility without navigating or changing UI state.
+	Prefetch(Route),
+	/// Remember a selected search result, moving its route to the front.
+	RememberSearch(library::Tile),
+	/// Remove the recent search selection with this route.
+	ForgetSearch(Route),
+	/// Empty this account's recent search selections.
+	ClearRecentSearches,
 	Select(usize),
 	MoveSelection(i32),
 	/// Play row `n` of the current listing.
@@ -174,6 +224,8 @@ pub enum Effect {
 	SetEq,
 	/// Persist the settings.
 	SaveSettings,
+	/// Persist this account's recent search selections.
+	SaveRecentSearches,
 	OpenUrl(String),
 	/// Search for the current query once typing pauses (the loop debounces).
 	SearchSoon,

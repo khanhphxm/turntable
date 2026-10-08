@@ -5,7 +5,7 @@ use std::{
 	time::{Instant, SystemTime},
 };
 
-use super::{AUDIO_RETRY, AppEvent, Controller, HEALTH_EVERY, NO_AUDIO, SYSTEM_EVERY, retry_wait};
+use super::{AUDIO_RETRY, AppEvent, Controller, HEALTH_EVERY, NO_AUDIO, SYSTEM_EVERY, StartError, retry_wait};
 use crate::{
 	app::{Panel, config::Paths},
 	engine::{Command, Engine, EngineConfig},
@@ -183,6 +183,7 @@ impl Controller {
 			return;
 		}
 		self.state.starting = true;
+		self.state.sign_in_error = None;
 		self.state.notice = Some("Starting the player…".into());
 		self.retry_start_at = None;
 		let launch =
@@ -229,9 +230,14 @@ impl Controller {
 	/// Lets go of the connection, the audio and the engine, and hands the last two back to be
 	/// dropped (in the background: the player says goodbye to Spotify first).
 	fn detach_engine(&mut self) -> Detached {
+		if let Some(engine) = &self.engine {
+			engine.stop();
+		}
 		self.retry_start_at = None;
 		self.client = None;
 		self.library.set_session(None);
+		self.lyrics = None;
+		self.state.lyrics = None;
 		self.state.has_audio = false;
 		self.state.sys.running = None;
 		self.state.sys.launching = None;
@@ -310,6 +316,11 @@ impl Controller {
 	/// Forgets the sign-in on this computer: the player stops, the library empties, and the setup
 	/// page asks to sign in again.
 	pub(super) fn sign_out(&mut self) {
+		self.state.recent_searches.clear();
+		if let Err(error) = self.state.recent_searches.save(&self.paths.config) {
+			self.state.notice = Some(format!("Couldn't clear recent searches: {error}"));
+		}
+		self.state.recent_searches.load(&self.paths.config, None);
 		self.discard_start = self.state.starting;
 		self.stop_engine();
 		self.library.send(crate::library::Request::ForgetSnapshot);
@@ -323,6 +334,24 @@ impl Controller {
 		self.playback_interrupted = false;
 		self.refresh_network_notice();
 		self.state.disconnected("Signed out.".into());
+	}
+
+	/// A definitive subscription refusal is a sign-out, never an offline retry.
+	pub(super) fn reject_sign_in(&mut self, error: crate::engine::SignInError) {
+		self.sign_out();
+		self.state.starting = false;
+		self.state.library = crate::library::Library::default();
+		self.state.item = crate::engine::Entity::default();
+		self.state.context = crate::engine::Entity::default();
+		self.state.upcoming.clear();
+		self.state.connect = crate::app::connect::Connect::default();
+		self.restore = super::restore::Restore::new(false);
+		self.search_at = None;
+		self.poll_at = None;
+		self.poll_inflight = false;
+		self.force_poll = false;
+		self.state.notice = Some(error.message());
+		self.state.sign_in_error = Some(error);
 	}
 
 	/// Copies the persisted preferences out of the state and writes them.
@@ -344,7 +373,12 @@ struct Launch {
 	cache_mb: u32,
 }
 
-fn start_engine(paths: &Paths, launch: &Launch, writer: crate::audio::PcmWriter, progress: &mut dyn FnMut(&str)) -> Result<Engine, String> {
+fn start_engine(
+	paths: &Paths,
+	launch: &Launch,
+	writer: crate::audio::PcmWriter,
+	progress: &mut dyn FnMut(&str),
+) -> Result<Engine, StartError> {
 	let config = EngineConfig {
 		device_name: launch.name.clone(),
 		volume:      launch.volume,
@@ -352,5 +386,10 @@ fn start_engine(paths: &Paths, launch: &Launch, writer: crate::audio::PcmWriter,
 		cache_dir:   paths.cache.join("player"),
 		cache_mb:    launch.cache_mb,
 	};
-	Engine::start(&config, writer, progress).map_err(|e| format!("Can't start the player: {e}"))
+	Engine::start(&config, writer, progress).map_err(|error| {
+		match error.get_ref().and_then(|source| source.downcast_ref::<crate::engine::SignInError>()) {
+			Some(error) => StartError::Premium(error.clone()),
+			None => StartError::Other(format!("Can't start the player: {error}")),
+		}
+	})
 }

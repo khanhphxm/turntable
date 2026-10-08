@@ -73,16 +73,16 @@ pub(super) fn all_followed(c: &mut Client) -> spotify::Result<Vec<Artist>> {
 }
 /// Loads a page of `route`. The header (title, artwork, context) is fetched with
 /// the first page and reused for the next ones.
-pub(super) fn open(s: &mut Session, route: &Route, offset: u32) -> spotify::Result<Listing> {
+pub(super) fn open(s: &mut Session, route: &Route, offset: u32, partial: &dyn Fn(Listing)) -> spotify::Result<Listing> {
 	// The first page of a listing opened lately; "Show more" builds on its header.
-	let cached = s.pages.get(route);
+	let mut cached = s.pages.get(route);
 	if offset == 0
-		&& let Some(listing) = &cached
+		&& let Some(listing) = cached.take()
 	{
 		trace::hit("page", &format!("{route:?}"), "mem");
-		return Ok(listing.clone());
+		return Ok(listing);
 	}
-	if let Some(listing) = session_open(s, route, offset)? {
+	if let Some(listing) = session_open(s, route, offset, partial)? {
 		if offset == 0 {
 			s.pages.insert(route.clone(), listing.clone());
 		}
@@ -90,7 +90,7 @@ pub(super) fn open(s: &mut Session, route: &Route, offset: u32) -> spotify::Resu
 	}
 	let header = match cached {
 		Some(listing) => listing,
-		None => header(s, route)?,
+		None => header(s, route, partial)?,
 	};
 	let page = match route {
 		Route::Liked => Some(s.client.saved_tracks(offset, PAGE)?),
@@ -130,25 +130,24 @@ pub(super) fn open(s: &mut Session, route: &Route, offset: u32) -> spotify::Resu
 }
 
 /// Session-backed pages don't inherit Web API ownership restrictions or web-player cursors.
-fn session_open(s: &mut Session, route: &Route, offset: u32) -> spotify::Result<Option<Listing>> {
+fn session_open(s: &mut Session, route: &Route, offset: u32, partial: &dyn Fn(Listing)) -> spotify::Result<Option<Listing>> {
 	let Some(player) = &mut s.player else { return Ok(None) };
 	let listing = match route {
 		Route::Liked => {
 			let page = player.liked(offset)?;
-			Listing {
+			let mut listing = Listing {
 				kicker: "Playlist".into(),
 				title: "Liked Songs".into(),
-				subtitle: songs(u64::from(page.total)),
-				next_offset: page.next_offset(),
-				total: page.total,
-				tracks: page.items,
+				subtitle: songs(u64::from(page.page.total)),
 				..Listing::default()
-			}
+			};
+			take_session_page(&mut listing, page);
+			listing
 		},
 		Route::Playlist(id) => {
 			let (mut p, editable, page) = player.playlist(id, offset, true)?;
 			if let Some(known) = s.playlists.iter().find(|known| known.id == *id) {
-				p.public = known.public;
+				p.public = p.public.or(known.public);
 				p.owner.display_name.clone_from(&known.owner.display_name);
 				if p.images.is_empty() {
 					p.images.clone_from(&known.images);
@@ -172,20 +171,27 @@ fn session_open(s: &mut Session, route: &Route, offset: u32) -> spotify::Result<
 				..Listing::default()
 			};
 			if let Some(page) = page {
-				listing.next_offset = page.next_offset();
-				listing.total = page.total;
-				listing.tracks = page.items;
+				take_session_page(&mut listing, page);
 			}
 			listing
 		},
-		Route::Album(id) => player.album(id, offset)?,
-		Route::Artist(_) | Route::Home | Route::Search | Route::Library => return Ok(None),
+		Route::Album(id) => player.album(id, offset, partial)?,
+		Route::Artist(_) | Route::Home | Route::Search | Route::Library | Route::Folder(_) => return Ok(None),
 	};
 	Ok(Some(listing))
 }
 
+/// Keep occurrence attributes attached while splitting the wire page into listing columns.
+pub(super) fn take_session_page(listing: &mut Listing, page: super::session::TrackPage) {
+	listing.next_offset = page.page.next_offset();
+	listing.total = page.page.total;
+	listing.tracks = page.page.items;
+	listing.added_at = page.added_at;
+	listing.added_by = page.added_by;
+}
+
 /// A listing's header: everything but its tracks.
-pub(super) fn header(s: &mut Session, route: &Route) -> spotify::Result<Listing> {
+pub(super) fn header(s: &mut Session, route: &Route, partial: &dyn Fn(Listing)) -> spotify::Result<Listing> {
 	Ok(match route {
 		Route::Liked => Listing { kicker: ("Playlist").into(), title: "Liked Songs".into(), ..Listing::default() },
 		Route::Playlist(id) => match s.client.playlist(id) {
@@ -244,8 +250,8 @@ pub(super) fn header(s: &mut Session, route: &Route) -> spotify::Result<Listing>
 			Err(e) => return Err(e),
 		},
 		Route::Album(id) => album_header(s, id)?,
-		Route::Artist(id) => artist_header(s, id)?,
-		Route::Home | Route::Search | Route::Library => Listing::default(),
+		Route::Artist(id) => artist_header(s, id, partial)?,
+		Route::Home | Route::Search | Route::Library | Route::Folder(_) => Listing::default(),
 	})
 }
 
@@ -287,13 +293,13 @@ pub(super) fn album_listing(album: Album, page: Option<Page<spotify::Track>>, fo
 	listing
 }
 /// The tint of a cover (`#rrggbb`) from the web player, asked once a day for each cover.
-pub(super) fn accent(s: &mut Session, url: &str) -> Option<String> {
+pub(super) fn accent(web: &spotify::WebPlayer, colors: &mut crate::net::cache::Cache<String, Option<String>>, url: &str) -> Option<String> {
 	let key = url.to_owned();
-	if let Some(known) = s.colors.get(&key) {
+	if let Some(known) = colors.get(&key) {
 		return known;
 	}
-	let color = s.web.colors(url);
-	s.colors.insert(key, color.clone());
+	let color = web.colors(url);
+	colors.insert(key, color.clone());
 	color
 }
 

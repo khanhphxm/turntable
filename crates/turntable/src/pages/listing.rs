@@ -2,7 +2,8 @@
 //! the next page loads as the end comes into view).
 
 use gpui_kit::{
-	AnyElement, Context, FontWeight, IntoElement, ParentElement as _, Styled as _, Window, div, list, prelude::FluentBuilder as _, px,
+	AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
+	Styled as _, Window, div, list, prelude::FluentBuilder as _, px,
 };
 use turntable_core::{Msg, Route, spotify::id_of};
 
@@ -45,7 +46,7 @@ impl Shell {
 					let shown = this.st().prefs.display.play_counts && plays.is_some();
 					(if shown { Column::Plays } else { Column::None }, plays)
 				} else {
-					(Column::Album, None)
+					(Column::AlbumAdded, None)
 				};
 				// A multi-disc album heads each disc's first row, as Spotify does.
 				let disc_head = album
@@ -185,7 +186,7 @@ impl Shell {
 		let shuffle = self.st().options.shuffle;
 		let actions =
 			icon_button("page-shuffle", Icon::Shuffle, px(32.), shuffle, cx.listener(|this, _, _, cx| this.send(Msg::ToggleShuffle, cx)));
-		let column = if matches!(route, Route::Album(_)) { Column::None } else { Column::Album };
+		let column = if matches!(route, Route::Album(_)) { Column::None } else { Column::AlbumAdded };
 		div()
 			.w_full()
 			.flex()
@@ -194,6 +195,30 @@ impl Shell {
 			.child(
 				self.wash(tint)
 					.child(self.action_bar(context, actions, cx))
+					// Spotify's quick edits under the actions of the user's own playlist.
+					.when(self.editable_playlist(), |s| {
+						s.child(
+							div()
+								.px_6()
+								.pb_4()
+								.flex()
+								.gap_2()
+								.child(pill_button(
+									"edit-add",
+									Icon::Plus,
+									"Add",
+									cx.listener(|this, _, window, cx| {
+										this.search.update(cx, |s, cx| s.focus(window, cx));
+									}),
+								))
+								.child(pill_button(
+									"edit-details",
+									Icon::Pencil,
+									"Name & details",
+									cx.listener(|this, _, _, cx| this.send(Msg::RenamePlaylist, cx)),
+								)),
+						)
+					})
 					.when_some(note, |s, n| s.child(div().px_6().pb_4().text_size(px(14.)).text_color(theme::subdued()).child(n)))
 					.child(div().px_6().child(self.table_head(column)))
 					.child(div().h_4()),
@@ -256,4 +281,29 @@ fn release_date(date: &str) -> String {
 		(Some(m), None) => format!("{m} {year}"),
 		_ => year.to_owned(),
 	}
+}
+
+/// A small raised pill with an icon (Spotify's "Add", "Name & details").
+fn pill_button(
+	id: &'static str,
+	glyph: Icon,
+	label: &'static str,
+	on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App) + 'static,
+) -> impl IntoElement {
+	div()
+		.id(id)
+		.h(px(32.))
+		.px_3()
+		.flex()
+		.items_center()
+		.gap_2()
+		.rounded_full()
+		.bg(theme::raised())
+		.hover(|s| s.bg(theme::raised_hover()))
+		.cursor_pointer()
+		.text_size(px(14.))
+		.font_weight(FontWeight::BOLD)
+		.on_click(on_click)
+		.child(icon(glyph, px(16.), theme::text()))
+		.child(label)
 }

@@ -44,26 +44,17 @@ impl Controller {
 	pub(super) fn request_lyrics(&mut self) -> bool {
 		let state = &mut self.state;
 		let item = &state.item;
-		if !self.visible
-			|| !state.lyrics_shown()
-			|| !state.prefs.sources.lyrics
-			|| !item.uri.starts_with("spotify:track:")
-			|| state.lyrics_state().is_some()
-		{
+		if !self.visible || !state.lyrics_shown() || !item.uri.starts_with("spotify:track:") || state.lyrics_state().is_some() {
 			return false;
 		}
-		let song = lyrics::Song {
-			uri:         item.uri.clone(),
-			title:       item.name().to_owned(),
-			artist:      item.decorations.creators.first().map_or_else(String::new, |creator| creator.entity.name().to_owned()),
-			duration_ms: item.duration_ms(),
-		};
+		let Some(session) = self.engine.as_ref().and_then(crate::engine::Engine::session_reader) else { return false };
+		let song = lyrics::Song { uri: item.uri.clone() };
 		state.lyrics = Some((song.uri.clone(), LyricsState::Loading));
 		let (tx, wake) = (&self.tx, &self.wake);
 		self.lyrics
 			.get_or_insert_with(|| {
 				let (tx, wake) = (tx.clone(), wake.clone());
-				lyrics::Fetcher::spawn(move |response| {
+				lyrics::Fetcher::spawn(session, move |response| {
 					if tx.send(AppEvent::Lyrics(response)).is_ok() {
 						wake();
 					}

@@ -6,7 +6,7 @@ use std::{sync::Arc, time::Instant};
 
 use gpui_kit::{
 	AppContext as _, Context, Entity, FocusHandle, Focusable, ImageSource, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment,
-	ListState, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Window, actions,
+	ListState, ParentElement as _, Pixels, Render, StatefulInteractiveElement as _, Styled as _, Window, actions,
 	component::input::{InputEvent, InputState},
 	div,
 	prelude::FluentBuilder as _,
@@ -23,8 +23,9 @@ use crate::{
 	widgets::{Slider, SliderEvent},
 };
 
-/// Below this window width Your Library shows as the rail of covers, as Spotify's does.
-const NARROW_W: f32 = 1000.;
+/// The main view's narrowest comfortable width: below it plus both side panels at full width,
+/// the window is crowded and only one side panel stays open (Spotify's behaviour).
+const MAIN_MIN_W: f32 = 480.;
 
 /// How many pages back the history reaches.
 const HISTORY: usize = 50;
@@ -71,6 +72,16 @@ pub enum Page {
 	Settings,
 }
 
+/// How large now playing is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FullView {
+	Off,
+	/// In place of the main view, beside Your Library.
+	Expanded,
+	/// The whole window, in macOS full screen.
+	Screen,
+}
+
 /// What the right-hand panel shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
@@ -79,42 +90,61 @@ pub enum Side {
 }
 
 pub struct Shell {
-	pub core:           Controller,
-	pub page:           Page,
-	pub back:           std::collections::VecDeque<Page>,
-	pub forward:        Vec<Page>,
+	pub core:            Controller,
+	pub page:            Page,
+	pub back:            std::collections::VecDeque<Page>,
+	pub forward:         Vec<Page>,
 	/// Bumped whenever the right-hand panel changes, so its entrance animation runs again.
-	pub panel_gen:      usize,
-	pub seek:           Entity<Slider>,
-	pub volume_slider:  Entity<Slider>,
+	pub panel_gen:       usize,
+	pub seek:            Entity<Slider>,
+	pub volume_slider:   Entity<Slider>,
 	/// Settings' crossfade length (0..=MAX_CROSSFADE seconds).
-	pub crossfade:      Entity<Slider>,
+	pub crossfade:       Entity<Slider>,
 	/// The main view's virtual list (listing pages), and what it was built for.
-	pub list:           ListState,
-	pub list_for:       Option<(Route, usize)>,
-	pub search:         Entity<InputState>,
-	pub eq_graph:       Entity<crate::eqgraph::EqGraph>,
-	pub focus:          FocusHandle,
+	pub list:            ListState,
+	pub list_for:        Option<(Route, usize)>,
+	pub search:          Entity<InputState>,
+	/// A folder's name while it's renamed in place in Your Library.
+	pub folder_name:     Entity<InputState>,
+	/// The folder whose rename field was last filled.
+	pub renaming_folder: Option<String>,
+	pub eq_graph:        Entity<crate::eqgraph::EqGraph>,
+	pub focus:           FocusHandle,
 	/// The main view's width as of this frame (titles size themselves to it).
-	pub main_w:         f32,
+	pub main_w:          f32,
 	/// The window's scale factor as of this frame (covers decode to it).
-	pub scale:          f32,
-	pub lyrics_scroll:  gpui_kit::ScrollHandle,
-	/// The window is too narrow for the full library (it folds to the rail by itself).
-	pub narrow:         bool,
+	pub scale:           f32,
+	pub lyrics_scroll:   gpui_kit::ScrollHandle,
+	/// The window can't fit Your Library, the main view and the right panel at full width.
+	pub crowded:         bool,
+	/// Now playing fills the main view (Spotify's expand) or the whole screen.
+	pub full_view:       FullView,
+	/// In a crowded window the user opened Your Library, so the right panel folds to a strip
+	/// (otherwise the library folds to its rail).
+	pub library_first:   bool,
+	/// The user folded the right panel to its strip.
+	pub panel_hidden:    bool,
+	/// Your Library widened (Spotify's expand button).
+	pub library_wide:    bool,
+	/// The miniplayer window, while open.
+	pub mini:            Option<crate::miniplayer::Handle>,
+	/// The search field's dropdown (recent searches / suggestions) is showing.
+	pub search_open:     bool,
+	/// The search results page's filter.
+	pub search_filter:   crate::pages::search::Filter,
 	/// The lyric line last scrolled to.
-	pub lyrics_line:    Option<usize>,
+	pub lyrics_line:     Option<usize>,
 	/// The OS's Now Playing session (set once the window is open).
-	pub now_playing:    Option<crate::nowplaying::NowPlaying>,
+	pub now_playing:     Option<crate::nowplaying::NowPlaying>,
 	/// The open "Edit details" dialog's fields.
-	pub details:        Option<crate::dialogs::DetailsInputs>,
+	pub details:         Option<crate::dialogs::DetailsInputs>,
 	/// The empty-playlist finder's field (for the playlist last shown).
-	pub finder:         Option<crate::pages::finder::Finder>,
+	pub finder:          Option<crate::pages::finder::Finder>,
 	/// Your Library's filter field, while open.
-	pub library_filter: Option<Entity<InputState>>,
+	pub library_filter:  Option<Entity<InputState>>,
 	/// The toast last shown, and the one whose time is up (the core never clears toasts).
-	pub toast_shown:    Option<u32>,
-	pub toast_gone:     Option<u32>,
+	pub toast_shown:     Option<u32>,
+	pub toast_gone:      Option<u32>,
 }
 
 impl Focusable for Shell {
@@ -159,25 +189,8 @@ impl Shell {
 			this.send(Msg::Volume((v * 100.).round() as u8), cx);
 		})
 		.detach();
-		let search = cx.new(|cx| InputState::new(window, cx).placeholder("What do you want to play?"));
-		cx.subscribe(&search, |this, input, e: &InputEvent, cx| match e {
-			InputEvent::Change => {
-				let text = input.read(cx).value().to_string();
-				// The core owns the query (and debounces the search it sends).
-				this.send(Msg::Focus(Some(Field::Search)), cx);
-				let old = this.st().library.query.encode_utf16().count();
-				this.send(Msg::Edit { from: 0, to: old, text }, cx);
-				if this.page != Page::Core(Route::Search) {
-					this.open(Page::Core(Route::Search), cx);
-				}
-			},
-			InputEvent::PressEnter { .. } => {
-				let text = input.read(cx).value().to_string();
-				this.send(Msg::SearchSubmit(text), cx);
-			},
-			_ => {},
-		})
-		.detach();
+		let search = search_input(window, cx);
+		let folder_name = folder_name_input(window, cx);
 		let eq_graph = crate::eqgraph::EqGraph::new(cx, core.state().eq.gains_db, core.state().eq.enabled);
 		cx.subscribe(&eq_graph, |this, _, e: &crate::eqgraph::BandChanged, cx| this.send(Msg::EqBand(e.band, e.step), cx)).detach();
 		let page = Page::Core(core.state().library.route.clone());
@@ -193,12 +206,21 @@ impl Shell {
 			list: ListState::new(0, ListAlignment::Top, px(600.)),
 			list_for: None,
 			search,
+			folder_name,
+			renaming_folder: None,
 			eq_graph,
 			focus: cx.focus_handle(),
 			main_w: 600.,
 			scale: window.scale_factor(),
 			lyrics_scroll: gpui_kit::ScrollHandle::new(),
-			narrow: false,
+			crowded: false,
+			full_view: FullView::Off,
+			library_first: false,
+			panel_hidden: false,
+			library_wide: false,
+			mini: None,
+			search_open: false,
+			search_filter: crate::pages::search::Filter::All,
 			lyrics_line: None,
 			now_playing: None,
 			details: None,
@@ -270,9 +292,80 @@ impl Shell {
 		cx.notify();
 	}
 
-	/// Your Library shows as the rail: folded by the user, or the window is narrow.
+	/// Your Library shows as the rail: folded by the user, or the window is crowded and the
+	/// right panel has the room.
 	pub fn sidebar_folded(&self) -> bool {
-		self.st().sidebar_collapsed() || self.narrow
+		self.st().sidebar_collapsed() || (self.crowded && !self.library_first)
+	}
+
+	/// Your Library's width: the rail, its usual width or widened.
+	pub fn sidebar_w(&self) -> Pixels {
+		if self.sidebar_folded() {
+			theme::SIDEBAR_COLLAPSED_W
+		} else if self.library_wide {
+			theme::SIDEBAR_WIDE_W
+		} else {
+			theme::SIDEBAR_W
+		}
+	}
+
+	/// The right panel shows as a strip with a chevron: the window is crowded and the user
+	/// opened Your Library.
+	pub fn panel_folded(&self) -> bool {
+		self.panel_hidden || (self.crowded && self.library_first && !self.st().sidebar_collapsed())
+	}
+
+	/// The right panel's width: a strip while folded.
+	pub fn right_w(&self) -> Pixels {
+		if self.panel_folded() { theme::RIGHT_FOLDED_W } else { theme::RIGHT_W }
+	}
+
+	/// Opens or folds Your Library. In a crowded window this trades room with the right panel
+	/// for now only (the saved preference is for roomy windows).
+	pub fn toggle_library(&mut self, cx: &mut Context<'_, Self>) {
+		if !self.crowded {
+			self.send(Msg::ToggleSidebar, cx);
+			return;
+		}
+		if self.sidebar_folded() {
+			self.library_first = true;
+			if self.st().sidebar_collapsed() {
+				self.send(Msg::ToggleSidebar, cx);
+			}
+		} else {
+			self.library_first = false;
+		}
+		cx.notify();
+	}
+
+	/// Folds the right panel to its strip (by hand, whatever the window's width).
+	pub fn fold_panel(&mut self, cx: &mut Context<'_, Self>) {
+		self.panel_hidden = true;
+		cx.notify();
+	}
+
+	/// Expands now playing over the main view, or back.
+	pub fn set_full_view(&mut self, on: bool, cx: &mut Context<'_, Self>) {
+		self.full_view = if on { FullView::Expanded } else { FullView::Off };
+		cx.notify();
+	}
+
+	/// Full-screen now playing, or back: the window goes full screen with it.
+	pub fn toggle_full_screen(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+		let on = self.full_view != FullView::Screen;
+		self.full_view = if on { FullView::Screen } else { FullView::Off };
+		if window.is_fullscreen() != on {
+			window.toggle_fullscreen();
+		}
+		cx.notify();
+	}
+
+	/// Unfolds the right panel's strip (folding Your Library to its rail).
+	pub fn unfold_panel(&mut self, cx: &mut Context<'_, Self>) {
+		self.library_first = false;
+		self.panel_hidden = false;
+		self.panel_gen += 1;
+		cx.notify();
 	}
 
 	/// Hides each new toast after a few seconds.
@@ -295,6 +388,12 @@ impl Shell {
 	pub fn image(&self, url: Option<&str>, logical: u32, cx: &mut Context<'_, Self>) -> Option<ImageSource> {
 		let cover = Arc::clone(self.st().image(url)?);
 		CoverCache::get(&cover, logical, self.scale, cx).map(ImageSource::Render)
+	}
+
+	/// The artwork at `url` blurred to soft colour, for a backdrop.
+	pub fn blurred_image(&self, url: Option<&str>, cx: &mut Context<'_, Self>) -> Option<ImageSource> {
+		let cover = Arc::clone(self.st().image(url)?);
+		CoverCache::blurred(&cover, cx).map(ImageSource::Render)
 	}
 
 	// --- Navigation -----------------------------------------------------------------------
@@ -344,20 +443,42 @@ impl Shell {
 		cx.notify();
 	}
 
-	/// What the right-hand panel shows: the device list while it's open, else the core's panel
-	/// (only the panels that belong there; the equalizer and settings are pages here).
+	/// What the right-hand panel shows: the device list while it's open, else the core's panel,
+	/// else now playing; it's always there, as Spotify's is (`None` while folded to its strip).
 	pub fn side(&self) -> Option<Side> {
+		if self.panel_folded() {
+			return None;
+		}
 		if self.st().connect.menu {
 			return Some(Side::Devices);
 		}
-		match self.st().side_panel()? {
-			p @ (Panel::NowPlaying | Panel::Queue | Panel::Lyrics) => Some(Side::Core(p)),
-			Panel::Eq | Panel::Settings => None,
-		}
+		Some(match self.st().side_panel() {
+			Some(p @ (Panel::Queue | Panel::Lyrics)) => Side::Core(p),
+			_ => Side::Core(Panel::NowPlaying),
+		})
 	}
 
+	/// Shows a panel, or hides it back to now playing; now playing itself has nowhere to go.
 	pub fn toggle_side(&mut self, side: Side, cx: &mut Context<'_, Self>) {
+		if self.panel_folded() {
+			self.unfold_panel(cx);
+			if self.side() == Some(side) {
+				return;
+			}
+		} else if side == Side::Core(Panel::NowPlaying) && self.side() == Some(side) {
+			return;
+		}
 		self.panel_gen += 1;
+		if side == Side::Core(Panel::NowPlaying) {
+			// Back from the queue, lyrics or devices to now playing.
+			if self.st().connect.menu {
+				self.send(Msg::DevicesMenu, cx);
+			}
+			if let Some(p @ (Panel::Queue | Panel::Lyrics)) = self.st().panel {
+				self.send(Msg::TogglePanel(p), cx);
+			}
+			return;
+		}
 		match side {
 			Side::Devices => self.send(Msg::DevicesMenu, cx),
 			Side::Core(p) => {
@@ -408,13 +529,19 @@ impl Render for Shell {
 			return self.welcome_page(cx).into_any_element();
 		}
 		self.scale = window.scale_factor();
+		// Leaving macOS full screen another way (the green button, ⌃⌘F) ends full-screen now playing.
+		if self.full_view == FullView::Screen && !window.is_fullscreen() {
+			self.full_view = FullView::Off;
+		}
+		let width = window.viewport_size().width;
+		self.crowded = width < theme::SIDEBAR_W + theme::RIGHT_W + px(MAIN_MIN_W) + theme::GAP * 4.;
 		let side = self.side();
-		self.narrow = window.viewport_size().width < px(NARROW_W);
-		let left = if self.sidebar_folded() { theme::SIDEBAR_COLLAPSED_W } else { theme::SIDEBAR_W };
-		let right = if side.is_some() { theme::RIGHT_W + theme::GAP } else { px(0.) };
+		let left = self.sidebar_w();
+		let right = self.right_w() + theme::GAP;
 		self.main_w = f32::from(window.viewport_size().width - left - right - theme::GAP * 3.);
 		let main = match self.page.clone() {
 			Page::Core(Route::Home | Route::Library) => self.home_page(cx).into_any_element(),
+			Page::Core(Route::Folder(id)) => self.folder_page(&id, cx).into_any_element(),
 			Page::Core(Route::Search) => self.search_page(cx).into_any_element(),
 			Page::Core(Route::Artist(_)) => self.artist_page(cx).into_any_element(),
 			Page::Core(route @ (Route::Liked | Route::Playlist(_) | Route::Album(_))) => self.listing_page(route, cx).into_any_element(),
@@ -426,7 +553,14 @@ impl Render for Shell {
 		div()
 			.key_context("Shell")
 			.track_focus(&self.focus)
-			.on_action(cx.listener(|this, _: &CloseDialog, _, cx| this.send(Msg::CloseDialog, cx)))
+			.on_action(cx.listener(|this, _: &CloseDialog, window, cx| {
+				// Escape backs out of full-size now playing first.
+				match this.full_view {
+					FullView::Screen => this.toggle_full_screen(window, cx),
+					FullView::Expanded => this.set_full_view(false, cx),
+					FullView::Off => this.send(Msg::CloseDialog, cx),
+				}
+			}))
 			.on_action(cx.listener(|this, _: &TogglePlay, _, cx| this.send(Msg::TogglePlay, cx)))
 			.on_action(cx.listener(|this, _: &Next, _, cx| this.send(Msg::Next, cx)))
 			.on_action(cx.listener(|this, _: &Previous, _, cx| this.send(Msg::Prev, cx)))
@@ -436,7 +570,7 @@ impl Render for Shell {
 				this.search.update(cx, |s, cx| s.focus(window, cx));
 				this.go(Route::Search, cx);
 			}))
-			.on_action(cx.listener(|this, _: &ToggleLibrary, _, cx| this.send(Msg::ToggleSidebar, cx)))
+			.on_action(cx.listener(|this, _: &ToggleLibrary, _, cx| this.toggle_library(cx)))
 			.on_action(cx.listener(|this, _: &ToggleQueue, _, cx| this.toggle_side(Side::Core(Panel::Queue), cx)))
 			.on_action(cx.listener(|this, _: &ToggleLyrics, _, cx| this.toggle_side(Side::Core(Panel::Lyrics), cx)))
 			.on_action(cx.listener(|this, _: &ToggleNowPlaying, _, cx| this.toggle_side(Side::Core(Panel::NowPlaying), cx)))
@@ -446,7 +580,7 @@ impl Render for Shell {
 			.bg(theme::base())
 			.text_color(theme::text())
 			.font_family(".SystemUIFont")
-			.child(self.top_bar(cx))
+			.when(self.full_view != FullView::Screen, |s| s.child(self.top_bar(cx)))
 			.child(
 				div()
 					.flex_1()
@@ -454,21 +588,29 @@ impl Render for Shell {
 					.flex()
 					.gap(theme::GAP)
 					.px(theme::GAP)
-					.child(self.sidebar(cx))
-					.child(
-						div()
-							.relative()
-							.flex_1()
-							.min_w_0()
-							.h_full()
-							.rounded(theme::RADIUS)
-							.overflow_hidden()
-							.bg(theme::panel())
-							.child(main)
-							.when_some(toast, |s, (id, text)| s.child(toast_view(text, id)))
-							.child(crate::widgets::corner_mask()),
-					)
-					.when_some(side, |row, side| row.child(self.right_panel(side, cx))),
+					.when(self.full_view == FullView::Off, |row| row.child(self.sidebar(cx)))
+					.when(self.full_view != FullView::Off, |row| row.child(self.full_view_page(cx)))
+					.when(self.full_view == FullView::Off, |row| {
+						row.child(
+							div()
+								.relative()
+								.flex_1()
+								.min_w_0()
+								.h_full()
+								.rounded(theme::RADIUS)
+								.overflow_hidden()
+								.bg(theme::panel())
+								.child(main)
+								.when_some(toast, |s, (id, text)| s.child(toast_view(text, id)))
+								.child(crate::widgets::corner_mask()),
+						)
+					})
+					.when(self.full_view == FullView::Off, |row| {
+						row.child(match side {
+							Some(side) => self.right_panel(side, cx).into_any_element(),
+							None => self.folded_panel(cx).into_any_element(),
+						})
+					}),
 			)
 			.child(self.player_bar(cx))
 			.relative()
@@ -523,4 +665,64 @@ impl Shell {
 				.child(short),
 		)
 	}
+}
+
+/// The field a folder's name is typed into while it's renamed in Your Library; every edit goes
+/// to the core, and Enter or leaving the field saves.
+fn folder_name_input(window: &mut Window, cx: &mut Context<'_, Shell>) -> Entity<InputState> {
+	let folder_name = cx.new(|cx| InputState::new(window, cx));
+	cx.subscribe(&folder_name, |this, input, e: &InputEvent, cx| match e {
+		InputEvent::Change => {
+			let text = input.read(cx).value().to_string();
+			this.send(Msg::Focus(Some(Field::PlaylistName)), cx);
+			let old = this.st().name_input.encode_utf16().count();
+			this.send(Msg::Edit { from: 0, to: old, text }, cx);
+		},
+		InputEvent::PressEnter { .. } | InputEvent::Blur => {
+			if let Some(turntable_core::Dialog::RenameFolder { id, .. }) = this.st().dialog.clone() {
+				let name = this.st().name_input.clone();
+				this.send(Msg::RenameFolder(id, name), cx);
+			}
+		},
+		InputEvent::Focus => {},
+	})
+	.detach();
+	folder_name
+}
+
+/// The top bar's search field: typing feeds the core's query (the dropdown suggests), Enter
+/// searches and opens the results.
+fn search_input(window: &mut Window, cx: &mut Context<'_, Shell>) -> Entity<InputState> {
+	let search = cx.new(|cx| InputState::new(window, cx).placeholder("What do you want to play?"));
+	cx.subscribe(&search, |this, input, e: &InputEvent, cx| match e {
+		InputEvent::Change => {
+			let text = input.read(cx).value().to_string();
+			// The core owns the query (and debounces the search it sends).
+			this.send(Msg::Focus(Some(Field::Search)), cx);
+			let old = this.st().library.query.encode_utf16().count();
+			this.send(Msg::Edit { from: 0, to: old, text }, cx);
+			// Typing shows suggestions under the field; the page changes on Enter (Spotify).
+			this.search_open = true;
+			cx.notify();
+		},
+		InputEvent::PressEnter { .. } => {
+			let text = input.read(cx).value().trim().to_owned();
+			this.search_open = false;
+			if !text.is_empty() {
+				this.send(Msg::SearchSubmit(text), cx);
+				this.go(Route::Search, cx);
+			}
+		},
+		InputEvent::Focus => {
+			this.search_open = true;
+			cx.notify();
+		},
+		// A click on a suggestion acts on mouse-down, before this blur closes the list.
+		InputEvent::Blur => {
+			this.search_open = false;
+			cx.notify();
+		},
+	})
+	.detach();
+	search
 }

@@ -212,6 +212,21 @@ mod tests {
 	}
 
 	#[test]
+	fn a_real_cached_cover_decodes_without_a_network_request() -> Result<(), Box<dyn std::error::Error>> {
+		use image::ImageEncoder as _;
+		let dir = tempfile::tempdir()?;
+		let url = "https://invalid.example/cached-cover.png";
+		let image = image::RgbaImage::from_pixel(2, 2, image::Rgba([12, 34, 56, 255]));
+		let mut encoded = Vec::new();
+		image::codecs::png::PngEncoder::new(&mut encoded).write_image(image.as_raw(), 2, 2, image::ExtendedColorType::Rgba8)?;
+		store(dir.path(), &dir.path().join(file_name(url)), &encoded);
+		let (bytes, mime) = cover(dir.path(), url).ok_or("cached PNG was not served")?;
+		assert_eq!(mime, "image/png");
+		assert_eq!(image::load_from_memory(&bytes)?.into_rgba8(), image);
+		Ok(())
+	}
+
+	#[test]
 	fn pruning_removes_the_oldest_files_down_to_three_quarters_of_the_limit() {
 		let dir = scratch("prune");
 		let start = SystemTime::now();

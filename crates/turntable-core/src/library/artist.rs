@@ -1,9 +1,8 @@
 //! Artist discography, popular songs, About data and cached artist and artwork metadata.
 
-use super::{Listing, Tile, pages::part, worker::Session};
+use super::{Listing, Route, Tile, pages::part, worker::Session};
 use crate::{
 	net::par,
-	sources::external,
 	spotify::{self, Artist, Track},
 };
 
@@ -17,9 +16,9 @@ pub struct Popularity {
 	pub accent:   Option<String>,
 }
 /// An artist's header: the artist, their releases by kind, where they appear, and whether they are followed.
-pub(super) fn artist_header(s: &mut Session, id: &str) -> spotify::Result<Listing> {
+pub(super) fn artist_header(s: &mut Session, id: &str, partial: &dyn Fn(Listing)) -> spotify::Result<Listing> {
 	if let Some(player) = &mut s.player {
-		let listing = player.artist_header(id)?;
+		let listing = player.artist_header(id, partial)?;
 		if let Some(artist) = &listing.artist {
 			s.cache_artist(id.to_owned(), artist.clone());
 		}
@@ -78,7 +77,10 @@ pub(super) fn popularity(s: &mut Session, id: &str) -> spotify::Result<Popularit
 		return Ok(p);
 	}
 	if let Some(player) = &mut s.player {
-		let mut popular = player.popularity(id)?;
+		let mut popular = match s.pages.get_ref(&Route::Artist(id.to_owned())) {
+			Some(listing) if listing.popular_loaded => Popularity { tracks: listing.tracks.clone(), ..Popularity::default() },
+			_ => player.popularity(id)?,
+		};
 		// Play counts and monthly listeners aren't in ARTIST_V4. The web overview enriches
 		// session tracks without replacing Spotify's market-specific top-track order.
 		if let Ok(page) = s.web.artist(id) {
@@ -117,18 +119,6 @@ pub(super) fn popularity(s: &mut Session, id: &str) -> spotify::Result<Popularit
 	Ok(p)
 }
 
-/// An artist's About (Wikidata and Wikipedia), asked once a session; empty when they don't answer.
-/// An answer given while Wikipedia is turned off is not remembered, so turning it on asks again.
-pub(super) fn about(s: &mut Session, id: &str) -> external::About {
-	if let Some(a) = s.abouts.get(&id.to_owned()) {
-		return a;
-	}
-	let about = s.external.about(id).unwrap_or_default();
-	if crate::app::settings::allowed::wikipedia() {
-		s.abouts.insert(id.to_owned(), about.clone());
-	}
-	about
-}
 /// An artist, from the session's cache when it was fetched before.
 pub(super) fn artist(s: &mut Session, id: &str) -> spotify::Result<Artist> {
 	if let Some(a) = s.artists.get(id) {

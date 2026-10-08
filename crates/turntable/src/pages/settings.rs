@@ -51,7 +51,6 @@ impl Shell {
 		Switch::new(id).checked(on).on_click(cx.listener(move |this, checked: &bool, _, cx| this.send(Msg::Pref(pref(*checked)), cx)))
 	}
 
-	#[expect(clippy::too_many_lines, reason = "keep the declarative settings groups together")]
 	pub fn settings_page(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
 		let st = self.st();
 		let p = st.prefs.clone();
@@ -81,8 +80,11 @@ impl Shell {
 			})
 			.collect();
 		div().id("settings").size_full().overflow_y_scroll().child(
+			// Centred in the main view, as Spotify's settings are.
 			div()
+				.w_full()
 				.max_w(px(760.))
+				.mx_auto()
 				.px_8()
 				.pt_6()
 				.pb_12()
@@ -137,20 +139,11 @@ impl Shell {
 							self.toggle("compact", p.display.compact, Pref::Compact, cx),
 						)),
 				)
-				.child(
-					group("Sources")
-						.child(setting("Lyrics", "Synced lyrics from LRCLIB", self.toggle("lyrics", p.sources.lyrics, Pref::Lyrics, cx)))
-						.child(setting(
-							"Artist bios",
-							"About text from Wikipedia",
-							self.toggle("wikipedia", p.sources.wikipedia, Pref::Wikipedia, cx),
-						))
-						.child(setting(
-							"Spotify's web player",
-							"Play counts, listeners and artist pages",
-							self.toggle("web", p.sources.web_player, Pref::WebPlayer, cx),
-						)),
-				)
+				.child(group("Sources").child(setting(
+					"Spotify's web player",
+					"Play counts, listeners and artist pages",
+					self.toggle("web", p.sources.web_player, Pref::WebPlayer, cx),
+				)))
 				.child(group("About").child(setting(
 					format!("turntable {}", env!("CARGO_PKG_VERSION")),
 					"A lightweight Spotify player",

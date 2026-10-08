@@ -107,10 +107,6 @@ impl Client {
 		}
 	}
 
-	pub(crate) fn web_api_enabled(&self) -> bool {
-		self.web_api
-	}
-
 	/// The profile and the subscription (`premium`, `free`, `open`). The subscription only comes
 	/// with the `user-read-private` permission, so a sign-in from before it has none.
 	pub fn me_with_plan(&self) -> Result<(User, Option<String>)> {
@@ -196,21 +192,6 @@ impl Client {
 		Ok(page.items.into_iter().filter_map(|p| Some((p.track?, p.context))).collect())
 	}
 
-	/// The user's top artists of the last ~6 months. Needs the `user-top-read` scope:
-	/// a token from before turntable asked for it gets a 403 ([`Error::is_forbidden`]).
-	pub fn top_artists(&self, limit: u32) -> Result<Vec<Artist>> {
-		let limit = limit.clamp(1, MAX_PAGE).to_string();
-		let page: Page<Artist> = self.get_json("/me/top/artists", &[("limit", &limit), ("time_range", "medium_term")])?;
-		Ok(page.items)
-	}
-
-	/// The user's top tracks of the last ~6 months (`user-top-read`, as [`Self::top_artists`]).
-	pub fn top_tracks(&self, limit: u32) -> Result<Vec<Track>> {
-		let limit = limit.clamp(1, MAX_PAGE).to_string();
-		let page: Page<Track> = self.get_json("/me/top/tracks", &[("limit", &limit), ("time_range", "medium_term")])?;
-		Ok(page.items)
-	}
-
 	/// A page of the albums saved to the user's library, most recently added first.
 	pub fn saved_albums(&self, offset: u32, limit: u32) -> Result<Page<Album>> {
 		let page: Page<SavedAlbum> = self.get_page("/me/albums", offset, limit)?;
@@ -244,6 +225,13 @@ impl Client {
 
 	pub fn rename_playlist(&self, id: &str, changes: &super::PlaylistChanges) -> Result<()> {
 		let body = serde_json::to_string(changes)?;
+		self.request(Method::Put, &format!("/playlists/{}", urlencode(id)), &[], Some(&body))?;
+		Ok(())
+	}
+
+	/// No-session fallback; native collaboration edits use revision-checked Playlist4.
+	pub fn set_collaborative(&self, id: &str, collaborative: bool) -> Result<()> {
+		let body = serde_json::json!({ "collaborative": collaborative }).to_string();
 		self.request(Method::Put, &format!("/playlists/{}", urlencode(id)), &[], Some(&body))?;
 		Ok(())
 	}

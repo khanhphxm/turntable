@@ -13,6 +13,7 @@
 mod connect;
 mod load;
 mod model;
+mod premium;
 #[cfg(test)]
 mod session_tests;
 mod transition;
@@ -28,6 +29,7 @@ use std::{
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+pub(crate) use connect::device_of;
 use librespot_connect::{ConnectConfig, LoadRequest, LoadRequestOptions, Spirc, StateSnapshot};
 use librespot_core::{
 	SpotifyUri,
@@ -45,12 +47,14 @@ use librespot_playback::{
 	player::{Player as Decoder, PlayerEvent},
 };
 pub use model::*;
+pub use premium::SignInError;
 use tokio::{
 	runtime::Runtime,
 	sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
 };
 use transition::{RingSink, Transitions};
 
+type SharedCluster = tokio::sync::watch::Sender<Option<Arc<librespot_protocol::connect::Cluster>>>;
 use crate::audio::PcmWriter;
 
 /// What the player is started with.
@@ -90,7 +94,6 @@ const OAUTH_SCOPES: &[&str] = &[
 	"user-read-playback-state",
 	"user-read-private",
 	"user-read-recently-played",
-	"user-top-read",
 ];
 /// How long commands wait for a takeover (transfer) to land before this device starts on its own.
 const TAKEOVER_WAIT: Duration = Duration::from_secs(4);
@@ -108,28 +111,43 @@ pub struct Engine {
 	/// Spirc's task has ended (signed out elsewhere, the session dropped).
 	done:        Arc<AtomicBool>,
 	stop:        tokio::sync::watch::Sender<bool>,
+	cluster:     SharedCluster,
 	name:        String,
 	volume:      u8,
 	transitions: Arc<Transitions>,
 }
 
-/// A connection for library I/O on the player's authenticated session and runtime.
-/// Library workers share this handle; it neither creates another session nor controls playback.
+/// A handle for library and remote Connect I/O on the player's authenticated session/runtime.
+/// Workers share its pushed cluster; it never creates another session or implicitly starts playback.
 #[derive(Clone)]
 pub struct SessionReader {
 	session: Session,
 	runtime: tokio::runtime::Handle,
 	stop:    tokio::sync::watch::Receiver<bool>,
+	cluster: SharedCluster,
 }
 
 impl SessionReader {
-	#[cfg(test)]
-	pub(crate) fn for_test(session: Session, runtime: tokio::runtime::Handle, stop: tokio::sync::watch::Receiver<bool>) -> Self {
-		Self { session, runtime, stop }
+	/// Shares an already authenticated session without registering a Connect device or starting playback.
+	/// The caller owns the runtime and keeps the stop sender alive; sending `true` cancels library I/O.
+	pub fn from_session(session: Session, runtime: tokio::runtime::Handle, stop: tokio::sync::watch::Receiver<bool>) -> Self {
+		Self { session, runtime, stop, cluster: tokio::sync::watch::channel(None).0 }
 	}
 
 	pub fn session(&self) -> &Session {
 		&self.session
+	}
+
+	pub(crate) fn cluster(&self) -> Option<Arc<librespot_protocol::connect::Cluster>> {
+		if *self.stop.borrow() || self.session.is_invalid() {
+			return None;
+		}
+		self.cluster.borrow().clone()
+	}
+
+	#[cfg(test)]
+	pub(crate) fn set_cluster(&self, cluster: librespot_protocol::connect::Cluster) {
+		self.cluster.send_replace(Some(Arc::new(cluster)));
 	}
 
 	/// Runs session I/O on a blocking worker. Engine shutdown cancels reads before
@@ -202,9 +220,24 @@ impl Engine {
 			initial_volume: to_u16(config.volume),
 			..ConnectConfig::default()
 		};
-		let (spirc, task) = runtime
-			.block_on(network_timeout(NETWORK_TIMEOUT, Spirc::new(connect, session.clone(), credentials, decoder, mixer, Some(snap_tx))))
-			.map_err(io::Error::other)?;
+		let account = credentials.username.clone();
+		let result = runtime.block_on(async {
+			tokio::try_join!(
+				async {
+					network_timeout(NETWORK_TIMEOUT, Spirc::new(connect, session.clone(), credentials, decoder, mixer, Some(snap_tx)))
+						.await
+						.map_err(|error| premium::connection_error(error, &session, account.as_deref()))
+				},
+				premium::wait(&session, account.as_deref()),
+			)
+		});
+		let ((spirc, task), ()) = match result {
+			Ok(ready) => ready,
+			Err(error) => {
+				session.shutdown();
+				return Err(error);
+			},
+		};
 		let done = Arc::new(AtomicBool::new(false));
 		let ended = done.clone();
 		let (stop, _) = tokio::sync::watch::channel(false);
@@ -222,6 +255,7 @@ impl Engine {
 			done,
 			stop,
 			name: config.device_name.clone(),
+			cluster: tokio::sync::watch::channel(None).0,
 			volume: config.volume,
 			transitions,
 		})
@@ -244,6 +278,7 @@ impl Engine {
 			state:         Tracker::default(),
 			pending_track: None,
 			transitions:   self.transitions.clone(),
+			cluster:       self.cluster.clone(),
 		};
 		let (name, volume) = (self.name.clone(), self.volume);
 		self.runtime.as_ref()?.spawn(forward.run(streams, requests, name, volume));
@@ -256,12 +291,19 @@ impl Engine {
 			session: self.session.clone(),
 			runtime: self.runtime.as_ref()?.handle().clone(),
 			stop:    self.stop.subscribe(),
+			cluster: self.cluster.clone(),
 		})
 	}
 
 	/// Whether the player still runs and its session remains valid.
 	pub fn alive(&mut self) -> bool {
 		!self.done.load(Ordering::Acquire) && !self.session.is_invalid()
+	}
+
+	/// Cancels library reads and asks Spirc to stop before background resource teardown.
+	pub(crate) fn stop(&self) {
+		self.stop.send_replace(true);
+		let _ = self.spirc.shutdown();
 	}
 }
 
@@ -278,8 +320,7 @@ where
 
 impl Drop for Engine {
 	fn drop(&mut self) {
-		self.stop.send_replace(true);
-		let _ = self.spirc.shutdown();
+		self.stop();
 		// Give the shutdown a moment to tell Spotify the device left.
 		if let Some(runtime) = self.runtime.take() {
 			runtime.shutdown_timeout(Duration::from_millis(500));
@@ -454,6 +495,7 @@ struct Forward {
 	/// A track change seen in the last player event, to look up before telling the UI.
 	pending_track: Option<String>,
 	transitions:   Arc<Transitions>,
+	cluster:       SharedCluster,
 }
 
 impl Forward {
@@ -552,6 +594,8 @@ impl Forward {
 
 	async fn snapshot(&mut self, snap: StateSnapshot) {
 		if let Some(cluster) = snap.cluster {
+			let cluster = Arc::new(cluster);
+			self.cluster.send_replace(Some(cluster.clone()));
 			self.cluster(&cluster, snap.initial_cluster).await;
 			return;
 		}

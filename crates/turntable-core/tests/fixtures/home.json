@@ -1,0 +1,632 @@
+{
+  "data": {
+    "home": {
+      "__typename": "HomeResponsePayload",
+      "greeting": {
+        "transformedLabel": "Good morning",
+        "translatedBaseText": "Good morning"
+      },
+      "sectionContainer": {
+        "sections": {
+          "items": [
+            {
+              "data": {
+                "__typename": "HomeGenericSectionData",
+                "headerEntity": {
+                  "__typename": "UnknownType"
+                },
+                "subtitle": {
+                  "transformedLabel": "",
+                  "translatedBaseText": null
+                },
+                "title": {
+                  "transformedLabel": "Trending songs",
+                  "translatedBaseText": "Trending songs"
+                }
+              },
+              "sectionItems": {
+                "items": [
+                  {
+                    "content": {
+                      "__typename": "TrackResponseWrapper",
+                      "data": {
+                        "__typename": "Track",
+                        "albumOfTrack": {
+                          "coverArt": {
+                            "extractedColors": {
+                              "colorDark": {
+                                "hex": "#956E66",
+                                "isFallback": false
+                              }
+                            },
+                            "sources": [
+                              {
+                                "height": 300,
+                                "url": "https://i.scdn.co/image/ab67616d00001e02280adcd77284ed590f9a4d7b",
+                                "width": 300
+                              },
+                              {
+                                "height": 64,
+                                "url": "https://i.scdn.co/image/ab67616d00004851280adcd77284ed590f9a4d7b",
+                                "width": 64
+                              },
+                              {
+                                "height": 640,
+                                "url": "https://i.scdn.co/image/ab67616d0000b273280adcd77284ed590f9a4d7b",
+                                "width": 640
+                              }
+                            ]
+                          },
+                          "name": "pop it",
+                          "uri": "spotify:album:5VRKZGvWEQZRRYooVjKQkv"
+                        },
+                        "artists": {
+                          "items": [
+                            {
+                              "profile": {
+                                "name": "Gunna"
+                              },
+                              "uri": "spotify:artist:2hlmm7s2ICUX0LVIhVFlZQ"
+                            }
+                          ]
+                        },
+                        "contentRating": {
+                          "label": "EXPLICIT"
+                        },
+                        "name": "pop it",
+                        "uri": "spotify:track:3LVkyYg0PSo8XInTPKKhZM"
+                      }
+                    },
+                    "data": null,
+                    "uri": "spotify:track:3LVkyYg0PSo8XInTPKKhZM"
+                  },
+                  {
+                    "content": {
+                      "__typename": "TrackResponseWrapper",
+                      "data": {
+                        "__typename": "Track",
+                        "albumOfTrack": {
+                          "coverArt": {
+                            "extractedColors": {
+                              "colorDark": {
+                                "hex": "#9A6D4F",
+                                "isFallback": false
+                              }
+                            },
+                            "sources": [
+                              {
+                                "height": 300,
+                                "url": "https://i.scdn.co/image/ab67616d00001e0280028ec6e7fb8f21fb3ba153",
+                                "width": 300
+                              },
+                              {
+                                "height": 64,
+                                "url": "https://i.scdn.co/image/ab67616d0000485180028ec6e7fb8f21fb3ba153",
+                                "width": 64
+                              },
+                              {
+                                "height": 640,
+                                "url": "https://i.scdn.co/image/ab67616d0000b27380028ec6e7fb8f21fb3ba153",
+                                "width": 640
+                              }
+                            ]
+                          },
+                          "name": "Suzuki (from GTAVI: The Album)",
+                          "uri": "spotify:album:3hKreIX64Q2003E8m74Plp"
+                        },
+                        "artists": {
+                          "items": [
+                            {
+                              "profile": {
+                                "name": "Fuerza Regida"
+                              },
+                              "uri": "spotify:artist:0ys2OFYzWYB5hRDLCsBqxt"
+                            },
+                            {
+                              "profile": {
+                                "name": "Grand Theft Auto VI"
+                              },
+                              "uri": "spotify:artist:15o7qdDTBzs6xWRUYUtZc1"
+                            }
+                          ]
+                        },
+                        "contentRating": {
+                          "label": "EXPLICIT"
+                        },
+                        "name": "Suzuki (from GTAVI: The Album)",
+                        "uri": "spotify:track:6VDw2mGBIa4csypjOhS6JT"
+                      }
+                    },
+                    "data": null,
+                    "uri": "spotify:track:6VDw2mGBIa4csypjOhS6JT"
+                  }
+                ],
+                "pagingInfo": {
+                  "nextOffset": 0
+                },
+                "totalCount": 20
+              },
+              "uri": "spotify:section:0JQ5DB5E8N831KzFzsBBQ2"
+            },
+            {
+              "data": {
+                "__typename": "HomeGenericSectionData",
+                "headerEntity": {
+                  "__typename": "UnknownType"
+                },
+                "subtitle": {
+                  "transformedLabel": "",
+                  "translatedBaseText": null
+                },
+                "title": {
+                  "transformedLabel": "Popular artists",
+                  "translatedBaseText": "Popular artists"
+                }
+              },
+              "sectionItems": {
+                "items": [
+                  {
+                    "content": {
+                      "__typename": "ArtistResponseWrapper",
+                      "data": {
+                        "__typename": "Artist",
+                        "profile": {
+                          "name": "Kendrick Lamar"
+                        },
+                        "uri": "spotify:artist:2YZyLoL8N0Wb9xBt1NhZWg",
+                        "visuals": {
+                          "avatarImage": {
+                            "extractedColors": {
+                              "colorDark": {
+                                "hex": "#535353",
+                                "isFallback": true
+                              }
+                            },
+                            "sources": [
+                              {
+                                "height": 640,
+                                "url": "https://i.scdn.co/image/ab6761610000e5eb39ba6dcd4355c03de0b50918",
+                                "width": 640
+                              },
+                              {
+                                "height": 160,
+                                "url": "https://i.scdn.co/image/ab6761610000f17839ba6dcd4355c03de0b50918",
+                                "width": 160
+                              },
+                              {
+                                "height": 320,
+                                "url": "https://i.scdn.co/image/ab6761610000517439ba6dcd4355c03de0b50918",
+                                "width": 320
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "data": null,
+                    "uri": "spotify:artist:2YZyLoL8N0Wb9xBt1NhZWg"
+                  },
+                  {
+                    "content": {
+                      "__typename": "ArtistResponseWrapper",
+                      "data": {
+                        "__typename": "Artist",
+                        "profile": {
+                          "name": "Drake"
+                        },
+                        "uri": "spotify:artist:3TVXtAsR1Inumwj472S9r4",
+                        "visuals": {
+                          "avatarImage": {
+                            "extractedColors": {
+                              "colorDark": {
+                                "hex": "#535353",
+                                "isFallback": true
+                              }
+                            },
+                            "sources": [
+                              {
+                                "height": 640,
+                                "url": "https://i.scdn.co/image/ab6761610000e5eb4293385d324db8558179afd9",
+                                "width": 640
+                              },
+                              {
+                                "height": 160,
+                                "url": "https://i.scdn.co/image/ab6761610000f1784293385d324db8558179afd9",
+                                "width": 160
+                              },
+                              {
+                                "height": 320,
+                                "url": "https://i.scdn.co/image/ab676161000051744293385d324db8558179afd9",
+                                "width": 320
+                              }
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "data": null,
+                    "uri": "spotify:artist:3TVXtAsR1Inumwj472S9r4"
+                  }
+                ],
+                "pagingInfo": {
+                  "nextOffset": 10
+                },
+                "totalCount": 50
+              },
+              "uri": "spotify:section:0JQ5DAnM3wGh0gz1MXnu3C"
+            },
+            {
+              "data": {
+                "__typename": "HomeGenericSectionData",
+                "headerEntity": {
+                  "__typename": "UnknownType"
+                },
+                "subtitle": {
+                  "transformedLabel": "",
+                  "translatedBaseText": null
+                },
+                "title": {
+                  "transformedLabel": "Popular albums and singles",
+                  "translatedBaseText": "Popular albums and singles"
+                }
+              },
+              "sectionItems": {
+                "items": [
+                  {
+                    "content": {
+                      "__typename": "AlbumResponseWrapper",
+                      "data": {
+                        "__typename": "Album",
+                        "artists": {
+                          "items": [
+                            {
+                              "profile": {
+                                "name": "Morgan Wallen"
+                              },
+                              "uri": "spotify:artist:4oUHIQIBe0LHzYfvXNW4QM"
+                            }
+                          ]
+                        },
+                        "coverArt": {
+                          "extractedColors": {
+                            "colorDark": {
+                              "hex": "#827560",
+                              "isFallback": false
+                            }
+                          },
+                          "sources": [
+                            {
+                              "height": 300,
+                              "url": "https://i.scdn.co/image/ab67616d00001e0235ea219ce47813b5e2dc3745",
+                              "width": 300
+                            },
+                            {
+                              "height": 64,
+                              "url": "https://i.scdn.co/image/ab67616d0000485135ea219ce47813b5e2dc3745",
+                              "width": 64
+                            },
+                            {
+                              "height": 640,
+                              "url": "https://i.scdn.co/image/ab67616d0000b27335ea219ce47813b5e2dc3745",
+                              "width": 640
+                            }
+                          ]
+                        },
+                        "isPreRelease": false,
+                        "name": "I\u2019m The Problem",
+                        "playability": {
+                          "playable": true,
+                          "reason": "PLAYABLE"
+                        },
+                        "preReleaseEndDateTime": null,
+                        "albumType": "ALBUM",
+                        "uri": "spotify:album:5IZ8sY5FjtL9hloXpv0XbD"
+                      }
+                    },
+                    "data": null,
+                    "uri": "spotify:album:5IZ8sY5FjtL9hloXpv0XbD"
+                  },
+                  {
+                    "content": {
+                      "__typename": "AlbumResponseWrapper",
+                      "data": {
+                        "__typename": "Album",
+                        "artists": {
+                          "items": [
+                            {
+                              "profile": {
+                                "name": "Bad Bunny"
+                              },
+                              "uri": "spotify:artist:4q3ewBCX7sLwd24euuV69X"
+                            }
+                          ]
+                        },
+                        "coverArt": {
+                          "extractedColors": {
+                            "colorDark": {
+                              "hex": "#405820",
+                              "isFallback": false
+                            }
+                          },
+                          "sources": [
+                            {
+                              "height": 300,
+                              "url": "https://i.scdn.co/image/ab67616d00001e02bbd45c8d36e0e045ef640411",
+                              "width": 300
+                            },
+                            {
+                              "height": 64,
+                              "url": "https://i.scdn.co/image/ab67616d00004851bbd45c8d36e0e045ef640411",
+                              "width": 64
+                            },
+                            {
+                              "height": 640,
+                              "url": "https://i.scdn.co/image/ab67616d0000b273bbd45c8d36e0e045ef640411",
+                              "width": 640
+                            }
+                          ]
+                        },
+                        "isPreRelease": false,
+                        "name": "DeB\u00cd TiRAR M\u00e1S FOToS",
+                        "playability": {
+                          "playable": true,
+                          "reason": "PLAYABLE"
+                        },
+                        "preReleaseEndDateTime": null,
+                        "albumType": "ALBUM",
+                        "uri": "spotify:album:5K79FLRUCSysQnVESLcTdb"
+                      }
+                    },
+                    "data": null,
+                    "uri": "spotify:album:5K79FLRUCSysQnVESLcTdb"
+                  }
+                ],
+                "pagingInfo": {
+                  "nextOffset": 10
+                },
+                "totalCount": 30
+              },
+              "uri": "spotify:section:0JQ5DAnM3wGh0gz1MXnu3B"
+            },
+            {
+              "data": {
+                "__typename": "HomeGenericSectionData",
+                "headerEntity": {
+                  "__typename": "UnknownType"
+                },
+                "subtitle": {
+                  "transformedLabel": "",
+                  "translatedBaseText": null
+                },
+                "title": {
+                  "transformedLabel": "Popular radio",
+                  "translatedBaseText": "Popular radio"
+                }
+              },
+              "sectionItems": {
+                "items": [
+                  {
+                    "content": {
+                      "__typename": "PlaylistResponseWrapper",
+                      "data": {
+                        "__typename": "Playlist",
+                        "content": {
+                          "__typename": "PlaylistItemsPage",
+                          "totalCount": 50
+                        },
+                        "description": "With Bailey Zimmerman, Tucker Wetmore, Jordan Davis and more",
+                        "format": "inspiredby-mix",
+                        "images": {
+                          "items": [
+                            {
+                              "extractedColors": {
+                                "colorDark": {
+                                  "hex": "#6F74A4",
+                                  "isFallback": false
+                                }
+                              },
+                              "sources": [
+                                {
+                                  "height": null,
+                                  "url": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio/artist/4oUHIQIBe0LHzYfvXNW4QM/en",
+                                  "width": null
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        "name": "Morgan Wallen Radio",
+                        "ownerV2": {
+                          "data": {
+                            "__typename": "User",
+                            "name": "Spotify",
+                            "uri": "spotify:user:spotify"
+                          }
+                        },
+                        "uri": "spotify:playlist:37i9dQZF1E4nRfrCEsvZkU"
+                      }
+                    },
+                    "data": null,
+                    "uri": "spotify:playlist:37i9dQZF1E4nRfrCEsvZkU"
+                  },
+                  {
+                    "content": {
+                      "__typename": "PlaylistResponseWrapper",
+                      "data": {
+                        "__typename": "Playlist",
+                        "content": {
+                          "__typename": "PlaylistItemsPage",
+                          "totalCount": 50
+                        },
+                        "description": "With Tyler Childers, Chris Stapleton, Dylan Gossett and more",
+                        "format": "inspiredby-mix",
+                        "images": {
+                          "items": [
+                            {
+                              "extractedColors": {
+                                "colorDark": {
+                                  "hex": "#A16387",
+                                  "isFallback": false
+                                }
+                              },
+                              "sources": [
+                                {
+                                  "height": null,
+                                  "url": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio/artist/40ZNYROS4zLfyyBSs2PGe2/en",
+                                  "width": null
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        "name": "Zach Bryan Radio",
+                        "ownerV2": {
+                          "data": {
+                            "__typename": "User",
+                            "name": "Spotify",
+                            "uri": "spotify:user:spotify"
+                          }
+                        },
+                        "uri": "spotify:playlist:37i9dQZF1E4sD262twcXeU"
+                      }
+                    },
+                    "data": null,
+                    "uri": "spotify:playlist:37i9dQZF1E4sD262twcXeU"
+                  }
+                ],
+                "pagingInfo": {
+                  "nextOffset": 10
+                },
+                "totalCount": 50
+              },
+              "uri": "spotify:section:0JQ5DAnM3wGh0gz1MXnu4h"
+            },
+            {
+              "data": {
+                "__typename": "HomeGenericSectionData",
+                "headerEntity": {
+                  "__typename": "UnknownType"
+                },
+                "subtitle": {
+                  "transformedLabel": "",
+                  "translatedBaseText": null
+                },
+                "title": {
+                  "transformedLabel": "Featured Charts",
+                  "translatedBaseText": "Featured Charts"
+                }
+              },
+              "sectionItems": {
+                "items": [
+                  {
+                    "content": {
+                      "__typename": "PlaylistResponseWrapper",
+                      "data": {
+                        "__typename": "Playlist",
+                        "content": {
+                          "__typename": "PlaylistItemsPage",
+                          "totalCount": 50
+                        },
+                        "description": "Your weekly update of the most played tracks right now - Global.",
+                        "format": "chart",
+                        "images": {
+                          "items": [
+                            {
+                              "extractedColors": {
+                                "colorDark": {
+                                  "hex": "#703090",
+                                  "isFallback": false
+                                }
+                              },
+                              "sources": [
+                                {
+                                  "height": null,
+                                  "url": "https://charts-images.scdn.co/assets/locale_en/regional/weekly/region_global_default.jpg",
+                                  "width": null
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        "name": "Top Songs - Global",
+                        "ownerV2": {
+                          "data": {
+                            "__typename": "User",
+                            "name": "Spotify",
+                            "uri": "spotify:user:spotify"
+                          }
+                        },
+                        "uri": "spotify:playlist:37i9dQZEVXbNG2KDcFcKOF"
+                      }
+                    },
+                    "data": null,
+                    "uri": "spotify:playlist:37i9dQZEVXbNG2KDcFcKOF"
+                  },
+                  {
+                    "content": {
+                      "__typename": "PlaylistResponseWrapper",
+                      "data": {
+                        "__typename": "Playlist",
+                        "content": {
+                          "__typename": "PlaylistItemsPage",
+                          "totalCount": 50
+                        },
+                        "description": "Your weekly update of the most played tracks right now - USA.",
+                        "format": "chart",
+                        "images": {
+                          "items": [
+                            {
+                              "extractedColors": {
+                                "colorDark": {
+                                  "hex": "#E81830",
+                                  "isFallback": false
+                                }
+                              },
+                              "sources": [
+                                {
+                                  "height": null,
+                                  "url": "https://charts-images.scdn.co/assets/locale_en/regional/weekly/region_us_default.jpg",
+                                  "width": null
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        "name": "Top Songs - USA",
+                        "ownerV2": {
+                          "data": {
+                            "__typename": "User",
+                            "name": "Spotify",
+                            "uri": "spotify:user:spotify"
+                          }
+                        },
+                        "uri": "spotify:playlist:37i9dQZEVXbLp5XoPON0wI"
+                      }
+                    },
+                    "data": null,
+                    "uri": "spotify:playlist:37i9dQZEVXbLp5XoPON0wI"
+                  }
+                ],
+                "pagingInfo": {
+                  "nextOffset": null
+                },
+                "totalCount": 4
+              },
+              "uri": "spotify:section:0JQ5DAzQHECxDlYNI6xD1g"
+            }
+          ],
+          "totalCount": 5
+        },
+        "uri": "spotify:page:0JQ5DAozXW0GUBAKjHsifF"
+      },
+      "homeChips": []
+    }
+  },
+  "extensions": {
+    "responseIds": {
+      "/home": {
+        "continuum": "990235ec-7dba-326b-68bc-ded049aa5700"
+      }
+    }
+  }
+}

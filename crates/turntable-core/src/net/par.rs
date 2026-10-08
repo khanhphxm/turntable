@@ -14,6 +14,8 @@ use std::{
 	thread,
 };
 
+use futures_util::{Stream, StreamExt as _, stream};
+
 use crate::spotify;
 
 fn spawn_in<'scope, 'env, T: Send + 'scope>(
@@ -71,6 +73,27 @@ pub fn map<T: Send, R: Send>(items: Vec<T>, width: usize, work: impl Fn(T) -> R 
 	results.into_iter().filter_map(|slot| slot.into_inner().unwrap_or_else(PoisonError::into_inner)).collect()
 }
 
+/// Independent asynchronous requests, bounded by `width`; completion order is unspecified.
+/// Consumers that need source order resolve keyed metadata back against the original list.
+pub fn async_map<I, F, Fut>(items: I, width: usize, work: F) -> impl Stream<Item = Fut::Output>
+where
+	I: IntoIterator,
+	F: FnMut(I::Item) -> Fut,
+	Fut: Future,
+{
+	stream::iter(items.into_iter().map(work)).buffer_unordered(width.max(1))
+}
+
+/// Idle transactional work yields as soon as a foreground request arrives.
+/// Callers must not publish partial mutations before the future finishes.
+pub async fn interruptible<F: Future>(mut urgent: tokio::sync::watch::Receiver<()>, work: F) -> Option<F::Output> {
+	tokio::select! {
+		biased;
+		_ = urgent.changed() => None,
+		result = work => Some(result),
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use std::time::Duration;
@@ -107,5 +130,53 @@ mod tests {
 		assert_eq!(out, (0..12).map(|i| i * 10).collect::<Vec<_>>());
 		assert!(peak.load(Ordering::SeqCst) <= 3, "width 3");
 		assert!(peak.load(Ordering::SeqCst) >= 2, "and really in parallel");
+	}
+
+	#[test]
+	fn async_map_is_bounded_and_preserves_every_result() -> Result<(), Box<dyn std::error::Error>> {
+		use futures_util::TryStreamExt as _;
+		let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+		let (now, peak) = (AtomicUsize::new(0), AtomicUsize::new(0));
+		let (now, peak) = (&now, &peak);
+		let mut out: Vec<u64> = runtime.block_on(
+			async_map(0..12_u64, 4, |i| async move {
+				let running = now.fetch_add(1, Ordering::SeqCst) + 1;
+				peak.fetch_max(running, Ordering::SeqCst);
+				tokio::time::sleep(Duration::from_millis(12 - i)).await;
+				now.fetch_sub(1, Ordering::SeqCst);
+				Ok::<_, std::io::Error>(i)
+			})
+			.try_collect(),
+		)?;
+		out.sort_unstable();
+		assert_eq!(out, (0..12_u64).collect::<Vec<_>>());
+		assert_eq!(peak.load(Ordering::SeqCst), 4);
+		assert_eq!(now.load(Ordering::SeqCst), 0);
+		Ok(())
+	}
+
+	#[test]
+	fn foreground_interrupts_idle_work_before_it_can_commit() -> Result<(), Box<dyn std::error::Error>> {
+		let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+		let (urgent, receiver) = tokio::sync::watch::channel(());
+		let polled = AtomicUsize::new(0);
+		urgent.send_replace(());
+		let result = runtime.block_on(interruptible(receiver.clone(), async {
+			polled.fetch_add(1, Ordering::SeqCst);
+			std::future::pending::<()>().await;
+		}));
+		assert_eq!(result, None);
+		assert_eq!(polled.load(Ordering::SeqCst), 0);
+		let mut receiver = receiver;
+		let _ = receiver.borrow_and_update();
+		assert_eq!(runtime.block_on(interruptible(receiver.clone(), std::future::ready(42))), Some(42));
+		let (result, ()) = runtime.block_on(async {
+			tokio::join!(interruptible(receiver, std::future::pending::<()>()), async {
+				tokio::task::yield_now().await;
+				urgent.send_replace(());
+			})
+		});
+		assert_eq!(result, None);
+		Ok(())
 	}
 }

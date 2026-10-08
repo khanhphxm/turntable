@@ -7,22 +7,34 @@ mod live;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::Method;
-use librespot_core::{Session, SpotifyId};
-use librespot_protocol::playlist4_external::{
-	Add, ChangeInfo, Delta, Item, ItemAttributes, ListAttributes, ListAttributesPartialState, ListChanges, Mov, Op, Rem,
-	SelectedListContent, UpdateListAttributes, op::Kind,
+use librespot_core::{Session, SpotifyId, SpotifyUri};
+use librespot_protocol::{
+	playlist_permission::{Permission, PermissionLevel, SetPermissionLevelRequest},
+	playlist4_external::{
+		Add, ChangeInfo, Delta, Item, ItemAttributes, ListAttributes, ListAttributesPartialState, ListChanges, Mov, Op, Rem,
+		SelectedListContent, UpdateListAttributes, op::Kind,
+	},
 };
 use protobuf::{Message, MessageField};
 use rand::RngCore;
 
 use super::{Reader, network};
-use crate::spotify::{self, Playlist, PlaylistChanges};
+use crate::{
+	net::trace,
+	spotify::{self, Playlist, PlaylistChanges},
+};
 
 #[cfg(test)]
 static REQUESTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn item(uri: &str) -> Item {
 	Item { uri: Some(uri.to_owned()), ..Default::default() }
+}
+
+/// Playlist4 stores added timestamps in milliseconds, unlike collection Unix seconds.
+pub(super) fn row_attributes(item: &Item) -> (&str, Option<i64>, Option<&str>) {
+	let attributes = item.attributes.get_or_default();
+	(item.uri(), attributes.timestamp.map(|timestamp| timestamp.div_euclid(1000)), attributes.added_by.as_deref())
 }
 
 fn append(uris: &[String]) -> Op {
@@ -72,6 +84,59 @@ fn attributes(changes: &PlaylistChanges) -> Op {
 	}
 }
 
+fn visibility(public: bool) -> SetPermissionLevelRequest {
+	SetPermissionLevelRequest {
+		permission_level: Some(if public { PermissionLevel::VIEWER } else { PermissionLevel::BLOCKED }.into()),
+		..Default::default()
+	}
+}
+
+/// Playlist privacy is a permission, not the rootlist's separate profile-publication flag.
+pub(super) async fn public(session: &Session, id: &str) -> Result<Option<bool>, librespot_core::Error> {
+	let endpoint = format!("/playlist-permission/v1/playlist/{id}/permission/base");
+	let span = trace::start();
+	let bytes = session.spclient().request(&Method::GET, &endpoint, None, None).await?;
+	if trace::enabled() {
+		span.done("session", "GET", &format!("https://spclient.spotify.com{endpoint}"), trace::Reply {
+			status: 200,
+			bytes: bytes.len(),
+			..trace::Reply::default()
+		});
+	}
+	let permission = Permission::parse_from_bytes(&bytes)?;
+	Ok(match permission.permission_level() {
+		PermissionLevel::VIEWER | PermissionLevel::CONTRIBUTOR => Some(true),
+		PermissionLevel::BLOCKED => Some(false),
+		PermissionLevel::UNKNOWN | PermissionLevel::MADE_FOR => None,
+	})
+}
+
+async fn set_public(session: &Session, id: &str, public: bool) -> Result<(), librespot_core::Error> {
+	let endpoint = format!("/playlist-permission/v1/playlist/{id}/permission/base/level");
+	let span = trace::start();
+	let bytes = session.spclient().request_with_protobuf(&Method::POST, &endpoint, None, &visibility(public)).await?;
+	if trace::enabled() {
+		span.done("session", "POST", &format!("https://spclient.spotify.com{endpoint}"), trace::Reply {
+			status: 200,
+			bytes: bytes.len(),
+			..trace::Reply::default()
+		});
+	}
+	Ok(())
+}
+
+pub(super) fn same_playlist(left: &str, right: &str) -> bool {
+	matches!((SpotifyUri::from_uri(left), SpotifyUri::from_uri(right)),
+		(Ok(SpotifyUri::Playlist { id: left, .. }), Ok(SpotifyUri::Playlist { id: right, .. })) if left == right)
+}
+
+fn require_owner(session: &Session, playlist: &SelectedListContent) -> Result<(), librespot_core::Error> {
+	if playlist.owner_username() != session.username() {
+		return Err(librespot_core::Error::permission_denied("Only the playlist owner can edit these details"));
+	}
+	Ok(())
+}
+
 fn changes(username: &str, revision: &[u8], ops: Vec<Op>) -> ListChanges {
 	ListChanges {
 		base_revision: Some(revision.to_vec()),
@@ -101,24 +166,69 @@ pub(super) async fn fetch(session: &Session, id: &str, offset: u32, length: u32)
 	let endpoint = format!("/playlist/v2/playlist/{id}?from={offset}&length={length}");
 	#[cfg(test)]
 	REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+	let span = trace::start();
 	let bytes = session.spclient().request(&Method::GET, &endpoint, None, None).await?;
+	if trace::enabled() {
+		span.done("session", "GET", &format!("https://spclient.spotify.com{endpoint}"), trace::Reply {
+			status: 200,
+			bytes: bytes.len(),
+			..trace::Reply::default()
+		});
+	}
 	Ok(SelectedListContent::parse_from_bytes(&bytes)?)
 }
 
-async fn post(session: &Session, endpoint: &str, revision: &[u8], ops: Vec<Op>) -> Result<(), librespot_core::Error> {
+pub(super) async fn post(session: &Session, endpoint: &str, revision: &[u8], ops: Vec<Op>) -> Result<(), librespot_core::Error> {
 	let body = changes(&session.username(), revision, ops);
 	#[cfg(test)]
 	REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 	// Sync/resync flags describe the returned view, not whether the write applied.
-	session.spclient().request_with_protobuf(&Method::POST, endpoint, None, &body).await?;
+	let span = trace::start();
+	let bytes = session.spclient().request_with_protobuf(&Method::POST, endpoint, None, &body).await?;
+	if trace::enabled() {
+		span.done("session", "POST", &format!("https://spclient.spotify.com{endpoint}"), trace::Reply {
+			status: 200,
+			bytes: bytes.len(),
+			..trace::Reply::default()
+		});
+	}
 	Ok(())
 }
 
-async fn root(session: &Session, offset: u32, length: u32) -> Result<SelectedListContent, librespot_core::Error> {
+pub(super) async fn root(session: &Session, offset: u32, length: u32) -> Result<SelectedListContent, librespot_core::Error> {
 	#[cfg(test)]
 	REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+	let span = trace::start();
 	let bytes = session.spclient().get_rootlist(usize::try_from(offset)?, Some(usize::try_from(length)?)).await?;
+	span.done("session", "GET", "https://spclient.spotify.com/playlist/v2/user/me/rootlist", trace::Reply {
+		status: 200,
+		bytes: bytes.len(),
+		..trace::Reply::default()
+	});
 	Ok(SelectedListContent::parse_from_bytes(&bytes)?)
+}
+
+/// The rootlist's raw indices include folders; edit the matching occurrence, not a flattened row.
+async fn change_root(session: &Session, uri: &str, operation: impl Fn(i32, &str) -> Op) -> Result<bool, librespot_core::Error> {
+	let mut offset = 0;
+	loop {
+		let current = root(session, offset, 120).await?;
+		let contents = current.contents.get_or_default();
+		if let Some((index, entry)) = contents.items.iter().enumerate().find(|(_, entry)| same_playlist(entry.uri(), uri)) {
+			let index = i32::try_from(index)? + contents.pos();
+			let endpoint = format!("/playlist/v2/user/{}/rootlist/changes", session.username());
+			post(session, &endpoint, current.revision(), vec![operation(index, entry.uri())]).await?;
+			return Ok(true);
+		}
+		if !contents.truncated() {
+			return Ok(false);
+		}
+		let next = u32::try_from(contents.pos())? + u32::try_from(contents.items.len())?;
+		if next <= offset {
+			return Err(librespot_core::Error::failed_precondition("Rootlist pagination made no progress"));
+		}
+		offset = next;
+	}
 }
 
 fn position(position: u32) -> spotify::Result<i32> {
@@ -140,23 +250,8 @@ impl Reader {
 					};
 					return post(session, &endpoint, current.revision(), vec![op]).await;
 				}
-				let mut offset = 0;
-				loop {
-					let current = root(session, offset, 120).await?;
-					let contents = current.contents.get_or_default();
-					if let Some(index) = contents.items.iter().position(|item| item.uri() == uri) {
-						let index = i32::try_from(index)? + contents.pos();
-						return post(session, &endpoint, current.revision(), vec![remove(index, uri)]).await;
-					}
-					if !contents.truncated() {
-						return Ok(());
-					}
-					let next = u32::try_from(contents.pos())? + u32::try_from(contents.items.len())?;
-					if next <= offset {
-						return Err(librespot_core::Error::failed_precondition("Rootlist pagination made no progress"));
-					}
-					offset = next;
-				}
+				change_root(session, uri, remove).await?;
+				Ok(())
 			})
 			.map_err(network)?;
 		self.roots = None;
@@ -177,6 +272,7 @@ impl Reader {
 					ops.push(append(uris));
 				}
 				post(self.shared.session(), &format!("/playlist/v2/playlist/{id}/changes"), b"\0\0\0\0root", ops).await?;
+				set_public(self.shared.session(), &id, false).await?;
 				let root = root(self.shared.session(), 0, 0).await?;
 				let mut entry = item(&uri);
 				entry.attributes = MessageField::some(ItemAttributes { public: Some(false), ..Default::default() });
@@ -195,20 +291,53 @@ impl Reader {
 			})
 			.map_err(network)?;
 		self.roots = None;
-		Ok(super::playlist(
+		let mut created = super::playlist(
 			&id,
 			&self.shared.session().username(),
 			&ListAttributes { name: Some(name.to_owned()), ..Default::default() },
 			i32::try_from(uris.len()).unwrap_or(i32::MAX),
-		))
+		);
+		created.public = Some(false);
+		Ok(created)
 	}
 
 	pub(in crate::library) fn rename_playlist(&mut self, id: &str, edits: &PlaylistChanges) -> spotify::Result<()> {
 		self.shared
 			.block_on(async {
-				let current = fetch(self.shared.session(), id, 0, 0).await?;
-				post(self.shared.session(), &format!("/playlist/v2/playlist/{id}/changes"), current.revision(), vec![attributes(edits)])
-					.await
+				let session = self.shared.session();
+				let current = fetch(session, id, 0, 0).await?;
+				require_owner(session, &current)?;
+				if edits.name.is_some() || edits.description.is_some() {
+					post(session, &format!("/playlist/v2/playlist/{id}/changes"), current.revision(), vec![attributes(edits)]).await?;
+				}
+				if let Some(public) = edits.public {
+					set_public(session, id, public).await?;
+				}
+				Ok(())
+			})
+			.map_err(network)?;
+		self.roots = None;
+		Ok(())
+	}
+
+	pub(in crate::library) fn set_collaborative(&mut self, id: &str, collaborative: bool) -> spotify::Result<()> {
+		self.shared
+			.block_on(async {
+				let session = self.shared.session();
+				let current = fetch(session, id, 0, 0).await?;
+				require_owner(session, &current)?;
+				let op = Op {
+					kind: Some(Kind::UPDATE_LIST_ATTRIBUTES.into()),
+					update_list_attributes: MessageField::some(UpdateListAttributes {
+						new_attributes: MessageField::some(ListAttributesPartialState {
+							values: MessageField::some(ListAttributes { collaborative: Some(collaborative), ..Default::default() }),
+							..Default::default()
+						}),
+						..Default::default()
+					}),
+					..Default::default()
+				};
+				post(session, &format!("/playlist/v2/playlist/{id}/changes"), current.revision(), vec![op]).await
 			})
 			.map_err(network)?;
 		self.roots = None;
@@ -297,6 +426,18 @@ mod tests {
 		assert_eq!(values.name(), "Mix");
 		assert!(!values.has_description());
 		assert!(position(u32::MAX).is_err());
+	}
+
+	#[test]
+	fn public_and_private_use_base_permissions_not_rootlist_publication() -> Result<(), protobuf::Error> {
+		for public in [false, true] {
+			let decoded = SetPermissionLevelRequest::parse_from_bytes(&visibility(public).write_to_bytes()?)?;
+			assert_eq!(decoded.permission_level(), if public { PermissionLevel::VIEWER } else { PermissionLevel::BLOCKED });
+			assert!(decoded.has_permission_level());
+		}
+		assert!(same_playlist("spotify:user:alice:playlist:0000000000000000000001", "spotify:playlist:0000000000000000000001"));
+		assert!(!same_playlist("spotify:start-group:0000000000000000000001", "spotify:playlist:0000000000000000000001"));
+		Ok(())
 	}
 
 	#[test]

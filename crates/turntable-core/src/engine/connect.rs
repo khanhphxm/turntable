@@ -6,8 +6,11 @@ use librespot_protocol::{
 	devices::DeviceType,
 };
 
-use super::{ClusterPlayback, ConnectState, Forward, Incoming, LastPlayback, Options, Position, Repeat, Status};
-use crate::spotify::Device;
+use super::{ClusterPlayback, ConnectState, Forward, Incoming, LastPlayback, Options, Position, Repeat, SessionReader, Status};
+use crate::{
+	net::trace,
+	spotify::{Device, PlayerCommand, RepeatMode},
+};
 
 impl Forward {
 	pub(super) async fn cluster(&mut self, cluster: &Cluster, initial: bool) {
@@ -58,19 +61,90 @@ impl Forward {
 	}
 
 	pub(super) async fn transfer_device(&mut self, device: &str, play: bool) {
-		let device = if device.is_empty() { self.session.device_id() } else { device };
-		let request = librespot_core::spclient::TransferRequest {
-			transfer_options: librespot_core::dealer::protocol::TransferOptions {
-				restore_paused: play.then(|| "resume".to_owned()),
-				..Default::default()
-			},
-		};
-		if let Err(error) =
-			super::network_timeout(super::NETWORK_TIMEOUT, self.session.spclient().transfer(device, device, Some(&request))).await
-		{
+		if let Err(error) = super::network_timeout(super::NETWORK_TIMEOUT, transfer(&self.session, device, play)).await {
 			(self.deliver)(Incoming::CommandFailed(format!("Couldn't transfer playback: {error}")));
 		}
 	}
+}
+
+impl SessionReader {
+	pub(crate) fn devices(&self) -> Result<Vec<Device>, librespot_core::Error> {
+		self.cluster()
+			.map(|cluster| devices_of(&cluster))
+			.ok_or_else(|| librespot_core::Error::unavailable("Spotify Connect state has not arrived yet"))
+	}
+
+	pub(crate) fn transfer(&self, device: &str, play: bool) -> Result<(), librespot_core::Error> {
+		self.block_on(transfer(self.session(), device, play))
+	}
+
+	pub(crate) fn control(&self, device: &str, command: PlayerCommand) -> Result<(), librespot_core::Error> {
+		let (method, endpoint, body) = command_request(self.session().device_id(), device, command);
+		let body = serde_json::to_vec(&body)?;
+		self.block_on(async {
+			let mut headers = http::HeaderMap::new();
+			headers.insert(http::header::CONTENT_TYPE, http::HeaderValue::from_static("application/json"));
+			let span = trace::start();
+			let bytes = self.session().spclient().request(&method, &endpoint, Some(headers), Some(&body)).await?;
+			if trace::enabled() {
+				span.done("session", method.as_str(), &format!("https://spclient.spotify.com{endpoint}"), trace::Reply {
+					status: 200,
+					bytes: bytes.len(),
+					..trace::Reply::default()
+				});
+			}
+			Ok(())
+		})
+	}
+}
+
+async fn transfer(session: &librespot_core::Session, device: &str, play: bool) -> Result<(), librespot_core::Error> {
+	let device = if device.is_empty() { session.device_id() } else { device };
+	let request = librespot_core::spclient::TransferRequest {
+		transfer_options: librespot_core::dealer::protocol::TransferOptions {
+			restore_paused: play.then(|| "resume".to_owned()),
+			..Default::default()
+		},
+	};
+	session.spclient().transfer(device, device, Some(&request)).await?;
+	Ok(())
+}
+
+/// Connect-state command bodies are delivered to the target device over Dealer.
+/// Volume uses its separate PUT endpoint and the Connect 0..65535 scale.
+fn command_request(from: &str, to: &str, command: PlayerCommand) -> (http::Method, String, serde_json::Value) {
+	let mut command_body = serde_json::Map::new();
+	let endpoint = match command {
+		PlayerCommand::Volume(percent) => {
+			return (
+				http::Method::PUT,
+				format!("/connect-state/v1/connect/volume/from/{from}/to/{to}"),
+				serde_json::json!({"volume": super::to_u16(percent)}),
+			);
+		},
+		PlayerCommand::Resume => "resume",
+		PlayerCommand::Pause => "pause",
+		PlayerCommand::Next => "skip_next",
+		PlayerCommand::Previous => "skip_prev",
+		PlayerCommand::Seek(position) => {
+			let position = u32::try_from(position).unwrap_or(u32::MAX);
+			command_body.insert("value".into(), position.into());
+			command_body.insert("position".into(), position.into());
+			"seek_to"
+		},
+		PlayerCommand::Shuffle(enabled) => {
+			command_body.insert("value".into(), enabled.into());
+			"set_shuffling_context"
+		},
+		PlayerCommand::Repeat(mode) => {
+			command_body.insert("repeating_context".into(), (mode == RepeatMode::Context).into());
+			command_body.insert("repeating_track".into(), (mode == RepeatMode::Track).into());
+			"set_options"
+		},
+	};
+	command_body.insert("endpoint".into(), endpoint.into());
+	command_body.insert("logging_params".into(), serde_json::json!({"command_id": format!("{:032x}", rand::random::<u128>())}));
+	(http::Method::POST, format!("/connect-state/v1/player/command/from/{from}/to/{to}"), serde_json::json!({"command": command_body}))
 }
 
 fn devices_of(cluster: &Cluster) -> Vec<Device> {
@@ -84,7 +158,7 @@ fn devices_of(cluster: &Cluster) -> Vec<Device> {
 	devices
 }
 
-fn device_of(id: &str, info: &DeviceInfo, active_id: &str) -> Device {
+pub(crate) fn device_of(id: &str, info: &DeviceInfo, active_id: &str) -> Device {
 	let volume = u16::try_from(info.volume).unwrap_or(u16::MAX);
 	let volume_capable = !info.capabilities.disable_volume && info.capabilities.volume_steps > 0;
 	let kind = match info.device_type.enum_value_or_default() {
@@ -138,5 +212,41 @@ mod tests {
 		assert!(device.is_active);
 		assert_eq!(device.volume_percent, Some(50));
 		assert_eq!(device.supports_volume, Some(true));
+	}
+
+	#[test]
+	fn every_remote_control_uses_connect_state_and_matches_dealer_wire_commands() -> Result<(), serde_json::Error> {
+		use librespot_core::dealer::protocol::Request;
+		for command in [
+			PlayerCommand::Resume,
+			PlayerCommand::Pause,
+			PlayerCommand::Next,
+			PlayerCommand::Previous,
+			PlayerCommand::Seek(u64::MAX),
+			PlayerCommand::Shuffle(true),
+			PlayerCommand::Repeat(RepeatMode::Off),
+			PlayerCommand::Repeat(RepeatMode::Context),
+			PlayerCommand::Repeat(RepeatMode::Track),
+		] {
+			let (method, endpoint, body) = command_request("local", "phone", command);
+			assert_eq!(method, http::Method::POST);
+			assert_eq!(endpoint, "/connect-state/v1/player/command/from/local/to/phone");
+			let mut received = body.clone();
+			received["message_id"] = 1.into();
+			received["sent_by_device_id"] = "local".into();
+			let _: Request = serde_json::from_value(received)?;
+			if let PlayerCommand::Repeat(mode) = command {
+				assert_eq!(body["command"]["repeating_context"], mode == RepeatMode::Context);
+				assert_eq!(body["command"]["repeating_track"], mode == RepeatMode::Track);
+			}
+			if matches!(command, PlayerCommand::Seek(_)) {
+				assert_eq!(body["command"]["value"], u32::MAX);
+			}
+		}
+		let (method, endpoint, body) = command_request("local", "phone", PlayerCommand::Volume(255));
+		assert_eq!(method, http::Method::PUT);
+		assert_eq!(endpoint, "/connect-state/v1/connect/volume/from/local/to/phone");
+		assert_eq!(body["volume"], 65_535);
+		Ok(())
 	}
 }

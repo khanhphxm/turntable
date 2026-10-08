@@ -14,6 +14,13 @@ impl State {
 	/// Handles every UI message once; action helpers keep their state and effects together.
 	#[expect(clippy::too_many_lines, reason = "one exhaustive arm per UI message; nontrivial actions are delegated to small helpers")]
 	pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
+		if let Msg::Prefetch(route) = msg {
+			return if route != self.library.route && !matches!(route, Route::Search | Route::Library | Route::Folder(_)) {
+				vec![Effect::Library(library::Request::Prefetch(route))]
+			} else {
+				Vec::new()
+			};
+		}
 		self.close_menus(&msg);
 		if let Some(effects) = self.remote_update(&msg) {
 			return effects;
@@ -55,6 +62,9 @@ impl State {
 			Msg::LibraryMenu => self.library_menu = !self.library_menu,
 			Msg::ClearLibraryFilter => self.clear_library_filter(),
 			Msg::ToggleShelf(id) => self.toggle_shelf(id),
+			Msg::HomeFacet(facet) => effects.push(Effect::Library(self.library.select_home_facet(facet))),
+			Msg::HomeSectionMore(uri) => effects.push(Effect::Library(self.library.open_home_section(uri))),
+			Msg::CloseHomeSection => self.library.close_home_section(),
 			Msg::OpenUrl(url) => effects.push(Effect::OpenUrl(url)),
 			Msg::EqEnabled(on) => {
 				self.eq.enabled = on;
@@ -64,6 +74,19 @@ impl State {
 			Msg::EqMenu => self.eq_menu = !self.eq_menu,
 			Msg::EqPreset(name) => self.eq_preset(name, &mut effects),
 			Msg::Navigate(route) => self.navigate(route, &mut effects),
+			Msg::Prefetch(_) => {},
+			Msg::RememberSearch(tile) => {
+				self.remember_search(tile);
+				effects.push(Effect::SaveRecentSearches);
+			},
+			Msg::ForgetSearch(route) => {
+				self.forget_search(&route);
+				effects.push(Effect::SaveRecentSearches);
+			},
+			Msg::ClearRecentSearches => {
+				self.recent_searches.clear();
+				effects.push(Effect::SaveRecentSearches);
+			},
 			Msg::Select(i) => self.library.select(i),
 			Msg::MoveSelection(delta) => self.library.move_selection(delta),
 			Msg::PlayRow(i) => self.play_row(i, &mut effects),
@@ -75,6 +98,32 @@ impl State {
 			Msg::ToggleFollow => self.toggle_follow(&mut effects),
 			Msg::FollowArtist(id, name) => self.follow_artist(&id, name, &mut effects),
 			Msg::CreatePlaylist => effects.push(Effect::Library(library::Request::CreatePlaylist(self.new_playlist_name(), Vec::new()))),
+			Msg::CreateFolder => effects.push(Effect::Library(library::Request::CreateFolder)),
+			Msg::StartRenameFolder(id) => self.start_rename_folder(id),
+			Msg::RenameFolder(id, name) => {
+				if let Some(name) = nonempty_text(name) {
+					self.dialog = None;
+					self.focus = None;
+					effects.push(Effect::Library(library::Request::RenameFolder(id, name)));
+				}
+			},
+			Msg::DeleteFolder(id) => effects.push(Effect::Library(library::Request::DeleteFolder(id))),
+			Msg::MoveToFolder { uri, folder } => effects.push(Effect::Library(library::Request::MoveToFolder { uri, folder })),
+			Msg::ToggleFolder(id) => effects.extend(self.library.toggle_folder(id).map(Effect::Library)),
+			Msg::EditPlaylist(id) => effects.extend(self.edit_playlist(id).map(Effect::Library)),
+			Msg::DeletePlaylist(id) => self.set_library_saved(format!("spotify:playlist:{id}"), false, &mut effects),
+			Msg::SetPlaylistPublic(id, public) => effects.extend(self.set_playlist_public(id, public).map(Effect::Library)),
+			Msg::SetCollaborative(id, collaborative) => {
+				effects.extend(self.set_playlist_collaborative(id, collaborative).map(Effect::Library));
+			},
+			Msg::SetSaved { uri, saved } => self.set_library_saved(uri, saved, &mut effects),
+			Msg::SetPinned { uri, pinned } => self.set_library_pinned(uri, pinned, &mut effects),
+			Msg::ExcludeFromTaste { uri, excluded } => {
+				if self.library.set_excluded(&uri, excluded) {
+					effects.push(Effect::Library(library::Request::SetExcluded { uri, excluded }));
+				}
+			},
+			Msg::AddContextToPlaylist(route) => effects.extend(self.add_context_to_playlist(route).map(Effect::Library)),
 			Msg::AddRowToPlaylist(i) => self.add_row_to_playlist(i),
 			Msg::AddNowPlayingToPlaylist => self.add_now_playing_to_playlist(),
 			Msg::AddToPlaylist(target) => self.add_to_playlist(target, &mut effects),
@@ -86,6 +135,7 @@ impl State {
 			Msg::TogglePlaylistPublic => self.public_input = Some(!self.public_input.unwrap_or(false)),
 			Msg::CloseDialog => {
 				self.dialog = None;
+				self.pending_library_dialog = None;
 				self.focus = None;
 			},
 			Msg::QueueContext(route) => effects.push(Effect::Library(library::Request::QueueContext(route))),
@@ -350,12 +400,14 @@ impl State {
 	}
 
 	fn add_row_to_playlist(&mut self, index: usize) {
+		self.pending_library_dialog = None;
 		if let Some(track) = self.library.rows().get(index) {
 			self.dialog = Some(Dialog::AddToPlaylist { uris: vec![track.uri.clone()], label: track.name.clone() });
 		}
 	}
 
 	fn add_now_playing_to_playlist(&mut self) {
+		self.pending_library_dialog = None;
 		if self.item.uri.starts_with("spotify:track:") {
 			self.dialog = Some(Dialog::AddToPlaylist { uris: vec![self.item.uri.clone()], label: self.item.name().to_owned() });
 		}
@@ -438,6 +490,10 @@ impl State {
 	}
 
 	fn load_more(&mut self, effects: &mut Vec<Effect>) {
+		if self.library.home_section.is_some() && self.library.route == Route::Home {
+			effects.extend(self.library.home_section_more().map(Effect::Library));
+			return;
+		}
 		if let Some(listing) = &mut self.library.listing
 			&& let Some(offset) = listing.next_offset
 			&& !listing.loading

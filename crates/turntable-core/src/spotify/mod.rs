@@ -27,4 +27,5 @@ pub use model::{
 	Album, Artist, Copyright, Device, DeviceKind, Image, Page, PlayContext, Playback, Playlist, PlaylistChanges, RepeatMode, SearchResults,
 	Track, User, id_of, pick_image,
 };
-pub use web_player::{ArtistOverview, City, Concert, Credit, Pick, WebPlayer, WebPlaylist};
+pub(crate) use pkce::urldecode;
+pub use web_player::{ArtistOverview, City, Concert, Credit, Pick, WebPlayer, WebPlaylist, home as home_feed};

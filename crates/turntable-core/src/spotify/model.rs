@@ -272,7 +272,7 @@ impl PlaylistChanges {
 	}
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound(deserialize = "T: Deserialize<'de>"))]
 pub struct Page<T> {
 	#[serde(default, deserialize_with = "or_default")]
@@ -353,7 +353,7 @@ pub fn id_of(uri: &str) -> &str {
 	uri.rsplit(':').next().unwrap_or(uri)
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchResults {
 	pub tracks:    Page<Track>,
 	pub albums:    Page<Album>,

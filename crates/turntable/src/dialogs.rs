@@ -3,7 +3,7 @@
 //! feed edits back.
 
 use gpui_kit::{
-	AnyElement, AppContext as _, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+	AnyElement, AppContext as _, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Stateful,
 	StatefulInteractiveElement as _, Styled as _, Window,
 	component::input::{Input, InputEvent, InputState, Textarea, TextareaState},
 	div,
@@ -44,8 +44,11 @@ fn scrim(card: impl IntoElement, cx: &mut Context<'_, Shell>) -> AnyElement {
 }
 
 /// A dialog's card: title, close button, body.
-fn card(title: &'static str, body: impl IntoElement, cx: &mut Context<'_, Shell>) -> Div {
+fn card(title: &'static str, body: impl IntoElement, cx: &mut Context<'_, Shell>) -> Stateful<Div> {
 	div()
+		.id("dialog")
+		// Its own hitbox: clicks inside must not reach the scrim beneath (which closes it).
+		.occlude()
 		.relative()
 		.w(px(524.))
 		.max_h(px(560.))
@@ -70,10 +73,23 @@ impl Shell {
 		match self.st().dialog.clone() {
 			None => {
 				self.details = None;
+				self.renaming_folder = None;
 				None
 			},
 			Some(Dialog::AddToPlaylist { label, .. }) => Some(self.add_to_playlist_dialog(label, cx)),
 			Some(Dialog::Rename { .. }) => Some(self.details_dialog(window, cx)),
+			// Drawn in place in Your Library; here the field is filled and focused once.
+			Some(Dialog::RenameFolder { id, name }) => {
+				if self.renaming_folder.as_ref() != Some(&id) {
+					self.renaming_folder = Some(id);
+					self.folder_name.update(cx, |s, cx| {
+						s.set_value(name, window, cx);
+						s.focus(window, cx);
+						s.select_all(window, cx);
+					});
+				}
+				None
+			},
 		}
 	}
 
@@ -138,65 +154,87 @@ impl Shell {
 		}
 		let Some(inputs) = self.details.as_ref() else { return div().into_any_element() };
 		let (name, description) = (inputs.name.clone(), inputs.description.clone());
-		let public = self.st().public_input;
 		let cover = self.st().library.listing.as_ref().and_then(|l| l.cover_url.clone());
 		let route = self.st().library.route.clone();
 		let can_save = !self.st().name_input.trim().is_empty();
+		let focused = self.st().focus;
+		// Spotify's fields: a grey fill, a label riding on the top edge while focused.
+		let field = |label: &'static str, on: bool, input: AnyElement| {
+			div()
+				.relative()
+				.rounded(px(4.))
+				.bg(theme::raised_hover())
+				.border_1()
+				.border_color(if on { theme::subdued().into() } else { gpui_kit::transparent_black() })
+				.px_3()
+				.py_2()
+				.text_size(px(14.))
+				.child(input)
+				.when(on, |s| {
+					s.child(
+						div()
+							.absolute()
+							.top(px(-8.))
+							.left(px(10.))
+							.text_size(px(11.))
+							.font_weight(FontWeight::BOLD)
+							.text_color(theme::text())
+							.child(label),
+					)
+				})
+		};
 		let body = div()
 			.flex()
 			.flex_col()
 			.gap_4()
 			.child(
-				div().flex().gap_4().child(self.art(&route, cover.as_deref(), px(180.), cx).shadow_lg()).child(
-					div()
-						.flex_1()
-						.flex()
-						.flex_col()
-						.gap_3()
-						.child(Input::new(&name))
-						.child(div().flex_1().child(Textarea::new(&description).h_full())),
-				),
+				div()
+					.h(px(180.))
+					.flex()
+					.gap_4()
+					.child(self.art(&route, cover.as_deref(), px(180.), cx).shadow_lg())
+					.child(
+						div()
+							.flex_1()
+							.flex()
+							.flex_col()
+							.gap_4()
+							.child(field("Name", focused == Some(Field::PlaylistName), Input::new(&name).appearance(false).into_any_element()))
+							.child(
+								field(
+									"Description",
+									focused == Some(Field::PlaylistDescription),
+									Textarea::new(&description).appearance(false).h_full().into_any_element(),
+								)
+								.flex_1(),
+							),
+					),
 			)
 			.child(
-				div()
-					.flex()
-					.items_center()
-					.justify_between()
-					.child(
-						div()
-							.id("details-public")
-							.flex()
-							.items_center()
-							.gap_2()
-							.text_size(px(14.))
-							.text_color(theme::subdued())
-							.hover(|s| s.text_color(theme::text()))
-							.cursor_pointer()
-							.on_click(cx.listener(|this, _, _, cx| this.send(Msg::TogglePlaylistPublic, cx)))
-							.child(icon(if public == Some(true) { Icon::Globe } else { Icon::Lock }, px(16.), theme::subdued()))
-							.child(if public == Some(true) { "Public: anyone can find it" } else { "Private: only you can see it" }),
-					)
-					.child(
-						div()
-							.id("details-save")
-							.h(px(48.))
-							.px_8()
-							.flex()
-							.items_center()
-							.rounded_full()
-							.bg(theme::text())
-							.text_color(theme::base())
-							.text_size(px(16.))
-							.font_weight(FontWeight::BOLD)
-							.when(can_save, |s| {
-								s.cursor_pointer()
-									.hover(|s| s.bg(theme::alpha(theme::text(), 0.9)))
-									.on_click(cx.listener(|this, _, _, cx| this.send(Msg::SaveRename, cx)))
-							})
-							.when(!can_save, |s| s.opacity(0.5))
-							.child("Save"),
-					),
-			);
+				div().flex().justify_end().child(
+					div()
+						.id("details-save")
+						.h(px(48.))
+						.px_8()
+						.flex()
+						.items_center()
+						.rounded_full()
+						.bg(theme::text())
+						.text_color(theme::base())
+						.text_size(px(16.))
+						.font_weight(FontWeight::BOLD)
+						.when(can_save, |s| {
+							s.cursor_pointer()
+								.hover(|s| s.bg(theme::alpha(theme::text(), 0.9)))
+								.on_click(cx.listener(|this, _, _, cx| this.send(Msg::SaveRename, cx)))
+						})
+						.when(!can_save, |s| s.opacity(0.5))
+						.child("Save"),
+				),
+			)
+			.child(div().text_size(px(11.)).font_weight(FontWeight::BOLD).text_color(theme::text()).child(
+				"By proceeding, you agree to give Spotify access to the image you choose to upload. Please make sure you have the right to upload the image.",
+			));
 		scrim(card("Edit details", body, cx), cx)
 	}
 
@@ -214,16 +252,20 @@ impl Shell {
 				this.send(Msg::Edit { from: 0, to: old, text }, cx);
 			},
 			InputEvent::PressEnter { .. } => this.send(Msg::SaveRename, cx),
-			_ => {},
+			// The field's label shows while it has focus.
+			InputEvent::Focus => this.send(Msg::Focus(Some(Field::PlaylistName)), cx),
+			InputEvent::Blur => {},
 		})
 		.detach();
-		cx.subscribe(&description, |this, input, e: &InputEvent, cx| {
-			if matches!(e, InputEvent::Change) {
+		cx.subscribe(&description, |this, input, e: &InputEvent, cx| match e {
+			InputEvent::Change => {
 				let text = input.read(cx).value().to_string();
 				this.send(Msg::Focus(Some(Field::PlaylistDescription)), cx);
 				let old = utf16_len(&this.st().description_input);
 				this.send(Msg::Edit { from: 0, to: old, text }, cx);
-			}
+			},
+			InputEvent::Focus => this.send(Msg::Focus(Some(Field::PlaylistDescription)), cx),
+			InputEvent::Blur | InputEvent::PressEnter { .. } => {},
 		})
 		.detach();
 		name.update(cx, |s, cx| s.focus(window, cx));

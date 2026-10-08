@@ -135,6 +135,8 @@ panic = "abort"
 strip = true
 
 [patch.crates-io]
+# Session attributes must reach the application instead of exiting on non-Premium accounts.
+librespot-core = { path = "vendor/librespot-core" }
 # Spirc with queue access (add to queue, upcoming tracks, context) for the in-process player.
 librespot-connect = { path = "vendor/librespot-connect" }
 # One-worker runtime for the decoder thread (upstream starts one worker per core).

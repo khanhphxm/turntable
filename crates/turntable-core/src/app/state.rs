@@ -30,9 +30,9 @@ pub enum Panel {
 pub enum LyricsState {
 	Loading,
 	Found(Lyrics),
-	/// LRCLIB has none.
+	/// Spotify has no lyrics for this recording.
 	Missing,
-	/// The lookup failed (offline, LRCLIB busy).
+	/// The lookup failed (network, authentication or malformed response).
 	Failed,
 }
 
@@ -56,6 +56,8 @@ pub enum Dialog {
 	AddToPlaylist { uris: Vec<String>, label: String },
 	/// Edit the user's playlist, retaining originals to send only changed fields.
 	Rename { id: String, name: String, description: String, public: Option<bool> },
+	/// Plain rename state; hosts may draw it inline in the sidebar, not as a modal.
+	RenameFolder { id: String, name: String },
 }
 
 impl Field {
@@ -137,94 +139,111 @@ pub(crate) struct CachedCover {
 
 #[derive(Debug, Default)]
 pub struct State {
-	pub connected:           bool,
-	pub logged_in:           bool,
-	pub active:              bool,
-	pub device_name:         String,
-	pub status:              Status,
-	pub item:                Entity,
-	pub context:             Entity,
-	pub anchor:              Anchor,
+	pub connected:                     bool,
+	pub logged_in:                     bool,
+	pub active:                        bool,
+	pub device_name:                   String,
+	pub status:                        Status,
+	pub item:                          Entity,
+	pub context:                       Entity,
+	pub anchor:                        Anchor,
 	/// Displayed volume: initialized from saved device preferences, then reconciled with the player.
-	pub volume:              u8,
-	pub options:             Options,
-	pub upcoming:            Vec<QueueEntry>,
+	pub volume:                        u8,
+	pub options:                       Options,
+	pub upcoming:                      Vec<QueueEntry>,
 	/// Queue edits not yet in the player's own list (see `queue`).
-	pub queue_edit:          queue::Edit,
+	pub queue_edit:                    queue::Edit,
 	/// The now-playing song's lyrics once asked for, with the URI of its track.
-	pub lyrics:              Option<(String, LyricsState)>,
+	pub lyrics:                        Option<(String, LyricsState)>,
 	/// The last error worth showing (cleared by the next good event).
-	pub notice:              Option<String>,
+	pub notice:                        Option<String>,
+	/// Persistent welcome-page sign-in rejection. `message()` explains it;
+	/// dispatch `Msg::OpenUrl(error.upgrade_url().into())` for an Upgrade action.
+	/// Cleared only when a new sign-in starts, not by unrelated worker events.
+	pub sign_in_error:                 Option<crate::engine::SignInError>,
 	/// The player or library could not reach Spotify; cached data remains usable.
 	/// This reports Spotify reachability, not OS interface status. A disk snapshot
 	/// is not an online answer and does not clear it; player/library recover separately.
-	pub offline:             bool,
+	pub offline:                       bool,
 	/// Persistent connection/recovery text, independent of transient player notices.
 	/// Render this even after `offline` clears: it can ask the user to resume stopped
 	/// playback. Unrelated volume/queue events do not dismiss it.
-	pub network_notice:      Option<String>,
+	pub network_notice:                Option<String>,
 	/// The user's library, delivered by the Session/Web API worker.
-	pub library:             Library,
+	pub library:                       Library,
 	/// The side panel opened by hand (queue, lyrics, equalizer or settings); when none
 	/// is, the now-playing view shows if it's on (see [`State::side_panel`]).
-	pub panel:               Option<Panel>,
+	pub panel:                         Option<Panel>,
 	/// The now-playing view is on (persisted).
-	pub now_playing_view:    bool,
+	pub now_playing_view:              bool,
 	/// The library sidebar shows covers only (persisted).
-	pub sidebar_collapsed:   bool,
+	pub sidebar_collapsed:             bool,
 	/// What the settings page sets (persisted; see [`crate::app::settings`]).
-	pub prefs:               crate::app::settings::Prefs,
+	pub prefs:                         crate::app::settings::Prefs,
 	/// The sleep timer, and the pauses and skips that carry out the autoplay and explicit settings.
-	pub rules:               crate::app::rules::Rules,
+	pub rules:                         crate::app::rules::Rules,
 	/// What the settings page reports: devices, cache and app memory.
-	pub sys:                 crate::app::system::System,
+	pub sys:                           crate::app::system::System,
 	/// The device name being typed in the settings page.
-	pub device_input:        String,
+	pub device_input:                  String,
 	/// Your Library's sort and view menu is open (it hangs from the order's button).
-	pub library_menu:        bool,
+	pub library_menu:                  bool,
 	/// The device menu, the devices Spotify lists, and the other device playing (see [`crate::app::connect`]).
-	pub connect:             crate::app::connect::Connect,
+	pub connect:                       crate::app::connect::Connect,
 	/// Shelves shown in full ("Show all"): the home page's, and Your Library's rows.
-	pub open_shelves:        std::collections::HashSet<&'static str>,
+	pub open_shelves:                  std::collections::HashSet<&'static str>,
 	/// The page whose list playback was last started from (Liked Songs, search: lists with
 	/// no context URI the player could report), so its play button shows pause while it plays.
-	pub played_from:         Option<Route>,
+	pub played_from:                   Option<Route>,
 	/// The EQ the audio path uses, and the preset it came from (if untouched).
-	pub eq:                  crate::audio::EqSettings,
-	pub eq_preset:           Option<String>,
+	pub eq:                            crate::audio::EqSettings,
+	pub eq_preset:                     Option<String>,
 	/// The equalizer's preset menu is open (it hangs from the preset button).
-	pub eq_menu:             bool,
+	pub eq_menu:                       bool,
 	/// Whether the EQ is live: an audio output plays the player's sound.
-	pub has_audio:           bool,
+	pub has_audio:                     bool,
 	/// The player has a Spotify sign-in (saved): it starts by itself, no setup needed.
-	pub signed_in:           bool,
+	pub signed_in:                     bool,
 	/// The player is starting (signing in, connecting).
-	pub starting:            bool,
+	pub starting:                      bool,
 	/// Volume to restore when unmuting.
-	pub unmute_to:           u8,
+	pub unmute_to:                     u8,
 	/// Image URL → encoded cover. The host chooses when/how to decode it.
 	/// LRU retention is bounded to 16 MiB and 512 URLs; evicted artwork reloads
 	/// from the disk cache on demand. Hits preserve the original Arc identity.
-	pub(crate) images:       std::collections::HashMap<String, CachedCover>,
-	pub(crate) image_clock:  std::cell::Cell<u64>,
-	pub(crate) image_bytes:  usize,
+	pub(crate) images:                 std::collections::HashMap<String, CachedCover>,
+	pub(crate) image_clock:            std::cell::Cell<u64>,
+	pub(crate) image_bytes:            usize,
 	/// Missing URLs recorded by [`State::image`], drained by the controller's pump.
-	pub(crate) image_misses: std::cell::RefCell<std::collections::HashSet<String>>,
+	pub(crate) image_misses:           std::cell::RefCell<std::collections::HashSet<String>>,
 	/// The text field that has the caret, and the text of each field.
-	pub focus:               Option<Field>,
-	pub id_input:            String,
-	pub name_input:          String,
-	pub description_input:   String,
-	pub public_input:        Option<bool>,
-	pub dialog:              Option<Dialog>,
+	pub focus:                         Option<Field>,
+	pub id_input:                      String,
+	pub name_input:                    String,
+	pub description_input:             String,
+	pub public_input:                  Option<bool>,
+	pub dialog:                        Option<Dialog>,
+	/// Async item dialogs may finish after a different dialog was opened or dismissed.
+	pub(crate) pending_library_dialog: Option<super::playlist::PendingDialog>,
 	/// The discography filter of an artist page: 0 for all, else a kind's index + 1.
-	pub discography:         usize,
+	pub discography:                   usize,
 	/// A confirmation shown as a toast, with a counter so a repeat shows again.
-	pub toast:               Option<(u32, String)>,
-	pub quit:                bool,
+	pub toast:                         Option<(u32, String)>,
+	pub quit:                          bool,
+	pub(crate) recent_searches:        super::recent_searches::RecentSearches,
 }
 
 impl State {
+	/// The selected personalised feed, or `None` while unavailable (render `library.home` then).
+	pub fn home_feed(&self) -> Option<&library::HomeFeed> {
+		self.library.home_feed()
+	}
+
+	/// Show all uses Home's route; hosts may keep this section URI in their own page history.
+	pub fn home_section(&self) -> Option<&library::HomeSection> {
+		self.library.home_section.as_ref().filter(|_| self.library.route == Route::Home)
+	}
+
 	/// Whether the user chose to collapse the sidebar; layout is the host's job.
 	pub fn sidebar_collapsed(&self) -> bool {
 		self.sidebar_collapsed
@@ -373,6 +392,9 @@ impl State {
 	pub fn field_visible(&self, field: Field) -> bool {
 		let lib = &self.library;
 		let ready = matches!(lib.conn, library::Conn::Ready);
+		if field == Field::PlaylistName && matches!(self.dialog, Some(Dialog::RenameFolder { .. })) {
+			return true;
+		}
 		if matches!(field, Field::PlaylistName | Field::PlaylistDescription) {
 			return matches!(self.dialog, Some(Dialog::Rename { .. }));
 		}

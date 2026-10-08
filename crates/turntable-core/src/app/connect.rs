@@ -2,10 +2,10 @@
 //!
 //! turntable plays through its in-process engine. Its authenticated Dealer subscription
 //! supplies the account's devices and remote player through [`State::apply_connect_state`],
-//! without polling or transferring playback. When no session supplies that data,
+//! without polling or transferring playback. When no session exists,
 //! [`State::apply_playback`] uses `GET /me/player` while the window shows. Device picks use
-//! session transfers when available; remote transport controls remain Web API commands
-//! ([`State::remote_update`]). Pure state: the commands are the effects it returns.
+//! session transfers; remote controls go through the worker's native connect-state commands,
+//! with the Web API only when no session exists. Pure state: commands are returned as effects.
 
 use std::time::{Duration, Instant};
 
@@ -279,7 +279,7 @@ impl State {
 		}
 	}
 
-	/// While another device plays, the transport controls drive it through the Web API.
+	/// While another device plays, controls use native Connect commands (no-session API fallback).
 	/// `None` for messages that are not about playback (or that stay local: taking playback
 	/// back to this player).
 	pub fn remote_update(&mut self, msg: &Msg) -> Option<Vec<Effect>> {

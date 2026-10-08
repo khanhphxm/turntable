@@ -30,7 +30,7 @@ const LISTEN_ADDR: &str = "127.0.0.1:8898";
 const AUTHORIZE_URL: &str = "https://accounts.spotify.com/authorize";
 const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
 const SCOPES: &str = "playlist-read-private playlist-read-collaborative user-library-read user-library-modify \
-                      user-read-playback-state user-modify-playback-state user-read-recently-played user-top-read \
+                      user-read-playback-state user-modify-playback-state user-read-recently-played \
                       user-follow-read playlist-modify-public playlist-modify-private user-read-private";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 /// Refresh this long before the access token actually expires.

@@ -19,7 +19,7 @@ use turntable_core::{
 use crate::{
 	shell::Shell,
 	theme,
-	widgets::{Icon, added_badge, cover, icon, menu_icon, play_disc, section_title},
+	widgets::{Icon, added_badge, cover, eq_bars, icon, menu_icon, play_disc, section_title},
 };
 
 pub fn clock(ms: u64) -> String {
@@ -48,8 +48,10 @@ pub fn artists(t: &Track) -> String {
 /// Which optional column a track table shows between the title and the duration.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Column {
-	/// The album (playlists, Liked Songs, search).
+	/// The album (search).
 	Album,
+	/// The album and when the song was added (playlists, Liked Songs).
+	AlbumAdded,
 	/// Play counts (an artist's popular tracks), when known.
 	Plays,
 	/// Nothing (albums: every row is the same album).
@@ -58,6 +60,8 @@ pub enum Column {
 
 /// Track table geometry, shared by the column header and the rows so they line up.
 pub const INDEX_W: f32 = 24.;
+/// The "Date added" column.
+const ADDED_W: f32 = 160.;
 pub const TAIL_W: f32 = 112.;
 pub const ROW_PAD_X: f32 = 16.;
 
@@ -110,7 +114,8 @@ impl Shell {
 			.text_color(theme::subdued())
 			.child(div().w(px(INDEX_W)).flex().justify_end().child("#"))
 			.child(div().flex_1().child("Title"))
-			.when(column == Column::Album, |s| s.child(div().flex_1().child("Album")))
+			.when(matches!(column, Column::Album | Column::AlbumAdded), |s| s.child(div().flex_1().child("Album")))
+			.when(column == Column::AlbumAdded, |s| s.child(div().w(px(ADDED_W)).child("Date added")))
 			.when(column == Column::Plays, |s| s.child(div().flex_1().flex().justify_end().child("Plays")))
 			.child(div().w(px(TAIL_W)).flex().justify_end().pr(px(28.)).child(icon(Icon::Clock, px(16.), theme::subdued())))
 	}
@@ -177,9 +182,7 @@ impl Shell {
 							.text_size(px(16.))
 							.when(current, |s| s.text_color(theme::accent()))
 							.group_hover("row", |s| s.invisible())
-							.map(|s| {
-								if playing { s.child(icon(Icon::Volume, px(16.), theme::accent())) } else { s.child((i + 1).to_string()) }
-							}),
+							.map(|s| if playing { s.child(eq_bars(("row-bars", i), px(14.))) } else { s.child((i + 1).to_string()) }),
 					)
 					.child(
 						div()
@@ -223,12 +226,16 @@ impl Shell {
 							)),
 					),
 			)
-			.when(column == Column::Album, |s| {
+			.when(matches!(column, Column::Album | Column::AlbumAdded), |s| {
 				let name = album.map_or(String::new(), |a| a.name.clone());
 				s.child(div().flex_1().min_w_0().flex().child(match &album_id {
 					Some(id) => self.link(("row-album", i), name, Route::Album(id.clone()), cx).into_any_element(),
 					None => div().child(name).into_any_element(),
 				}))
+			})
+			.when(column == Column::AlbumAdded, |s| {
+				let added = st.library.listing.as_ref().and_then(|l| l.added_at(i)).map(date_added).unwrap_or_default();
+				s.child(div().w(px(ADDED_W)).truncate().child(added))
 			})
 			.when(column == Column::Plays, |s| s.child(div().flex_1().flex().justify_end().child(plays.map(grouped).unwrap_or_default())))
 			.child(
@@ -242,10 +249,10 @@ impl Shell {
 						div()
 							.id(("row-add", i))
 							.cursor_pointer()
-							// Spotify's ✓: in Liked Songs or any of the user's playlists. Shown always
-							// once added; the ⊕ only on hover. ⊕ saves to Liked Songs; ✓ opens the
-							// playlist picker (where it can be taken out again).
-							.when(!added, |s| s.invisible().group_hover("row", |s| s.visible()))
+							// Spotify's ✓ (in Liked Songs or any of the user's playlists) and ⊕ both show
+							// on hover only. ⊕ saves to Liked Songs; ✓ opens the playlist picker.
+							.invisible()
+							.group_hover("row", |s| s.visible())
 							.on_click(cx.listener(move |this, _, _, cx| {
 								cx.stop_propagation();
 								this.send(if added { Msg::AddRowToPlaylist(i) } else { Msg::AddToLiked(uri.clone()) }, cx);
@@ -278,6 +285,8 @@ impl Shell {
 			.id(id)
 			.min_w_0()
 			.truncate()
+			// Spotify's secondary text: grey, white and underlined on hover.
+			.text_color(theme::subdued())
 			.cursor_pointer()
 			.hover(|s| s.underline().text_color(theme::text()))
 			.on_click(cx.listener(move |this, _, _, cx| {
@@ -298,9 +307,16 @@ impl Shell {
 		let playing = self.playing_context(tile.play.as_deref());
 		let route = tile.route.clone();
 		let play = tile.play.clone();
+		let hovered = tile.route.clone();
 		div()
 			.id(id)
 			.group("card")
+			// Spotify warms a page while the pointer rests on its card.
+			.on_hover(cx.listener(move |this, over: &bool, _, cx| {
+				if *over {
+					this.send(Msg::Prefetch(hovered.clone()), cx);
+				}
+			}))
 			.w(px(theme::CARD_W))
 			.flex_none()
 			.p(px(12.))
@@ -536,6 +552,21 @@ impl Shell {
 	/// A page's tint: its artwork's colour once known.
 	pub fn tint(accent: Option<&str>) -> u32 {
 		accent.and_then(theme::parse_hex).unwrap_or(NEUTRAL)
+	}
+}
+
+/// Spotify's "Date added": how long ago for the last few weeks, else the date ("Jun 8, 2026").
+fn date_added(unix: i64) -> String {
+	let Some(at) = chrono::DateTime::from_timestamp(unix, 0) else { return String::new() };
+	let ago = chrono::Utc::now().signed_duration_since(at);
+	let plural = |n: i64, unit: &str| if n == 1 { format!("1 {unit} ago") } else { format!("{n} {unit}s ago") };
+	match ago {
+		d if d.num_minutes() < 1 => "just now".to_owned(),
+		d if d.num_hours() < 1 => plural(d.num_minutes(), "minute"),
+		d if d.num_days() < 1 => plural(d.num_hours(), "hour"),
+		d if d.num_days() < 7 => plural(d.num_days(), "day"),
+		d if d.num_weeks() < 5 => plural(d.num_weeks(), "week"),
+		_ => at.with_timezone(&chrono::Local).format("%b %-d, %Y").to_string(),
 	}
 }
 

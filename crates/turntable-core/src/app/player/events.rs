@@ -2,7 +2,7 @@
 
 use std::{thread, time::Instant};
 
-use super::{AppEvent, CONTROL_POLL, Controller, HEALTH_EVERY, SEARCH_DEBOUNCE, debug_log, retry_wait};
+use super::{AppEvent, CONTROL_POLL, Controller, HEALTH_EVERY, SEARCH_DEBOUNCE, StartError, debug_log, retry_wait};
 use crate::{
 	app::{Effect, Msg, Panel, config},
 	engine::{Command, Event, Incoming},
@@ -55,6 +55,11 @@ impl Controller {
 					self.save_settings();
 				},
 				Effect::SaveSettings => self.save_settings(),
+				Effect::SaveRecentSearches => {
+					if let Err(error) = self.state.recent_searches.save(&self.paths.config) {
+						self.state.notice = Some(format!("Couldn't save recent searches: {error}"));
+					}
+				},
 				// `open` waits for nothing slow, but run it off the UI loop anyway.
 				Effect::OpenUrl(url) => drop(thread::spawn(move || crate::spotify::open_browser(&url))),
 				Effect::ApplyPrefs => self.apply_prefs(),
@@ -74,6 +79,10 @@ impl Controller {
 	}
 
 	pub(super) fn on_event(&mut self, event: AppEvent) -> bool {
+		// Already queued session/library answers must not resurrect a rejected account.
+		if self.state.sign_in_error.is_some() && matches!(&event, AppEvent::Player(_) | AppEvent::Library(_) | AppEvent::Progress(_)) {
+			return false;
+		}
 		match event {
 			AppEvent::Progress(text) => self.state.notice = Some(text),
 			AppEvent::EngineReady(Ok(engine)) => return self.on_engine_ready(engine),
@@ -85,6 +94,13 @@ impl Controller {
 					}
 					return true;
 				}
+				let e = match e {
+					StartError::Premium(error) => {
+						self.reject_sign_in(error);
+						return true;
+					},
+					StartError::Other(message) => message,
+				};
 				self.state.notice = Some(e);
 				// Transient failures (offline, Spotify unreachable) recover on their
 				// own: try again later, backing off.
@@ -190,7 +206,7 @@ impl Controller {
 		changed
 	}
 
-	fn on_library_response(&mut self, response: library::Response) -> bool {
+	fn on_library_response(&mut self, mut response: library::Response) -> bool {
 		if crate::net::trace::enabled() {
 			crate::net::trace::mark("resp", &response.label());
 		}
@@ -206,6 +222,7 @@ impl Controller {
 		) {
 			return self.on_player_response(response);
 		}
+		self.state.apply_library_dialog(&mut response);
 		match &response {
 			library::Response::Offline(offline) => {
 				self.library_offline = *offline;
@@ -250,6 +267,9 @@ impl Controller {
 			}
 			self.library.send(library::Request::Albums);
 			self.library.send(library::Request::Following);
+			self.library.send(library::Request::Pins);
+			self.library.send(library::Request::FolderExpansion);
+			self.library.send(library::Request::Exclusions);
 			self.request_artist();
 		}
 		true
@@ -257,7 +277,7 @@ impl Controller {
 
 	fn request_startup_home(&self) {
 		if self.state.web_ready() && self.state.library.route == Route::Home {
-			self.library.send(library::Request::Home);
+			self.library.send(library::Request::HomeFacet(self.state.library.home_facet));
 		}
 	}
 }

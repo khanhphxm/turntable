@@ -7,6 +7,8 @@ mod lifecycle;
 mod metadata;
 #[cfg(test)]
 mod network_tests;
+#[cfg(test)]
+mod premium_tests;
 mod queue;
 mod restore;
 
@@ -42,7 +44,7 @@ impl Default for Options {
 #[expect(clippy::large_enum_variant, reason = "player/Dealer snapshots travel by value to avoid allocating for every playback update")]
 enum AppEvent {
 	Progress(String),
-	EngineReady(Result<Engine, String>),
+	EngineReady(Result<Engine, StartError>),
 	Player(Incoming),
 	Library(Box<library::Response>),
 	Lyrics(lyrics::Response),
@@ -51,6 +53,17 @@ enum AppEvent {
 	Devices,
 	CacheSize(u64),
 	CacheCleared(Result<(), String>),
+}
+
+enum StartError {
+	Premium(crate::engine::SignInError),
+	Other(String),
+}
+
+impl From<&str> for StartError {
+	fn from(message: &str) -> Self {
+		Self::Other(message.to_owned())
+	}
 }
 
 const RETRY_START: Duration = Duration::from_secs(5);
@@ -144,7 +157,7 @@ impl Controller {
 				}
 			})
 		};
-		let state = State {
+		let mut state = State {
 			signed_in: crate::engine::has_sign_in(&paths.config),
 			device_name,
 			volume: settings.prefs.device.volume,
@@ -157,6 +170,7 @@ impl Controller {
 			device_input: settings.prefs.device.name.clone(),
 			..State::default()
 		};
+		state.recent_searches.load(&paths.config, crate::app::recent_searches::saved_account(&paths.config));
 		let mut controller = Self {
 			paths: paths.clone(),
 			restore: restore::Restore::new(state.signed_in),

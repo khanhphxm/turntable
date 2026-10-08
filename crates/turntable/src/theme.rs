@@ -55,7 +55,12 @@ pub const BAR_H: Pixels = px(72.);
 pub const TOP_H: Pixels = px(64.);
 pub const SIDEBAR_W: Pixels = px(320.);
 pub const SIDEBAR_COLLAPSED_W: Pixels = px(72.);
-pub const RIGHT_W: Pixels = px(340.);
+/// Your Library widened by its expand button.
+pub const SIDEBAR_WIDE_W: Pixels = px(584.);
+/// Spotify's right panel at its default width.
+pub const RIGHT_W: Pixels = px(280.);
+/// The right panel folded to a strip with a chevron.
+pub const RIGHT_FOLDED_W: Pixels = px(28.);
 pub const ROW_H: Pixels = px(56.);
 
 /// `c` at `alpha` (0..=1).

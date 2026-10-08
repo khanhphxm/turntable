@@ -100,7 +100,7 @@ impl Shell {
 				shelves.push(self.shelf("Discovered on", cards));
 			}
 		}
-		let about = l.about.as_ref().and_then(|a| a.summary.clone().or(a.description.clone())).or(o.and_then(|o| o.biography.clone()));
+		let about = o.and_then(|o| o.biography.clone());
 		let header_img = o.and_then(|o| o.header.clone().or(o.gallery.first().cloned()));
 		let more_than = l.tracks.len() > POPULAR;
 		let rank = o.and_then(|o| o.world_rank);

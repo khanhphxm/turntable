@@ -1,6 +1,7 @@
 //! Account-scoped stale-while-revalidate data under `<cache>/library/<sha256(user-id)>.json`.
 //!
-//! Only one account, Home, and eight first-page listings are kept, at most 2 MiB altogether
+//! Only one account, native Home, up to four personalised Home facets, eight first-page listings
+//! and eight searches are kept, at most 2 MiB altogether
 //! (an atomic replacement can temporarily take another 2 MiB). The identity comes from the
 //! stored authorization, never from the cache. Corrupt, oversized or old-version files are
 //! ignored; a snapshot is a first paint, not proof that its data or authorization is current.
@@ -14,10 +15,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{Home, Listing, Response, Route, Tile};
+use super::{Facet, Home, HomeFeed, Listing, Response, Route, Tile};
 use crate::{
 	app::config,
-	spotify::{PlayContext, Playlist, Track, User, id_of},
+	spotify::{PlayContext, Playlist, SearchResults, Track, User, id_of},
 };
 
 const VERSION: u32 = 1;
@@ -26,15 +27,24 @@ pub(super) const LISTINGS_KEPT: usize = 8;
 
 #[derive(Serialize, Deserialize)]
 struct Snapshot {
-	version:   u32,
-	me:        User,
-	playlists: Vec<Playlist>,
-	home:      Option<Home>,
-	/// Independent of Home's short TTL: private top-content reads may use the Web API daily.
+	version:    u32,
+	me:         User,
+	playlists:  Vec<Playlist>,
 	#[serde(default)]
-	top:       TopShelves,
-	/// Least recently opened first; only playlists, albums and Liked Songs.
-	listings:  Vec<SavedListing>,
+	rootlist:   Vec<super::RootEntry>,
+	home:       Option<Home>,
+	#[serde(default)]
+	home_feeds: Vec<SavedHomeFeed>,
+	/// Least recently opened first; playlists, albums, artists and Liked Songs.
+	listings:   Vec<SavedListing>,
+	#[serde(default)]
+	searches:   Vec<SavedSearch>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedHomeFeed {
+	facet: Facet,
+	feed:  HomeFeed,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -43,20 +53,10 @@ struct SavedListing {
 	listing: Listing,
 }
 
-/// Top artists/tracks change slowly. Persist attempts as well as successful results, so
-/// restarting after a rate limit or an outage cannot issue the same reads again that day.
-#[derive(Clone, Default, Serialize, Deserialize)]
-pub(super) struct TopShelves {
-	pub(super) checked_at: Option<u64>,
-	pub(super) artists:    Option<Vec<Tile>>,
-	pub(super) tracks:     Option<Vec<Track>>,
-}
-
-impl TopShelves {
-	pub(super) fn fresh(&self, now: u64) -> bool {
-		// Clock rollback must not permit another attempt inside the same 24-hour window.
-		self.checked_at.is_some_and(|at| now.saturating_sub(at) < 24 * 60 * 60)
-	}
+#[derive(Serialize, Deserialize)]
+struct SavedSearch {
+	query:   String,
+	results: SearchResults,
 }
 
 pub(super) struct Store {
@@ -93,7 +93,12 @@ impl Store {
 			return None;
 		}
 		let mut snapshot: Snapshot = serde_json::from_slice(&bytes).ok()?;
-		if snapshot.version != VERSION || snapshot.me.id != user_id || snapshot.listings.len() > LISTINGS_KEPT {
+		if snapshot.version != VERSION
+			|| snapshot.me.id != user_id
+			|| snapshot.listings.len() > LISTINGS_KEPT
+			|| snapshot.searches.len() > LISTINGS_KEPT
+			|| snapshot.home_feeds.len() > Facet::ALL.len()
+		{
 			return None;
 		}
 		for playlist in &mut snapshot.playlists {
@@ -107,33 +112,23 @@ impl Store {
 		Some(Response::Connected { me: data.me.clone(), playlists: data.playlists.clone() })
 	}
 
+	pub(super) fn rootlist(&self) -> Option<Response> {
+		let data = self.data.as_ref()?;
+		Some(Response::Rootlist { account: data.me.id.clone(), entries: data.rootlist.clone() })
+	}
+
 	pub(super) fn home(&self) -> Option<Home> {
 		self.data.as_ref()?.home.clone()
+	}
+
+	pub(super) fn home_feed(&self, facet: Facet) -> Option<HomeFeed> {
+		self.data.as_ref()?.home_feeds.iter().find(|saved| saved.facet == facet).map(|saved| saved.feed.clone())
 	}
 
 	/// Last-played metadata for offline startup, preferring the checkpoint's exact track.
 	pub(super) fn recent_track(&self, account: &str, uri: Option<&str>) -> Option<Track> {
 		let tracks = &self.data.as_ref().filter(|data| data.me.id == account)?.home.as_ref()?.recent_tracks;
 		uri.and_then(|uri| tracks.iter().find(|track| track.uri == uri)).or_else(|| tracks.first()).cloned()
-	}
-
-	pub(super) fn top(&self, user: &str) -> TopShelves {
-		let Some(data) = self.data.as_ref().filter(|data| data.me.id == user) else { return TopShelves::default() };
-		if data.top.checked_at.is_none()
-			&& let Some(home) = &data.home
-		{
-			// Snapshots from before the daily cache still have useful shelf contents.
-			return TopShelves { artists: home.top_artists.clone(), tracks: home.top_tracks.clone(), ..TopShelves::default() };
-		}
-		data.top.clone()
-	}
-
-	pub(super) fn record_top(&mut self, user: &str, top: TopShelves) {
-		if self.enabled
-			&& let Some(data) = self.data.as_mut().filter(|data| data.me.id == user)
-		{
-			data.top = top;
-		}
 	}
 
 	/// Leaves an unknown recent tile in place while its metadata is being revalidated.
@@ -161,6 +156,15 @@ impl Store {
 		Some(listing)
 	}
 
+	pub(super) fn search(&mut self, query: &str) -> Option<SearchResults> {
+		let searches = &mut self.data.as_mut()?.searches;
+		let index = searches.iter().position(|saved| saved.query == query.trim())?;
+		let saved = searches.remove(index);
+		let results = saved.results.clone();
+		searches.push(saved);
+		Some(results)
+	}
+
 	/// Updates only the data worth persisting; unrelated responses do not cause disk writes.
 	pub(super) fn record(&mut self, response: &Response) -> bool {
 		if !self.enabled {
@@ -175,26 +179,73 @@ impl Store {
 					data.playlists = playlists.clone();
 				} else {
 					self.data = Some(Snapshot {
-						version:   VERSION,
-						me:        me.clone(),
-						playlists: playlists.clone(),
-						home:      None,
-						listings:  Vec::new(),
-						top:       TopShelves::default(),
+						version:    VERSION,
+						me:         me.clone(),
+						playlists:  playlists.clone(),
+						rootlist:   Vec::new(),
+						home:       None,
+						home_feeds: Vec::new(),
+						listings:   Vec::new(),
+						searches:   Vec::new(),
 					});
 				}
+			},
+			Response::Rootlist { account, entries } => {
+				let Some(data) = &mut self.data else { return false };
+				if data.me.id != *account {
+					return false;
+				}
+				data.rootlist = entries.clone();
 			},
 			Response::Home(home) => {
 				let Some(data) = &mut self.data else { return false };
 				data.home = Some(home.clone());
 			},
-			Response::Listing { route: route @ (Route::Playlist(_) | Route::Album(_) | Route::Liked), offset: 0, listing } => {
+			Response::HomeRecentTracks(tracks) => {
+				let Some(data) = &mut self.data else { return false };
+				data.home.get_or_insert_with(Home::default).take_recent_tracks(tracks.clone());
+			},
+			Response::HomeFeed { facet, feed } => {
+				let Some(data) = &mut self.data else { return false };
+				data.home_feeds.retain(|saved| saved.facet != *facet);
+				data.home_feeds.push(SavedHomeFeed { facet: *facet, feed: feed.clone() });
+			},
+			Response::Listing {
+				route: route @ (Route::Playlist(_) | Route::Album(_) | Route::Artist(_) | Route::Liked),
+				offset: 0,
+				listing,
+			} => {
 				let Some(data) = &mut self.data else { return false };
 				data.listings.retain(|saved| &saved.route != route);
 				if data.listings.len() == LISTINGS_KEPT {
 					data.listings.remove(0);
 				}
 				data.listings.push(SavedListing { route: route.clone(), listing: listing.clone() });
+			},
+			Response::Search { query, results } => {
+				let Some(data) = &mut self.data else { return false };
+				data.searches.retain(|saved| saved.query != query.trim());
+				if data.searches.len() == LISTINGS_KEPT {
+					data.searches.remove(0);
+				}
+				data.searches.push(SavedSearch { query: query.trim().to_owned(), results: results.clone() });
+			},
+			Response::ArtistPopular(id, popular) => {
+				let Some(listing) = self.saved_listing(&Route::Artist(id.clone())) else { return false };
+				listing.tracks.clone_from(&popular.tracks);
+				listing.plays.clone_from(&popular.plays);
+				listing.accent.clone_from(&popular.accent);
+				listing.popular_loaded = true;
+				listing.take_artist_overview(popular.overview.clone());
+			},
+			Response::Accent(route, accent) => {
+				let Some(listing) = self.saved_listing(route) else { return false };
+				listing.accent = Some(accent.clone());
+			},
+			Response::Plays(route, plays) => {
+				let Some(listing) = self.saved_listing(route) else { return false };
+				listing.plays =
+					listing.tracks.iter().map(|track| plays.get(id_of(&track.uri)).copied()).collect::<Option<_>>().unwrap_or_default();
 			},
 			Response::Playlists(playlists) => {
 				let Some(data) = &mut self.data else { return false };
@@ -209,6 +260,10 @@ impl Store {
 		true
 	}
 
+	fn saved_listing(&mut self, route: &Route) -> Option<&mut Listing> {
+		self.data.as_mut()?.listings.iter_mut().find(|saved| &saved.route == route).map(|saved| &mut saved.listing)
+	}
+
 	/// Writes after delivery, so filesystem latency never holds up fresh data's first paint.
 	pub(super) fn save(&mut self) -> io::Result<()> {
 		let Some(data) = &self.data else { return Ok(()) };
@@ -219,6 +274,12 @@ impl Store {
 				Ok(bytes) => break bytes,
 				Err(_) if !data.listings.is_empty() => {
 					data.listings.remove(0);
+				},
+				Err(_) if !data.searches.is_empty() => {
+					data.searches.remove(0);
+				},
+				Err(_) if data.home_feeds.len() > 1 => {
+					data.home_feeds.remove(0);
 				},
 				Err(error) => return Err(error),
 			}
@@ -241,6 +302,7 @@ impl Store {
 	pub(super) fn remove_playlist(&mut self, id: &str) {
 		if let Some(data) = &mut self.data {
 			data.playlists.retain(|playlist| playlist.id != id);
+			super::folders::remove_playlist(&mut data.rootlist, id);
 			data.listings.retain(|saved| !matches!(&saved.route, Route::Playlist(known) if known == id));
 		}
 		let _ = self.save();
@@ -256,7 +318,9 @@ impl Store {
 	pub(super) fn forget_listings(&mut self) {
 		if let Some(data) = &mut self.data {
 			data.listings.clear();
+			data.searches.clear();
 			data.home = None;
+			data.home_feeds.clear();
 		}
 		let _ = self.save();
 	}
@@ -329,18 +393,26 @@ mod tests {
 		let dir = scratch("round-trip");
 		let mut store = Store::new(&dir);
 		connect(&mut store, "alex");
-		let track = serde_json::from_value(serde_json::json!({
+		let track: Track = serde_json::from_value(serde_json::json!({
 			"uri": "spotify:episode:e", "name": "Episode", "type": "episode",
 			"show": { "name": "Show", "images": [{ "url": "https://show" }] }
 		}))
 		.unwrap();
-		store.record(&Response::Home(Home { recents: vec![Tile::liked()], recent_tracks: vec![track], loaded: true, ..Home::default() }));
+		store.record(&Response::Home(Home {
+			recents: vec![Tile::liked()],
+			recent_tracks: vec![track.clone()],
+			loaded: true,
+			..Home::default()
+		}));
 		let listing = Listing {
 			kicker: ("Playlist").into(),
 			title: "Liked Songs".into(),
 			total: 51,
 			next_offset: Some(50),
 			accent: Some("#123456".into()),
+			tracks: vec![track],
+			added_at: vec![Some(1_781_001_234)],
+			added_by: vec![Some("alex".into())],
 			..Listing::default()
 		};
 		store.record(&Response::Listing { route: Route::Liked, offset: 0, listing });
@@ -363,9 +435,24 @@ mod tests {
 		let listing = restored.listing(&Route::Liked).unwrap();
 		assert_eq!((listing.kicker.as_ref(), listing.total, listing.next_offset), ("Playlist", 51, Some(50)));
 		assert_eq!(listing.accent.as_deref(), Some("#123456"));
+		assert_eq!(listing.added_at(0), Some(1_781_001_234));
+		assert_eq!(listing.added_by(0).as_deref(), Some("alex"));
 		assert!(restored.listing(&Route::Album("missing".into())).is_none());
 		assert!(!path.with_extension("tmp").exists(), "atomic replacement leaves no temporary file");
 		fs::remove_dir_all(dir).unwrap();
+	}
+
+	#[test]
+	fn old_listing_snapshots_default_added_attributes_to_unknown() {
+		let mut saved = serde_json::to_value(Listing::default()).unwrap();
+		let object = saved.as_object_mut().unwrap();
+		object.remove("added_at");
+		object.remove("added_by");
+		object.insert("tracks".into(), serde_json::json!([{ "uri": "spotify:track:a" }]));
+		let listing: Listing = serde_json::from_value(saved).unwrap();
+		assert_eq!(listing.tracks.len(), 1);
+		assert_eq!(listing.added_at(0), None);
+		assert_eq!(listing.added_by(0), None);
 	}
 
 	#[test]
@@ -458,30 +545,30 @@ mod tests {
 	}
 
 	#[test]
-	fn daily_top_cache_survives_restarts_and_is_account_scoped() {
-		let dir = scratch("daily-top");
+	fn old_top_shelves_are_ignored_without_losing_the_snapshot() {
+		let dir = scratch("old-top");
 		let mut store = Store::new(&dir);
 		connect(&mut store, "alex");
-		store.record_top("alex", TopShelves {
-			checked_at: Some(100_000),
-			artists:    Some(vec![Tile::liked()]),
-			tracks:     Some(Vec::new()),
-		});
+		store.record(&Response::Home(Home { recent_tracks: Vec::new(), loaded: true, ..Home::default() }));
 		store.save().unwrap();
+		let path = store.path("alex");
+		let mut old: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+		old["top"] = serde_json::json!({"checked_at": 100_000, "artists": [], "tracks": []});
+		old["home"]["top_artists"] = serde_json::json!([]);
+		old["home"]["top_tracks"] = serde_json::json!([]);
+		fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
 		let mut restored = Store::new(&dir);
 		restored.load(Some("alex"));
-		let top = restored.top("alex");
-		assert!(top.fresh(100_000 + 24 * 60 * 60 - 1));
-		assert!(!top.fresh(100_000 + 24 * 60 * 60));
-		assert!(top.fresh(99_999), "clock rollback does not cause another API attempt");
-		assert_eq!(top.artists.unwrap(), [Tile::liked()]);
-		assert_eq!(top.tracks, Some(Vec::new()));
-		assert!(restored.top("bo").checked_at.is_none());
-		restored.record_top("bo", TopShelves { checked_at: Some(200_000), ..TopShelves::default() });
-		assert_eq!(restored.top("alex").checked_at, Some(100_000));
-		restored.clear();
-		assert!(restored.top("alex").checked_at.is_none());
-		fs::remove_dir_all(dir).unwrap_or_else(|error| assert_eq!(error.kind(), io::ErrorKind::NotFound));
+		assert!(restored.connected().is_some());
+		let home = restored.home().unwrap();
+		assert!(home.loaded);
+		assert_eq!(home.songs().0, "Recently played songs");
+		restored.save().unwrap();
+		let saved: serde_json::Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+		assert!(saved.get("top").is_none());
+		assert!(saved["home"].get("top_artists").is_none());
+		assert!(saved["home"].get("top_tracks").is_none());
+		fs::remove_dir_all(dir).unwrap();
 	}
 
 	#[test]
@@ -531,5 +618,32 @@ mod tests {
 		assert_eq!(playlists[0].owner.display_name.as_deref(), Some("Spotify"));
 		assert_eq!(super::super::Entry::Playlist(&playlists[0]).sub(), "Playlist • Spotify");
 		fs::remove_dir_all(dir).unwrap();
+	}
+
+	#[test]
+	fn native_folder_snapshot_preserves_hierarchy_and_prunes_deleted_playlist_counts() {
+		let directory = tempfile::tempdir().unwrap();
+		let mut store = Store::new(directory.path());
+		connect(&mut store, "alice");
+		let entries = vec![super::super::RootEntry::Folder(super::super::Folder {
+			id:       "folder".into(),
+			name:     "Music 雨".into(),
+			count:    1,
+			children: vec![super::super::RootEntry::Playlist("p".into())],
+		})];
+		assert!(store.record(&Response::Rootlist { account: "alice".into(), entries: entries.clone() }));
+		assert!(!store.record(&Response::Rootlist { account: "bob".into(), entries: Vec::new() }));
+		store.save().unwrap();
+		let mut restored = Store::new(directory.path());
+		restored.load(Some("alice"));
+		let Some(Response::Rootlist { entries: fresh, .. }) = restored.rootlist() else { panic!("missing native folder snapshot") };
+		assert_eq!(fresh, entries);
+		restored.remove_playlist("p");
+		let Some(Response::Rootlist { entries, .. }) = restored.rootlist() else { panic!("missing folder after playlist removal") };
+		let super::super::RootEntry::Folder(folder) = &entries[0] else { panic!("folder was removed with its playlist") };
+		assert_eq!(folder.count, 0);
+		assert!(folder.children.is_empty());
+		restored.load(Some("bob"));
+		assert!(restored.rootlist().is_none());
 	}
 }
