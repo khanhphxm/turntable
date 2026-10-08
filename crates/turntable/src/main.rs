@@ -21,15 +21,14 @@ mod widgets;
 
 use std::sync::Arc;
 
-// The macOS-only snapshot example consumes these dev dependencies; the app's tests don't.
-#[cfg(all(test, target_os = "macos"))]
-use {gpui_platform as _, libc as _, mach2 as _};
-
 use gpui_kit::{
 	AppContext as _, Bounds, IntoElement, ParentElement as _, Render, SharedString, Styled as _, TitlebarOptions, WindowBounds,
 	WindowOptions, div, point, px, size,
 };
 use turntable_core::{Controller, Options, Paths};
+// The macOS-only snapshot example consumes these dev dependencies; the app's tests don't.
+#[cfg(all(test, target_os = "macos"))]
+use {gpui_platform as _, libc as _, mach2 as _};
 
 /// jemalloc with one arena and no thread caches (`.cargo/config.toml`): unlike the system
 /// allocators it hands freed pages back, so the footprint follows what is in use rather than the

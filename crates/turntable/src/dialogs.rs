@@ -38,13 +38,7 @@ fn scrim(card: impl IntoElement, cx: &mut Context<'_, Shell>) -> AnyElement {
 		.items_center()
 		.justify_center()
 		.bg(theme::alpha(theme::base(), 0.7))
-		.child(
-			div()
-				.id("scrim")
-				.absolute()
-				.inset_0()
-				.on_click(cx.listener(|this, _, _, cx| this.send(Msg::CloseDialog, cx))),
-		)
+		.child(div().id("scrim").absolute().inset_0().on_click(cx.listener(|this, _, _, cx| this.send(Msg::CloseDialog, cx))))
 		.child(card)
 		.into_any_element()
 }
@@ -63,12 +57,9 @@ fn card(title: &'static str, body: impl IntoElement, cx: &mut Context<'_, Shell>
 		.flex_col()
 		.gap_4()
 		.child(
-			div()
-				.flex()
-				.items_center()
-				.justify_between()
-				.child(div().text_size(px(24.)).font_weight(FontWeight::BOLD).child(title))
-				.child(icon_button("dialog-close", Icon::Close, px(16.), false, cx.listener(|this, _, _, cx| this.send(Msg::CloseDialog, cx)))),
+			div().flex().items_center().justify_between().child(div().text_size(px(24.)).font_weight(FontWeight::BOLD).child(title)).child(
+				icon_button("dialog-close", Icon::Close, px(16.), false, cx.listener(|this, _, _, cx| this.send(Msg::CloseDialog, cx))),
+			),
 		)
 		.child(body)
 }
@@ -90,8 +81,7 @@ impl Shell {
 		let st = self.st();
 		let me = st.library.me.as_ref().map(|m| m.id.clone()).unwrap_or_default();
 		// Only playlists the user may add to: their own and collaborative ones.
-		let mine: Vec<Tile> =
-			st.library.playlists.iter().filter(|p| p.owner.id == me || p.collaborative).map(Tile::playlist).collect();
+		let mine: Vec<Tile> = st.library.playlists.iter().filter(|p| p.owner.id == me || p.collaborative).map(Tile::playlist).collect();
 		let rows: Vec<AnyElement> = mine
 			.iter()
 			.enumerate()
@@ -127,7 +117,11 @@ impl Shell {
 			.hover(|s| s.bg(theme::hover()))
 			.cursor_pointer()
 			.on_click(cx.listener(|this, _, _, cx| this.send(Msg::AddToPlaylist(None), cx)))
-			.child(div().size(px(40.)).rounded(px(4.)).bg(theme::raised_hover()).flex().items_center().justify_center().child(icon(Icon::Plus, px(20.), theme::text())))
+			.child(div().size(px(40.)).rounded(px(4.)).bg(theme::raised_hover()).flex().items_center().justify_center().child(icon(
+				Icon::Plus,
+				px(20.),
+				theme::text(),
+			)))
 			.child(div().text_size(px(16.)).child("New playlist"));
 		let body = div()
 			.flex()
@@ -153,19 +147,15 @@ impl Shell {
 			.flex_col()
 			.gap_4()
 			.child(
-				div()
-					.flex()
-					.gap_4()
-					.child(self.art(&route, cover.as_deref(), px(180.), cx).shadow_lg())
-					.child(
-						div()
-							.flex_1()
-							.flex()
-							.flex_col()
-							.gap_3()
-							.child(Input::new(&name))
-							.child(div().flex_1().child(Textarea::new(&description).h_full())),
-					),
+				div().flex().gap_4().child(self.art(&route, cover.as_deref(), px(180.), cx).shadow_lg()).child(
+					div()
+						.flex_1()
+						.flex()
+						.flex_col()
+						.gap_3()
+						.child(Input::new(&name))
+						.child(div().flex_1().child(Textarea::new(&description).h_full())),
+				),
 			)
 			.child(
 				div()
@@ -198,7 +188,11 @@ impl Shell {
 							.text_color(theme::base())
 							.text_size(px(16.))
 							.font_weight(FontWeight::BOLD)
-							.when(can_save, |s| s.cursor_pointer().hover(|s| s.bg(theme::alpha(theme::text(), 0.9))).on_click(cx.listener(|this, _, _, cx| this.send(Msg::SaveRename, cx))))
+							.when(can_save, |s| {
+								s.cursor_pointer()
+									.hover(|s| s.bg(theme::alpha(theme::text(), 0.9)))
+									.on_click(cx.listener(|this, _, _, cx| this.send(Msg::SaveRename, cx)))
+							})
 							.when(!can_save, |s| s.opacity(0.5))
 							.child("Save"),
 					),

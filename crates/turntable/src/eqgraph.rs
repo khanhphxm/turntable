@@ -5,9 +5,9 @@
 use std::{cell::Cell, rc::Rc};
 
 use gpui_kit::{
-	App, AppContext as _, Bounds, Context, DispatchPhase, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
-	MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PathBuilder, Pixels, Point, Render, StatefulInteractiveElement as _, Styled as _, Window, canvas, div,
-	point, prelude::FluentBuilder as _, px, relative,
+	App, AppContext as _, Bounds, Context, DispatchPhase, Entity, EventEmitter, FontWeight, InteractiveElement as _, IntoElement,
+	MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, PathBuilder, Pixels, Point, Render,
+	StatefulInteractiveElement as _, Styled as _, Window, canvas, div, point, prelude::FluentBuilder as _, px, relative,
 };
 use turntable_core::app::{eq_db_step, eq_step_db};
 
@@ -90,7 +90,11 @@ impl EqGraph {
 		}
 		let x = f32::from(p.x - b.origin.x);
 		let w = f32::from(b.size.width);
-		(0..BANDS.len()).map(|i| (i, (x - x_frac(i) * w).abs())).filter(|(_, d)| *d <= PICK).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(i, _)| i)
+		(0..BANDS.len())
+			.map(|i| (i, (x - x_frac(i) * w).abs()))
+			.filter(|(_, d)| *d <= PICK)
+			.min_by(|a, b| a.1.total_cmp(&b.1))
+			.map(|(i, _)| i)
 	}
 
 	fn db_at(&self, p: Point<Pixels>) -> f32 {
@@ -239,12 +243,16 @@ impl Render for EqGraph {
 			});
 		let values: Vec<String> = gains.iter().map(|db| db_label(*db).replace(" dB", "")).collect();
 		let freqs: Vec<String> = BANDS.iter().map(|f| (*f).to_owned()).collect();
-		div()
-			.flex()
-			.gap_4()
-			.when(!enabled, |s| s.opacity(0.5))
-			.child(scale())
-			.child(div().flex_1().flex().flex_col().gap_3().px(px(KNOB)).child(plot).child(div().flex().flex_col().gap_1().child(labels(freqs, shown)).child(labels(values, shown))))
+		div().flex().gap_4().when(!enabled, |s| s.opacity(0.5)).child(scale()).child(
+			div()
+				.flex_1()
+				.flex()
+				.flex_col()
+				.gap_3()
+				.px(px(KNOB))
+				.child(plot)
+				.child(div().flex().flex_col().gap_1().child(labels(freqs, shown)).child(labels(values, shown))),
+		)
 	}
 }
 
@@ -296,6 +304,13 @@ fn labels(text: Vec<String>, strong: Option<usize>) -> impl IntoElement {
 /// The dB scale left of the plot, its labels level with the grid lines.
 fn scale() -> impl IntoElement {
 	div().relative().w(px(44.)).h(px(PLOT_H)).children(GRID.iter().map(|db| {
-		div().absolute().right_0().top(relative(y_frac(*db))).mt(px(-8.)).text_size(px(12.)).text_color(theme::subdued()).child(db_label(*db))
+		div()
+			.absolute()
+			.right_0()
+			.top(relative(y_frac(*db)))
+			.mt(px(-8.))
+			.text_size(px(12.))
+			.text_color(theme::subdued())
+			.child(db_label(*db))
 	}))
 }

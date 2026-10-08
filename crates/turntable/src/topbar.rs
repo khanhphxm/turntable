@@ -77,6 +77,7 @@ impl Shell {
 					.items_center()
 					.justify_end()
 					.gap_2()
+					.children(self.network_pill())
 					.child(round_button(
 						"eq",
 						Icon::Sliders,

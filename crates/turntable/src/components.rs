@@ -3,8 +3,8 @@
 //! listed.
 
 use gpui_kit::{
-	AnyElement, ClickEvent, Context, Div, ElementId, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-	SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, WeakEntity,
+	AnyElement, AppContext as _, ClickEvent, Context, Div, ElementId, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+	Pixels, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, WeakEntity,
 	component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
 	div, linear_color_stop, linear_gradient,
 	prelude::FluentBuilder as _,
@@ -255,6 +255,18 @@ impl Shell {
 					.child(div().w(px(40.)).flex().justify_end().child(clock(u64::from(t.duration_ms))))
 					.child(div().invisible().group_hover("row", |s| s.visible()).child(icon(Icon::Ellipsis, px(16.), theme::subdued()))),
 			)
+			// On the user's own playlist, rows drag to a new place; the drop target shows a line
+			// where the row will land.
+			.when(editable, |row| {
+				let title = t.name.clone();
+				row.on_drag(DraggedRow { from: i, title }, |d, _, _, cx| cx.new(|_| d.clone()))
+					.drag_over::<DraggedRow>(|s, _, _, _| s.border_t_2().border_color(theme::accent()))
+					.on_drop(cx.listener(move |this, d: &DraggedRow, _, cx| {
+						if d.from != i {
+							this.send(Msg::MoveRow(d.from, i), cx);
+						}
+					}))
+			})
 			.context_menu(move |menu, _, _| track_menu(menu, &shell, i, menu_artist.clone(), menu_album.clone(), editable))
 			.into_any_element()
 	}
@@ -394,7 +406,9 @@ impl Shell {
 							.line_height(px(size * 1.1))
 							.font_weight(FontWeight::EXTRA_BOLD)
 							.line_clamp(2)
-							.when(editable, |s| s.cursor_pointer().on_click(cx.listener(|this, _, _, cx| this.send(Msg::RenamePlaylist, cx))))
+							.when(editable, |s| {
+								s.cursor_pointer().on_click(cx.listener(|this, _, _, cx| this.send(Msg::RenamePlaylist, cx)))
+							})
 							.child(title),
 					)
 					.child(div().text_size(px(14.)).child(meta)),
@@ -552,4 +566,25 @@ fn track_menu(
 		menu = menu.item(item("Go to album", Msg::Navigate(Route::Album(id))));
 	}
 	menu
+}
+
+/// A track row being dragged within the user's playlist; it draws itself under the pointer.
+#[derive(Clone)]
+pub struct DraggedRow {
+	from:  usize,
+	title: String,
+}
+
+impl gpui_kit::Render for DraggedRow {
+	fn render(&mut self, _: &mut gpui_kit::Window, _: &mut Context<'_, Self>) -> impl IntoElement {
+		div()
+			.px_3()
+			.py_1p5()
+			.rounded(px(4.))
+			.bg(theme::raised_hover())
+			.shadow_lg()
+			.text_size(px(14.))
+			.text_color(theme::text())
+			.child(self.title.clone())
+	}
 }

@@ -6,7 +6,7 @@ use std::{sync::Arc, time::Instant};
 
 use gpui_kit::{
 	AppContext as _, Context, Entity, FocusHandle, Focusable, ImageSource, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment,
-	ListState, ParentElement as _, Render, Styled as _, Window, actions,
+	ListState, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Window, actions,
 	component::input::{InputEvent, InputState},
 	div,
 	prelude::FluentBuilder as _,
@@ -20,10 +20,25 @@ use crate::{
 	widgets::{Slider, SliderEvent},
 };
 
+/// How many pages back the history reaches.
+const HISTORY: usize = 50;
+
 /// How long a toast stays up.
 const TOAST_FOR: std::time::Duration = std::time::Duration::from_millis(3000);
 
-actions!(turntable, [CloseDialog, TogglePlay, Next, Previous, Back, Forward, FocusSearch, ToggleLibrary, ToggleQueue, ToggleLyrics, ToggleNowPlaying]);
+actions!(turntable, [
+	CloseDialog,
+	TogglePlay,
+	Next,
+	Previous,
+	Back,
+	Forward,
+	FocusSearch,
+	ToggleLibrary,
+	ToggleQueue,
+	ToggleLyrics,
+	ToggleNowPlaying
+]);
 
 pub fn bind_keys(cx: &mut gpui_kit::App) {
 	cx.bind_keys([
@@ -58,36 +73,38 @@ pub enum Side {
 }
 
 pub struct Shell {
-	pub core:          Controller,
-	pub page:          Page,
-	pub back:          Vec<Page>,
-	pub forward:       Vec<Page>,
+	pub core:           Controller,
+	pub page:           Page,
+	pub back:           std::collections::VecDeque<Page>,
+	pub forward:        Vec<Page>,
 	/// Bumped whenever the right-hand panel changes, so its entrance animation runs again.
-	pub panel_gen:     usize,
-	pub seek:          Entity<Slider>,
-	pub volume_slider: Entity<Slider>,
+	pub panel_gen:      usize,
+	pub seek:           Entity<Slider>,
+	pub volume_slider:  Entity<Slider>,
 	/// The main view's virtual list (listing pages), and what it was built for.
-	pub list:          ListState,
-	pub list_for:      Option<(Route, usize)>,
-	pub search:        Entity<InputState>,
-	pub eq_graph:      Entity<crate::eqgraph::EqGraph>,
-	pub focus:         FocusHandle,
+	pub list:           ListState,
+	pub list_for:       Option<(Route, usize)>,
+	pub search:         Entity<InputState>,
+	pub eq_graph:       Entity<crate::eqgraph::EqGraph>,
+	pub focus:          FocusHandle,
 	/// The main view's width as of this frame (titles size themselves to it).
-	pub main_w:        f32,
+	pub main_w:         f32,
 	/// The window's scale factor as of this frame (covers decode to it).
-	pub scale:         f32,
-	pub lyrics_scroll: gpui_kit::ScrollHandle,
+	pub scale:          f32,
+	pub lyrics_scroll:  gpui_kit::ScrollHandle,
 	/// The lyric line last scrolled to.
-	pub lyrics_line:   Option<usize>,
+	pub lyrics_line:    Option<usize>,
 	/// The OS's Now Playing session (set once the window is open).
-	pub now_playing:   Option<crate::nowplaying::NowPlaying>,
+	pub now_playing:    Option<crate::nowplaying::NowPlaying>,
 	/// The open "Edit details" dialog's fields.
-	pub details:       Option<crate::dialogs::DetailsInputs>,
+	pub details:        Option<crate::dialogs::DetailsInputs>,
 	/// The empty-playlist finder's field (for the playlist last shown).
-	pub finder:        Option<crate::pages::finder::Finder>,
+	pub finder:         Option<crate::pages::finder::Finder>,
+	/// Your Library's filter field, while open.
+	pub library_filter: Option<Entity<InputState>>,
 	/// The toast last shown, and the one whose time is up (the core never clears toasts).
-	pub toast_shown:   Option<u32>,
-	pub toast_gone:    Option<u32>,
+	pub toast_shown:    Option<u32>,
+	pub toast_gone:     Option<u32>,
 }
 
 impl Focusable for Shell {
@@ -147,7 +164,7 @@ impl Shell {
 		let mut shell = Self {
 			core,
 			page,
-			back: Vec::new(),
+			back: std::collections::VecDeque::new(),
 			forward: Vec::new(),
 			panel_gen: 0,
 			seek,
@@ -164,6 +181,7 @@ impl Shell {
 			now_playing: None,
 			details: None,
 			finder: None,
+			library_filter: None,
 			toast_shown: None,
 			toast_gone: None,
 		};
@@ -252,10 +270,18 @@ impl Shell {
 
 	// --- Navigation -----------------------------------------------------------------------
 
+	/// Pushes `page` onto the back history, keeping the newest `HISTORY` (as browsers do).
+	fn remember(&mut self, page: Page) {
+		if self.back.len() == HISTORY {
+			self.back.pop_front();
+		}
+		self.back.push_back(page);
+	}
+
 	pub fn open(&mut self, page: Page, cx: &mut Context<'_, Self>) {
 		if self.page != page {
 			let from = std::mem::replace(&mut self.page, page.clone());
-			self.back.push(from);
+			self.remember(from);
 			self.forward.clear();
 			self.show(page, cx);
 		}
@@ -266,7 +292,7 @@ impl Shell {
 	}
 
 	pub fn go_back(&mut self, cx: &mut Context<'_, Self>) {
-		if let Some(p) = self.back.pop() {
+		if let Some(p) = self.back.pop_back() {
 			let from = std::mem::replace(&mut self.page, p.clone());
 			self.forward.push(from);
 			self.show(p, cx);
@@ -276,7 +302,7 @@ impl Shell {
 	pub fn go_forward(&mut self, cx: &mut Context<'_, Self>) {
 		if let Some(p) = self.forward.pop() {
 			let from = std::mem::replace(&mut self.page, p.clone());
-			self.back.push(from);
+			self.remember(from);
 			self.show(p, cx);
 		}
 	}
@@ -440,4 +466,31 @@ fn toast_view(text: String, id: u32) -> impl IntoElement {
 				el.opacity(d).mb(px(-12. * (1. - d)))
 			}),
 	)
+}
+
+impl Shell {
+	/// While the connection is down (or playback needs a nudge after it came back): a compact
+	/// pill in the top bar; the full sentence is its tooltip.
+	pub fn network_pill(&self) -> Option<impl IntoElement> {
+		let st = self.st();
+		let text =
+			st.network_notice.clone().or_else(|| st.offline.then(|| "You're offline. Showing music saved on this computer.".to_owned()))?;
+		let short = if st.offline { "Offline" } else { "Reconnected" };
+		Some(
+			div()
+				.id("network")
+				.h(px(32.))
+				.px_3()
+				.flex()
+				.items_center()
+				.gap_2()
+				.rounded_full()
+				.bg(theme::raised())
+				.text_size(px(14.))
+				.text_color(theme::subdued())
+				.tooltip(move |window, cx| gpui_kit::component::tooltip::Tooltip::new(text.clone()).build(window, cx))
+				.child(crate::widgets::icon(crate::widgets::Icon::Offline, px(16.), theme::subdued()))
+				.child(short),
+		)
+	}
 }

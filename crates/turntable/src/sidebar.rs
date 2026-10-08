@@ -2,10 +2,11 @@
 //! a rail of covers.
 
 use gpui_kit::{
-	AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
-	Styled as _,
+	AnyElement, AppContext as _, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+	StatefulInteractiveElement as _, Styled as _,
 	component::{
 		button::{Button, ButtonVariants as _},
+		input::{Input, InputEvent, InputState},
 		menu::{DropdownMenu as _, PopupMenuItem},
 	},
 	div,
@@ -13,7 +14,7 @@ use gpui_kit::{
 	px, uniform_list,
 };
 use turntable_core::{
-	Msg, Route,
+	Field, Msg, Route,
 	library::{Kind, Sort, View},
 };
 
@@ -172,44 +173,37 @@ impl Shell {
 					})),
 			)
 			.child(
-				div()
-					.flex()
-					.items_center()
-					.justify_between()
-					.pl_2()
-					.pr_2()
-					.child(icon_button("library-search", Icon::Search, px(16.), false, |_, _, _| {}))
-					.child(
-						Button::new("sort")
-							.ghost()
-							.child(
-								div()
-									.flex()
-									.items_center()
-									.gap_2()
-									.text_size(px(14.))
-									.text_color(theme::subdued())
-									.child(sort.label())
-									.child(icon(view_icon(view), px(16.), theme::subdued())),
-							)
-							.dropdown_menu(move |menu, _, _| {
-								let mut menu = menu.label("Sort by");
-								for s in Sort::ALL {
-									let shell = shell.clone();
-									menu = menu.item(PopupMenuItem::new(s.label()).checked(s == sort).on_click(move |_, _, cx| {
-										let _ = shell.update(cx, |this, cx| this.send(Msg::LibrarySort(s), cx));
-									}));
-								}
-								menu = menu.separator().label("View as");
-								for v in View::ALL {
-									let shell = shell.clone();
-									menu = menu.item(PopupMenuItem::new(v.label()).checked(v == view).on_click(move |_, _, cx| {
-										let _ = shell.update(cx, |this, cx| this.send(Msg::LibraryView(v), cx));
-									}));
-								}
-								menu
-							}),
-					),
+				div().flex().items_center().justify_between().pl_2().pr_2().child(self.library_search(cx)).child(
+					Button::new("sort")
+						.ghost()
+						.child(
+							div()
+								.flex()
+								.items_center()
+								.gap_2()
+								.text_size(px(14.))
+								.text_color(theme::subdued())
+								.child(sort.label())
+								.child(icon(view_icon(view), px(16.), theme::subdued())),
+						)
+						.dropdown_menu(move |menu, _, _| {
+							let mut menu = menu.label("Sort by");
+							for s in Sort::ALL {
+								let shell = shell.clone();
+								menu = menu.item(PopupMenuItem::new(s.label()).checked(s == sort).on_click(move |_, _, cx| {
+									let _ = shell.update(cx, |this, cx| this.send(Msg::LibrarySort(s), cx));
+								}));
+							}
+							menu = menu.separator().label("View as");
+							for v in View::ALL {
+								let shell = shell.clone();
+								menu = menu.item(PopupMenuItem::new(v.label()).checked(v == view).on_click(move |_, _, cx| {
+									let _ = shell.update(cx, |this, cx| this.send(Msg::LibraryView(v), cx));
+								}));
+							}
+							menu
+						}),
+				),
 			)
 	}
 
@@ -256,5 +250,55 @@ fn view_icon(v: View) -> Icon {
 		View::List => Icon::ViewList,
 		View::Grid => Icon::ViewGrid,
 		View::Large => Icon::ViewLarge,
+	}
+}
+
+impl Shell {
+	/// Spotify's "Search in Your Library": a magnifier that opens into a field filtering the rows.
+	fn library_search(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
+		let Some(input) = self.library_filter.clone() else {
+			return icon_button(
+				"library-search",
+				Icon::Search,
+				px(16.),
+				false,
+				cx.listener(|this, _, window, cx| {
+					let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search in Your Library"));
+					cx.subscribe(&input, |this, input, e: &InputEvent, cx| match e {
+						InputEvent::Change => {
+							let text = input.read(cx).value().to_string();
+							this.send(Msg::Focus(Some(Field::LibraryFilter)), cx);
+							let old = this.st().library.filter.encode_utf16().count();
+							this.send(Msg::Edit { from: 0, to: old, text }, cx);
+						},
+						// Enter opens the first match (the core's Submit for this field).
+						InputEvent::PressEnter { .. } => this.send(Msg::Submit, cx),
+						// Leaving an empty field folds it back into the magnifier.
+						InputEvent::Blur if input.read(cx).value().is_empty() => {
+							this.library_filter = None;
+							cx.notify();
+						},
+						_ => {},
+					})
+					.detach();
+					input.update(cx, |s, cx| s.focus(window, cx));
+					this.library_filter = Some(input);
+					cx.notify();
+				}),
+			)
+			.into_any_element();
+		};
+		div()
+			.w(px(188.))
+			.h(px(32.))
+			.px_2()
+			.flex()
+			.items_center()
+			.gap_2()
+			.rounded(px(4.))
+			.bg(theme::raised_hover())
+			.child(icon(Icon::Search, px(16.), theme::subdued()))
+			.child(div().flex_1().text_size(px(14.)).child(Input::new(&input).appearance(false).cleanable(true)))
+			.into_any_element()
 	}
 }

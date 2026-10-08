@@ -108,7 +108,13 @@ impl Shell {
 							.flex()
 							.flex_col()
 							.gap_4()
-							.child(div().text_size(px(24.)).font_weight(FontWeight::BOLD).text_color(theme::text()).child("Let's find something for your playlist"))
+							.child(
+								div()
+									.text_size(px(24.))
+									.font_weight(FontWeight::BOLD)
+									.text_color(theme::text())
+									.child("Let's find something for your playlist"),
+							)
 							.child(search_field(&input)),
 					)
 					.child(icon_button(

@@ -4,9 +4,9 @@ use std::{cell::Cell, rc::Rc};
 
 use gpui_kit::{
 	App, AppContext as _, Bounds, ClickEvent, Context, DispatchPhase, Div, ElementId, Entity, EventEmitter, FontWeight, Hsla,
-	InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point,
-	Render, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Svg, Window, canvas, div, prelude::FluentBuilder as _,
-	px, relative, rgb, svg,
+	InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render,
+	SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Svg, Window, canvas, div, prelude::FluentBuilder as _, px,
+	relative, rgb, svg,
 };
 
 pub use crate::assets::Icon;

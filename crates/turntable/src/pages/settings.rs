@@ -5,7 +5,14 @@ use gpui_kit::{
 	Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _,
 	Styled as _, component::switch::Switch, div, px,
 };
-use turntable_core::{Msg, app::settings::Pref, audio::Normalize};
+use turntable_core::{
+	Msg,
+	app::{
+		rules::{Sleep, SleepChoice},
+		settings::{Output, Pref},
+	},
+	audio::Normalize,
+};
 
 use crate::{
 	shell::Shell,
@@ -90,6 +97,7 @@ impl Shell {
 				)))
 				.child(
 					group("Playback")
+						.child(setting("Sleep timer", "Pause the music after a while", self.sleep_menu(cx)))
 						.child(setting(
 							"Autoplay",
 							"Keep playing similar songs when your music ends",
@@ -103,6 +111,7 @@ impl Shell {
 				)
 				.child(
 					group("Audio")
+						.child(setting("Output", "Where this computer plays", self.output_menu(cx)))
 						.child(setting(
 							"Normalize volume",
 							"Play every track at the same loudness",
@@ -147,5 +156,71 @@ impl Shell {
 					div().text_size(px(14.)).text_color(theme::subdued()).child(format!("Connect name: {device}")),
 				))),
 		)
+	}
+}
+
+/// Sleep timer choices, as Spotify offers them.
+const SLEEP: [(&str, SleepChoice); 6] = [
+	("Off", SleepChoice::Off),
+	("15 min", SleepChoice::Minutes(15)),
+	("30 min", SleepChoice::Minutes(30)),
+	("45 min", SleepChoice::Minutes(45)),
+	("1 hour", SleepChoice::Minutes(60)),
+	("End of track", SleepChoice::EndOfTrack),
+];
+
+impl Shell {
+	/// The sleep timer as a menu (the choices don't fit a row of chips beside the label).
+	fn sleep_menu(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+		use gpui_kit::component::{
+			button::Button,
+			menu::{DropdownMenu as _, PopupMenuItem},
+		};
+		let current = match self.st().rules.sleep {
+			None => SleepChoice::Off,
+			Some(Sleep::At { minutes, .. }) => SleepChoice::Minutes(minutes),
+			Some(Sleep::EndOfTrack) => SleepChoice::EndOfTrack,
+		};
+		let label = SLEEP.iter().find(|(_, c)| *c == current).map_or("Off", |(l, _)| *l);
+		let shell = cx.entity().downgrade();
+		Button::new("sleep").outline().dropdown_caret(true).label(label).dropdown_menu(move |mut menu, _, _| {
+			for (label, choice) in SLEEP {
+				let shell = shell.clone();
+				menu = menu.item(PopupMenuItem::new(label).checked(choice == current).on_click(move |_, _, cx| {
+					let _ = shell.update(cx, |this, cx| this.send(Msg::Sleep(choice), cx));
+				}));
+			}
+			menu
+		})
+	}
+
+	/// The output device picker: the system default, then every device the OS lists.
+	fn output_menu(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+		use gpui_kit::component::{
+			button::Button,
+			menu::{DropdownMenu as _, PopupMenuItem},
+		};
+		let sys = &self.st().sys;
+		let chosen = self.st().prefs.audio.output.clone();
+		let label = chosen.as_ref().map_or_else(
+			|| sys.default_output.as_ref().map_or_else(|| "System default".to_owned(), |d| format!("System default ({d})")),
+			|o| o.name.clone(),
+		);
+		let devices = sys.outputs.clone();
+		let shell = cx.entity().downgrade();
+		Button::new("output").outline().dropdown_caret(true).label(label).dropdown_menu(move |menu, _, _| {
+			let pick = |name: String, output: Option<Output>, on: bool| {
+				let shell = shell.clone();
+				PopupMenuItem::new(name).checked(on).on_click(move |_, _, cx| {
+					let _ = shell.update(cx, |this, cx| this.send(Msg::Pref(Pref::Output(output.clone())), cx));
+				})
+			};
+			let mut menu = menu.item(pick("System default".to_owned(), None, chosen.is_none()));
+			for d in &devices {
+				let on = chosen.as_ref().is_some_and(|c| c.uid == d.uid);
+				menu = menu.item(pick(d.name.clone(), Some(Output { uid: d.uid.clone(), name: d.name.clone() }), on));
+			}
+			menu
+		})
 	}
 }

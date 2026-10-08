@@ -173,7 +173,11 @@ impl Shell {
 	/// Cards for `tiles`, ids prefixed with `key`: only as many as fit one row of the main view
 	/// (shelves don't scroll sideways, so the rest would be built and laid out for nothing).
 	pub fn cards(&self, key: &'static str, tiles: &[Tile], cx: &mut Context<'_, Self>) -> Vec<gpui_kit::Stateful<Div>> {
-		#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a small positive card count (max(1.) floors it at one)")]
+		#[expect(
+			clippy::cast_possible_truncation,
+			clippy::cast_sign_loss,
+			reason = "a small positive card count (max(1.) floors it at one)"
+		)]
 		let fit = ((self.main_w - 24.) / theme::CARD_W).floor().max(1.) as usize;
 		tiles.iter().take(fit).enumerate().map(|(i, t)| self.card(gpui_kit::ElementId::NamedInteger(key.into(), i as u64), t, cx)).collect()
 	}

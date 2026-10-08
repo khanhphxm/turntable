@@ -86,7 +86,9 @@ impl Shell {
 					.justify_center()
 					.cursor_pointer()
 					// ⊕ saves to Liked Songs; ✓ opens the playlist picker (where it can be taken out).
-					.on_click(cx.listener(move |this, _, _, cx| this.send(if added { Msg::AddNowPlayingToPlaylist } else { Msg::ToggleLike }, cx)))
+					.on_click(cx.listener(move |this, _, _, cx| {
+						this.send(if added { Msg::AddNowPlayingToPlaylist } else { Msg::ToggleLike }, cx);
+					}))
 					.child(added_badge(added, px(16.))),
 			)
 		})

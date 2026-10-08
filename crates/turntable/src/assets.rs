@@ -48,6 +48,7 @@ icons! {
 	Music => "music",
 	Mute => "mute",
 	Next => "next",
+	Offline => "offline",
 	NowPlaying => "now-playing",
 	Pause => "pause",
 	Pencil => "pencil",

@@ -66,7 +66,8 @@ impl NowPlaying {
 		let st = shell.st();
 		let item = &st.item;
 		let url = item.cover(CoverSize::Default);
-		let art = url.and_then(|u| st.images.get(u)).map(|c| Arc::<[u8]>::from(c.bytes.as_slice()));
+		// Asking also queues the cover's fetch, so the OS gets artwork once it arrives.
+		let art = st.image(url).map(|c| Arc::<[u8]>::from(c.bytes.as_slice()));
 		let position = st.position_ms();
 		let now = Published { uri: item.uri.clone(), art: art.is_some(), playing: st.playing(), anchor: st.anchor.position_ms };
 		let track_changed = now.uri != self.published.uri || now.art != self.published.art;

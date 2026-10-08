@@ -1,7 +1,9 @@
 //! A playlist, album or Liked Songs: header, action bar, then the track table (virtualised;
 //! the next page loads as the end comes into view).
 
-use gpui_kit::{AnyElement, Context, FontWeight, IntoElement, ParentElement as _, Styled as _, Window, div, list, prelude::FluentBuilder as _, px};
+use gpui_kit::{
+	AnyElement, Context, FontWeight, IntoElement, ParentElement as _, Styled as _, Window, div, list, prelude::FluentBuilder as _, px,
+};
 use turntable_core::{Msg, Route, spotify::id_of};
 
 use crate::{
@@ -118,7 +120,8 @@ impl Shell {
 			)
 			.into_any_element();
 		let shuffle = self.st().options.shuffle;
-		let actions = icon_button("page-shuffle", Icon::Shuffle, px(32.), shuffle, cx.listener(|this, _, _, cx| this.send(Msg::ToggleShuffle, cx)));
+		let actions =
+			icon_button("page-shuffle", Icon::Shuffle, px(32.), shuffle, cx.listener(|this, _, _, cx| this.send(Msg::ToggleShuffle, cx)));
 		let column = if matches!(route, Route::Album(_)) { Column::None } else { Column::Album };
 		div()
 			.w_full()
