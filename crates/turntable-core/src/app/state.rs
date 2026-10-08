@@ -94,7 +94,12 @@ impl Anchor {
 	}
 
 	pub fn now_ms(&self) -> u64 {
-		let advanced = Duration::try_from_secs_f64(self.at.elapsed().as_secs_f64() * self.speed.max(0.0))
+		self.position_at(Instant::now())
+	}
+
+	/// Interpolate from the core's monotonic anchor; rendering never advances or mutates it.
+	pub fn position_at(&self, now: Instant) -> u64 {
+		let advanced = Duration::try_from_secs_f64(now.saturating_duration_since(self.at).as_secs_f64() * self.speed.max(0.0))
 			.map_or(u64::MAX, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
 		self.position_ms.saturating_add(advanced)
 	}
@@ -486,4 +491,30 @@ pub fn eq_step_db(step: u8) -> f32 {
 #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to ±12 dB, so the rounded step is 0..=EQ_STEPS")]
 pub fn eq_db_step(db: f32) -> u8 {
 	((crate::audio::sanitize_gain_db(db) + crate::audio::MAX_GAIN_DB) / crate::audio::GAIN_STEP_DB) as u8
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn playhead_interpolates_between_core_events_at_the_reported_speed() {
+		let at = Instant::now();
+		let anchor = Anchor { position_ms: 1_000, at, speed: 1.0 };
+		assert_eq!(anchor.position_at(at), 1_000);
+		assert_eq!(anchor.position_at(at + Duration::from_millis(16)), 1_016);
+		assert_eq!(anchor.position_at(at + Duration::from_millis(500)), 1_500);
+		assert_eq!(Anchor { speed: 2.0, ..anchor }.position_at(at + Duration::from_millis(500)), 2_000);
+		assert_eq!(anchor.position_ms, 1_000, "sampling does not move the core's anchor");
+	}
+
+	#[test]
+	fn paused_and_future_anchors_stay_frozen_and_overflow_saturates() {
+		let at = Instant::now();
+		let anchor = Anchor { position_ms: 1_000, at, speed: 0.0 };
+		assert_eq!(anchor.position_at(at + Duration::from_secs(60)), 1_000);
+		assert_eq!(Anchor { speed: -1.0, ..anchor }.position_at(at + Duration::from_secs(60)), 1_000);
+		assert_eq!(Anchor { speed: 1.0, ..anchor }.position_at(at - Duration::from_secs(1)), 1_000);
+		assert_eq!(Anchor { position_ms: u64::MAX - 1, speed: 1.0, ..anchor }.position_at(at + Duration::from_secs(1)), u64::MAX);
+	}
 }

@@ -134,7 +134,7 @@ pub struct Shell {
 	pub forward:              Vec<Page>,
 	/// Bumped whenever the right-hand panel changes, so its entrance animation runs again.
 	pub panel_gen:            usize,
-	pub seek:                 Entity<Slider>,
+	pub playhead:             Entity<crate::bar::Playhead>,
 	pub volume_slider:        Entity<Slider>,
 	/// Settings' crossfade length (0..=MAX_CROSSFADE seconds).
 	pub crossfade:            Entity<Slider>,
@@ -217,6 +217,7 @@ impl Focusable for Shell {
 impl Shell {
 	pub fn new(core: Controller, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
 		let seek = Slider::new(cx, 0.);
+		let playhead = cx.new(|cx| crate::bar::Playhead::new(seek.clone(), core.state(), window, cx));
 		let volume_slider = Slider::new(cx, f32::from(core.state().volume) / 100.);
 		let crossfade = Slider::new(cx, f32::from(core.state().prefs.playback.crossfade) / f32::from(MAX_CROSSFADE));
 		cx.subscribe(&crossfade, |this, _, e: &SliderEvent, cx| {
@@ -269,7 +270,7 @@ impl Shell {
 			back: std::collections::VecDeque::new(),
 			forward: Vec::new(),
 			panel_gen: 0,
-			seek,
+			playhead,
 			volume_slider,
 			crossfade,
 			list,
@@ -374,9 +375,8 @@ impl Shell {
 			self.panel_gen += 1;
 		}
 		let st = self.core.state();
-		let total = st.duration_ms().max(1);
-		let (pos, vol) = (st.position_ms() as f32 / total as f32, f32::from(st.volume) / 100.);
-		self.seek.update(cx, |s, cx| s.set(pos, cx));
+		self.playhead.update(cx, |playhead, cx| playhead.sync(st, cx));
+		let vol = f32::from(st.volume) / 100.;
 		self.volume_slider.update(cx, |s, cx| s.set(vol, cx));
 		let fade = f32::from(self.core.state().prefs.playback.crossfade) / f32::from(MAX_CROSSFADE);
 		self.crossfade.update(cx, |s, cx| s.set(fade, cx));

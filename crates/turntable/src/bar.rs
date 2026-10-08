@@ -1,12 +1,14 @@
 //! The player bar: now playing on the left, transport and seek in the middle, panels and volume on the right.
 
+use std::time::Duration;
+
 use gpui_kit::{
-	Context, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _, Styled as _, div,
-	prelude::FluentBuilder as _, px, relative,
+	Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
+	Subscription, Task, Window, div, prelude::FluentBuilder as _, px, relative,
 };
 use turntable_core::{
 	Msg, Panel, Route,
-	app::clock,
+	app::{Anchor, State, clock},
 	engine::{CoverSize, Repeat},
 	spotify::id_of,
 };
@@ -14,11 +16,117 @@ use turntable_core::{
 use crate::{
 	shell::{Shell, Side},
 	theme,
-	widgets::{Icon, added_badge, cover, icon, icon_button},
+	widgets::{Icon, Slider, added_badge, cover, icon, icon_button},
 };
 
 /// The bar's side columns: 30% of the width, at least this wide.
 const SIDE_MIN_W: f32 = 180.;
+
+/// The only player view that repaints on its own while playing. Sampling the core's monotonic
+/// anchor here redraws the seek slider and its labels, not the library tree, and never pumps the core.
+pub struct Playhead {
+	seek:           Entity<Slider>,
+	anchor:         Anchor,
+	duration_ms:    u64,
+	playing:        bool,
+	repaint:        Option<Task<()>>,
+	elapsed_second: Option<u64>,
+	elapsed_label:  gpui_kit::SharedString,
+	duration_label: gpui_kit::SharedString,
+	_visibility:    Subscription,
+}
+
+/// The shortest gap between repaints (about 60/s).
+const MIN_REPAINT: Duration = Duration::from_millis(16);
+
+/// How long until the playhead next moves a device pixel or the elapsed label ticks over,
+/// whichever is sooner. `track_px` is an upper bound on the slider's width in device pixels,
+/// so this never waits past a visible step. A 3-minute song on a 1280 px window repaints about
+/// 7 times a second instead of every display refresh.
+fn repaint_delay(duration_ms: u64, speed: f64, now_ms: u64, track_px: f32) -> Duration {
+	let per_pixel_ms = duration_ms as f64 / speed.max(f64::EPSILON) / f64::from(track_px.max(1.));
+	let to_next_second_ms = (1000 - now_ms % 1000) as f64 / speed.max(f64::EPSILON);
+	Duration::from_secs_f64(per_pixel_ms.min(to_next_second_ms) / 1000.).max(MIN_REPAINT)
+}
+
+impl Playhead {
+	pub fn new(seek: Entity<Slider>, state: &State, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
+		let view = cx.weak_entity();
+		let visibility = window.observe_window_visibility(move |_, window, cx| {
+			if window.is_visible() {
+				// A fully occluded window stops the repaint chain; restart it.
+				let _ = view.update(cx, |_, cx| cx.notify());
+			}
+		});
+		Self {
+			seek,
+			anchor: state.anchor,
+			duration_ms: state.duration_ms(),
+			playing: state.playing(),
+			repaint: None,
+			elapsed_second: None,
+			elapsed_label: gpui_kit::SharedString::default(),
+			duration_label: clock(state.duration_ms()).into(),
+			_visibility: visibility,
+		}
+	}
+
+	pub fn sync(&mut self, state: &State, cx: &mut Context<'_, Self>) {
+		self.anchor = state.anchor;
+		if self.duration_ms != state.duration_ms() {
+			self.duration_label = clock(state.duration_ms()).into();
+		}
+		self.duration_ms = state.duration_ms();
+		self.playing = state.playing();
+		// Restart from the new anchor rather than finishing a delay computed from the old one.
+		self.repaint = None;
+		cx.notify();
+	}
+
+	fn animating(&self, window: &Window) -> bool {
+		self.playing && self.anchor.speed > 0.0 && self.duration_ms > 0 && window.is_visible()
+	}
+
+	fn animate(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+		if self.repaint.is_some() || !self.animating(window) {
+			return;
+		}
+		let track_px = f32::from(window.viewport_size().width) * window.scale_factor();
+		let delay = repaint_delay(self.duration_ms, self.anchor.speed, self.anchor.now_ms(), track_px);
+		self.repaint = Some(cx.spawn_in(window, async move |this, cx| {
+			cx.background_executor().timer(delay).await;
+			let _ = this.update(cx, |this, cx| {
+				this.repaint = None;
+				cx.notify();
+			});
+		}));
+	}
+}
+
+impl Render for Playhead {
+	fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+		let at = self.anchor.now_ms().min(self.duration_ms);
+		// Formatting labels once per second avoids allocating strings on every animation frame.
+		let second = at / 1000;
+		if self.elapsed_second != Some(second) {
+			self.elapsed_second = Some(second);
+			self.elapsed_label = clock(at).into();
+		}
+		let progress = if self.duration_ms == 0 { 0. } else { at as f32 / self.duration_ms as f32 };
+		self.seek.update(cx, |slider, cx| slider.set(progress, cx));
+		self.animate(window, cx);
+		div()
+			.w_full()
+			.flex()
+			.items_center()
+			.gap_2()
+			.text_size(px(12.))
+			.text_color(theme::subdued())
+			.child(div().w(px(40.)).flex().justify_end().child(self.elapsed_label.clone()))
+			.child(div().flex_1().child(self.seek.clone()))
+			.child(div().w(px(40.)).child(self.duration_label.clone()))
+	}
+}
 
 impl Shell {
 	pub fn player_bar(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
@@ -96,8 +204,6 @@ impl Shell {
 
 	fn bar_transport(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
 		let st = self.st();
-		let total = st.duration_ms();
-		let at = st.position_ms().min(total);
 		let playing = st.playing();
 		let shuffle = st.options.shuffle;
 		let repeat = st.options.repeat;
@@ -146,18 +252,7 @@ impl Shell {
 						cx.listener(|this, _, _, cx| this.send(Msg::CycleRepeat, cx)),
 					)),
 			)
-			.child(
-				div()
-					.w_full()
-					.flex()
-					.items_center()
-					.gap_2()
-					.text_size(px(12.))
-					.text_color(theme::subdued())
-					.child(div().w(px(40.)).flex().justify_end().child(clock(at)))
-					.child(div().flex_1().child(self.seek.clone()))
-					.child(div().w(px(40.)).child(clock(total))),
-			)
+			.child(self.playhead.clone())
 	}
 
 	fn bar_extras(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
@@ -225,5 +320,65 @@ impl Shell {
 						.child(format!("Playing on {name}")),
 				)
 			})
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use gpui_kit::{AppContext as _, component::Root, size};
+	use gpui_test::{TestAppContext, VisualTestContext};
+	use turntable_core::engine::Status;
+
+	use super::*;
+
+	#[test]
+	fn repaints_when_the_playhead_moves_a_pixel_or_the_label_ticks() {
+		let ms = |d: Duration| d.as_millis();
+		// 200 s over 2560 device pixels: one pixel every ~78 ms.
+		assert_eq!(ms(repaint_delay(200_000, 1.0, 10_000, 2560.)), 78);
+		// The elapsed label's next second comes first.
+		assert_eq!(ms(repaint_delay(200_000, 1.0, 10_950, 1280.)), 50);
+		// Long tracks on narrow windows still tick the label every second.
+		assert_eq!(ms(repaint_delay(3_600_000, 1.0, 0, 400.)), 1000);
+		// Short tracks on wide displays are capped near 60 repaints a second.
+		assert_eq!(repaint_delay(30_000, 1.0, 0, 5120.), MIN_REPAINT);
+		// Faster playback reaches each pixel and second sooner.
+		assert_eq!(ms(repaint_delay(200_000, 2.0, 10_000, 2560.)), 39);
+	}
+
+	#[test]
+	fn playing_schedules_one_repaint_and_pause_stops_it_without_a_core_pump() {
+		let mut state = State::default();
+		state.status = Status::Playing;
+		state.anchor = Anchor { position_ms: 1_500, speed: 1.0, ..Anchor::default() };
+		state.item.decorations.playback.duration_ms = 200_000;
+		let mut app = TestAppContext::single();
+		app.update(gpui_kit::init);
+		let mut view = None;
+		let window = app.open_window(size(px(500.), px(80.)), |window, cx| {
+			let seek = Slider::new(cx, 0.);
+			let entity = cx.new(|cx| Playhead::new(seek, &state, window, cx));
+			view = Some(entity.clone());
+			Root::new(entity, window, cx)
+		});
+		let view = view.unwrap();
+		let mut cx = VisualTestContext::from_window(window.into(), &app);
+		cx.update(|window, cx| {
+			assert!(window.is_visible());
+			window.draw(cx).clear(cx);
+			view.update(cx, |view, cx| {
+				assert!(view.repaint.is_some());
+				assert_eq!(view.elapsed_label.as_ref(), "0:01");
+				assert_eq!(view.duration_label.as_ref(), "3:20");
+				state.status = Status::Paused;
+				state.anchor = Anchor { position_ms: 5_000, ..Anchor::default() };
+				view.sync(&state, cx);
+			});
+			window.draw(cx).clear(cx);
+			view.read_with(cx, |view, _| {
+				assert!(view.repaint.is_none());
+				assert_eq!(view.elapsed_label.as_ref(), "0:05");
+			});
+		});
 	}
 }
