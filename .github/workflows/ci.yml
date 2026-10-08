@@ -1,65 +1,126 @@
 name: CI
 
-# Private repository: manual runs only. Enable push/pull_request (and optional
-# push.tags: ['v*']) here once automatic CI/release triggers are wanted.
-on: workflow_dispatch
-
-concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+  merge_group:
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
   MACOSX_DEPLOYMENT_TARGET: '12.0'
 
-jobs:
-  format:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt
-      - run: cargo fmt -p turntable -p turntable-core -- --check
+defaults:
+  run:
+    shell: bash
 
-  check:
-    name: Build, test, clippy (${{ matrix.target }})
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable action, explicit nightly toolchain
+        with:
+          toolchain: nightly
+          components: rustfmt
+      - run: cargo +nightly fmt --all -- --check
+
+  lint:
+    name: lint (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
-            target: aarch64-apple-darwin
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-          - runner: windows-2025
-            target: x86_64-pc-windows-msvc
+          - os: macos
+            runner: macos-14
+          - os: linux
+            runner: ubuntu-24.04
+          - os: windows
+            runner: windows-2025
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          targets: ${{ matrix.target }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
           components: clippy
       - name: Linux native dependencies
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential clang libclang-dev cmake ninja-build pkg-config \
-            libasound2-dev libpipewire-0.3-dev libdbus-1-dev libssl-dev \
-            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libx11-xcb-dev \
-            libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-randr0-dev libxcb-render0-dev \
-            libxcb-xkb-dev libxrandr-dev libxi-dev libxcursor-dev libxinerama-dev libxrender-dev \
-            libxfixes-dev libegl1-mesa-dev libfontconfig1-dev libfreetype6-dev libvulkan-dev
-      - uses: Swatinem/rust-cache@v2
+        run: scripts/install-linux-deps.sh
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: ${{ matrix.target }}
-      - name: Build both crates
-        run: cargo build --locked -p turntable -p turntable-core --target ${{ matrix.target }}
-      - name: Test both crates
-        run: cargo test --locked -p turntable -p turntable-core --all-targets --target ${{ matrix.target }}
-      - name: Clippy both crates
-        run: cargo clippy --locked -p turntable -p turntable-core --all-targets --target ${{ matrix.target }} -- -D warnings
+          shared-key: ci-${{ matrix.os }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - name: Install dependency auditor
+        if: runner.os == 'Linux'
+        run: cargo install cargo-machete --version 0.9.1 --locked
+      - name: Clippy, documentation, dependencies, banned patterns
+        if: runner.os == 'Linux'
+        run: scripts/lint.sh clippy docs deps ban
+      - name: Platform clippy
+        if: runner.os != 'Linux'
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos
+            runner: macos-14
+          - os: linux
+            runner: ubuntu-24.04
+          - os: windows
+            runner: windows-2025
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - name: Linux native dependencies
+        if: runner.os == 'Linux'
+        run: scripts/install-linux-deps.sh
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ci-${{ matrix.os }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      - run: cargo test --locked --workspace --all-targets
+
+  pr-title:
+    name: pr-title
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check conventional commit title for squash merge
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          pattern = r"(?:feat|fix|perf|refactor|docs|test|build|ci|chore|style|revert)(?:\([^()\r\n]+\))?!?: [^\s].*"
+          if not re.fullmatch(pattern, os.environ["PR_TITLE"]):
+              sys.exit("PR title must be a conventional commit, e.g. feat(player): add shuffle")
+          PY

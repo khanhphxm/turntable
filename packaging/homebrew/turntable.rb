@@ -1,15 +1,14 @@
-# Copy to Casks/turntable.rb in khanhphxm/homebrew-tap and substitute the tokens.
+# Rendered by render.py into Casks/turntable.rb in khanhphxm/homebrew-tap.
 cask "turntable" do
   version "@VERSION@"
-  sha256 "@MACOS_ARM64_SHA256@"
+  sha256 "@MACOS_UNIVERSAL_SHA256@"
 
-  url "https://github.com/khanhphxm/turntable/releases/download/v#{version}/turntable-#{version}-macos-arm64.zip"
-  name "turntable"
+  url "https://github.com/khanhphxm/turntable/releases/download/v#{version}/turntable-#{version}-macos-universal.zip"
+  name "Turntable"
   desc "Lightweight native Spotify player"
   homepage "https://github.com/khanhphxm/turntable"
 
-  depends_on arch: :arm64
   depends_on macos: ">= :monterey"
 
-  app "turntable.app"
+  app "Turntable.app"
 end

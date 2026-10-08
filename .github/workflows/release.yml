@@ -1,103 +1,136 @@
 name: Release
 
-# Private repository: manual runs only. After going public, add
-# push: { tags: ['v*'] } beneath `on` to enable automatic tagged releases.
-on: workflow_dispatch
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (vX.Y.Z or vX.Y.Z-rc.N)
+        required: true
+        type: string
+
+permissions:
+  contents: read
 
 concurrency:
   group: release
   cancel-in-progress: false
 
-permissions:
-  contents: read
-
 env:
   CARGO_TERM_COLOR: always
   MACOSX_DEPLOYMENT_TARGET: '12.0'
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   version:
+    name: Verify release tag
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
       - id: version
-        shell: bash
-        run: |
-          version=$(cargo metadata --no-deps --format-version=1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "turntable"))')
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: scripts/release-version.py "$RELEASE_TAG"
 
   macos:
+    name: macOS universal
     needs: version
     runs-on: macos-14
+    timeout-minutes: 120
     env:
       TURNTABLE_VERSION: ${{ needs.version.outputs.version }}
-      DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
-      DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
-      NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
-      NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
-      NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+      CODESIGN_IDENTITY: '-'
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          targets: aarch64-apple-darwin
-      - uses: Swatinem/rust-cache@v2
-      - name: Build
-        run: cargo build --release --locked -p turntable --target aarch64-apple-darwin
-      - name: Import Developer ID (optional)
-        if: env.DEVELOPER_ID_P12 != '' && env.DEVELOPER_ID_P12_PASSWORD != ''
-        shell: bash
+          ref: ${{ needs.version.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Build both architectures and merge
         run: |
+          cargo build --release --locked -p turntable --target aarch64-apple-darwin
+          cargo build --release --locked -p turntable --target x86_64-apple-darwin
+          mkdir -p target/universal/release
+          lipo -create target/aarch64-apple-darwin/release/turntable target/x86_64-apple-darwin/release/turntable -output target/universal/release/turntable
+      - name: Import Developer ID or explicitly use ad-hoc signing
+        env:
+          DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          if [[ -z "$DEVELOPER_ID_P12" && -z "$DEVELOPER_ID_P12_PASSWORD" ]]; then
+            echo 'WARNING: Developer ID secrets absent; release will be ad-hoc signed and unnotarized.'
+            exit 0
+          fi
+          if [[ -z "$DEVELOPER_ID_P12" || -z "$DEVELOPER_ID_P12_PASSWORD" ]]; then
+            echo 'Both Developer ID secrets are required when signing is configured.' >&2
+            exit 1
+          fi
+          umask 077
           keychain="$RUNNER_TEMP/turntable-signing.keychain-db"
+          p12="$RUNNER_TEMP/turntable-id.p12"
+          trap 'rm -f "$p12"' EXIT
           password=$(openssl rand -hex 24)
           security create-keychain -p "$password" "$keychain"
-          security set-keychain-settings -lut 3600 "$keychain"
+          security set-keychain-settings -lut 7200 "$keychain"
           security unlock-keychain -p "$password" "$keychain"
-          printf '%s' "$DEVELOPER_ID_P12" | base64 --decode > "$RUNNER_TEMP/turntable-id.p12"
-          security import "$RUNNER_TEMP/turntable-id.p12" -k "$keychain" -P "$DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign
-          rm "$RUNNER_TEMP/turntable-id.p12"
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
-          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          printf '%s' "$DEVELOPER_ID_P12" | base64 --decode > "$p12"
+          security import "$p12" -k "$keychain" -P "$DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          security list-keychains -d user -s "$keychain" "$HOME/Library/Keychains/login.keychain-db"
           identity=$(security find-identity -v -p codesigning "$keychain" | python3 -c 'import re,sys; print(next(iter(re.findall(r"\"(Developer ID Application:[^\"]+)\"", sys.stdin.read())), ""))')
           test -n "$identity"
           echo "CODESIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
-      - name: Bundle (ad-hoc without Developer ID)
-        run: packaging/bundle-macos.sh target/aarch64-apple-darwin/release/turntable
-      - name: Notarize and staple (optional)
-        if: env.CODESIGN_IDENTITY != '' && env.NOTARY_KEY != '' && env.NOTARY_KEY_ID != '' && env.NOTARY_ISSUER_ID != ''
-        shell: bash
+      - name: Bundle universal app
+        run: packaging/bundle-macos.sh
+      - name: Notarize and staple app, then create and notarize DMG
+        env:
+          NOTARY_KEY: ${{ secrets.NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
         run: |
-          key="$RUNNER_TEMP/turntable-notary.p8"
-          trap 'rm -f "$key"' EXIT
-          printf '%s' "$NOTARY_KEY" | base64 --decode > "$key"
-          chmod 600 "$key"
-          ditto -c -k --keepParent dist/turntable.app "$RUNNER_TEMP/notarize.zip"
-          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" --key "$key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" --wait --timeout 30m
-          xcrun stapler staple dist/turntable.app
-          xcrun stapler validate dist/turntable.app
-          spctl --assess --type execute --verbose dist/turntable.app
-      - name: Package
-        run: |
-          plutil -lint dist/turntable.app/Contents/Info.plist
-          codesign --verify --strict dist/turntable.app
-          codesign -dv dist/turntable.app
-          ditto -c -k --keepParent dist/turntable.app "dist/turntable-$TURNTABLE_VERSION-macos-arm64.zip"
+          scripts/notarize-macos.sh dist/Turntable.app
+          packaging/dmg-macos.sh
+          scripts/notarize-macos.sh "dist/turntable-$TURNTABLE_VERSION-macos-universal.dmg"
+          codesign --verify --strict dist/Turntable.app
+          ditto -c -k --keepParent dist/Turntable.app "dist/turntable-$TURNTABLE_VERSION-macos-universal.zip"
       - name: Remove signing keychain
-        if: always() && env.DEVELOPER_ID_P12 != '' && env.DEVELOPER_ID_P12_PASSWORD != ''
+        if: always()
         run: |
-          if [ -f "$RUNNER_TEMP/turntable-signing.keychain-db" ]; then
+          if [[ -f "$RUNNER_TEMP/turntable-signing.keychain-db" ]]; then
             security delete-keychain "$RUNNER_TEMP/turntable-signing.keychain-db"
           fi
-      - uses: actions/upload-artifact@v4
+          rm -f "$RUNNER_TEMP/turntable-id.p12"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: macos-arm64
-          path: dist/*.zip
+          name: release-macos-universal
+          compression-level: 0
+          path: |
+            dist/*.zip
+            dist/*.dmg
           if-no-files-found: error
 
   linux:
+    name: Linux (${{ matrix.arch }})
     needs: version
     strategy:
       fail-fast: false
@@ -110,70 +143,140 @@ jobs:
             arch: aarch64
             target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     env:
       TURNTABLE_VERSION: ${{ needs.version.outputs.version }}
       TURNTABLE_ARCH: ${{ matrix.arch }}
+      RUST_TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           targets: ${{ matrix.target }}
-      - name: Native dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential clang libclang-dev cmake ninja-build pkg-config \
-            libasound2-dev libpipewire-0.3-dev libdbus-1-dev libssl-dev \
-            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libx11-xcb-dev \
-            libxcb1-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-randr0-dev libxcb-render0-dev \
-            libxcb-xkb-dev libxrandr-dev libxi-dev libxcursor-dev libxinerama-dev libxrender-dev \
-            libxfixes-dev libegl1-mesa-dev libfontconfig1-dev libfreetype6-dev libvulkan-dev
-      - uses: Swatinem/rust-cache@v2
+      - run: scripts/install-linux-deps.sh
+      - run: cargo build --release --locked -p turntable --target "$RUST_TARGET"
+      - run: packaging/bundle-linux.sh "target/$RUST_TARGET/release/turntable"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          key: ${{ matrix.target }}
-      - run: cargo build --release --locked -p turntable --target ${{ matrix.target }}
-      - run: packaging/bundle-linux.sh target/${{ matrix.target }}/release/turntable
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-${{ matrix.arch }}
-          path: dist/*.tar.gz
+          name: release-linux-${{ matrix.arch }}
+          compression-level: 0
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
           if-no-files-found: error
 
   windows:
+    name: Windows x86_64
     needs: version
     runs-on: windows-2025
+    timeout-minutes: 90
     env:
       TURNTABLE_VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
           targets: x86_64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked -p turntable --target x86_64-pc-windows-msvc
-      - name: Package
+      - name: Package ZIP and per-user Inno Setup installer
         shell: pwsh
         run: packaging/bundle-windows.ps1 -Binary target/x86_64-pc-windows-msvc/release/turntable.exe
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: windows-x86_64
-          path: dist/*.zip
+          name: release-windows-x86_64
+          compression-level: 0
+          path: |
+            dist/*.zip
+            dist/*-setup.exe
           if-no-files-found: error
 
   publish:
+    name: Publish GitHub release
     needs: [version, macos, linux, windows]
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: ${{ needs.version.outputs.tag }}
+      TURNTABLE_VERSION: ${{ needs.version.outputs.version }}
+      PRERELEASE: ${{ needs.version.outputs.prerelease }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.version.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - name: Install conventional-commit release notes generator
+        run: cargo install git-cliff --version 2.14.2 --locked
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
           path: dist
           merge-multiple: true
-      - name: Checksums and GitHub release
+      - name: Generate checksums and notes
+        run: |
+          (cd dist && sha256sum -- *.zip *.dmg *.tar.gz *.deb *.exe > SHA256SUMS)
+          git-cliff --current --offline --output dist/RELEASE_NOTES.md
+      - name: Upload all assets before publishing
         env:
           GH_TOKEN: ${{ github.token }}
-          TURNTABLE_VERSION: ${{ needs.version.outputs.version }}
-        shell: bash
         run: |
-          (cd dist && sha256sum *.zip *.tar.gz > SHA256SUMS)
-          gh release create "v$TURNTABLE_VERSION" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "turntable $TURNTABLE_VERSION" --generate-notes
+          flags=(--latest)
+          if [[ "$PRERELEASE" == true ]]; then
+            flags=(--prerelease --latest=false)
+          fi
+          gh release create "$RELEASE_TAG" dist/*.zip dist/*.dmg dist/*.tar.gz dist/*.deb dist/*.exe dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "Turntable $TURNTABLE_VERSION" \
+            --notes-file dist/RELEASE_NOTES.md "${flags[@]}"
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false "${flags[@]}"
+
+  homebrew:
+    name: Update public Homebrew tap
+    needs: [version, publish]
+    if: needs.version.outputs.prerelease == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          persist-credentials: false
+      - name: Render and push cask and formula from the templates
+        env:
+          HOMEBREW_TAP_KEY: ${{ secrets.HOMEBREW_TAP_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+          TURNTABLE_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          if [[ -z "$HOMEBREW_TAP_KEY" ]]; then
+            echo 'WARNING: HOMEBREW_TAP_KEY absent; skipping public tap update.'
+            exit 0
+          fi
+          umask 077
+          ssh_dir=$(mktemp -d)
+          trap 'rm -rf "$ssh_dir"' EXIT
+          printf '%s\n' "$HOMEBREW_TAP_KEY" > "$ssh_dir/key"
+          # GitHub's published Ed25519 host key: https://api.github.com/meta
+          printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$ssh_dir/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $ssh_dir/key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$ssh_dir/known_hosts"
+          tap="$RUNNER_TEMP/homebrew-tap"
+          git clone --depth=1 git@github.com:khanhphxm/homebrew-tap.git "$tap"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir "$RUNNER_TEMP/checksums"
+          packaging/homebrew/render.py --version "$TURNTABLE_VERSION" --checksums "$RUNNER_TEMP/checksums/SHA256SUMS" --output "$tap"
+          git -C "$tap" config user.name 'github-actions[bot]'
+          git -C "$tap" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C "$tap" add Casks/turntable.rb Formula/turntable.rb
+          if git -C "$tap" diff --cached --quiet; then
+            echo 'Tap templates already match this release.'
+          else
+            git -C "$tap" commit -m "chore: update turntable to $TURNTABLE_VERSION"
+            git -C "$tap" push origin HEAD
+          fi

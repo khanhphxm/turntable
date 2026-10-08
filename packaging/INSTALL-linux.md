@@ -5,6 +5,12 @@ plugin. Use the archive matching your CPU: `linux-x86_64` or `linux-aarch64`.
 Release builds use Ubuntu 24.04 (glibc 2.39); older distributions are not supported
 by these binaries. Build from source on older systems instead.
 
+For the matching Ubuntu 24.04 `.deb`, use
+`sudo apt install ./turntable-<version>-linux-<arch>.deb`; apt installs its runtime
+dependencies and desktop entry. Remove it with `sudo apt remove turntable`.
+The package architecture is `amd64` for x86_64 or `arm64` for aarch64. The archive
+instructions below are for portable/per-user installations.
+
 ## Runtime dependencies
 
 A working graphical session (Wayland or X11), a Vulkan-capable GPU/driver, and an
@@ -43,7 +49,7 @@ command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -f -t "$HOM
 ```
 
 Put `$HOME/.local/bin` on your session's `PATH` (log out/in after changing it).
-Launch **turntable** from your desktop's application menu. For a system install,
+Launch **Turntable** from your desktop's application menu. For a system install,
 copy `bin/turntable` to `/usr/local/bin` and `share/*` into `/usr/local/share`.
 
 Uninstall by removing the installed executable, `turntable.desktop`, and only

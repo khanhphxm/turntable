@@ -1,4 +1,4 @@
-# Copy to Formula/turntable.rb in khanhphxm/homebrew-tap and substitute the tokens.
+# Rendered by render.py into Formula/turntable.rb in khanhphxm/homebrew-tap.
 class Turntable < Formula
   desc "Lightweight native Spotify player"
   homepage "https://github.com/khanhphxm/turntable"

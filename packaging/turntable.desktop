@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=turntable
+Name=Turntable
 Comment=Lightweight native Spotify player
 Exec=turntable
 TryExec=turntable
