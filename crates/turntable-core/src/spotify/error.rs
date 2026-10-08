@@ -20,16 +20,16 @@ pub enum Error {
 	QuotaExceeded {
 		retry_after: Option<Duration>,
 	},
-	/// No stored token (or no client id): the user has to log in.
+	/// No caller-supplied Web API token. This never invalidates native authentication.
 	AuthRequired,
-	/// Token rejected and refresh impossible (revoked, expired refresh token): log in again.
+	/// The caller-supplied Web API token was rejected and cannot be refreshed.
 	AuthExpired,
+	/// The native playback session was rejected; Web API token errors never invalidate it.
+	NativeAuthRequired,
 	/// 404 from the player endpoints: Spotify does not know the target device, or no device is active.
 	DeviceNotFound,
 	/// 403 `PREMIUM_REQUIRED`: Spotify only lets Premium accounts control playback.
 	PremiumRequired,
-	/// The interactive login failed (denied, state mismatch, timeout, port busy, bad config).
-	Auth(String),
 	/// A response did not have the expected shape.
 	Parse(String),
 	Io(io::Error),
@@ -57,10 +57,9 @@ impl Error {
 				Some(d) => format!("Your Spotify app hit its request limit. It resets in about {} min.", d.as_secs().div_ceil(60).max(1)),
 				None => "Your Spotify app hit its request limit. It resets later today.".into(),
 			},
-			Self::AuthRequired | Self::AuthExpired => "Reconnect your Spotify account.".into(),
+			Self::AuthRequired | Self::AuthExpired | Self::NativeAuthRequired => "Reconnect your Spotify account.".into(),
 			Self::DeviceNotFound => "Spotify doesn't see the player right now.".into(),
 			Self::PremiumRequired => "turntable needs Spotify Premium, and this account isn't on it.".into(),
-			Self::Auth(msg) => format!("Spotify sign-in didn't finish: {msg}"),
 		}
 	}
 }
@@ -79,11 +78,11 @@ impl fmt::Display for Error {
 				write!(f, "spotify API quota exceeded, retry in {}s", d.as_secs())
 			},
 			Self::QuotaExceeded { retry_after: None } => f.write_str("spotify API quota exceeded"),
-			Self::AuthRequired => f.write_str("not logged in to spotify (run `turntable login`)"),
-			Self::AuthExpired => f.write_str("spotify session expired (run `turntable login`)"),
+			Self::AuthRequired => f.write_str("no Spotify Web API token supplied"),
+			Self::AuthExpired => f.write_str("Spotify Web API token expired"),
+			Self::NativeAuthRequired => f.write_str("native Spotify session expired"),
 			Self::DeviceNotFound => f.write_str("spotify does not see the player device (not connected yet?)"),
 			Self::PremiumRequired => f.write_str("spotify premium is required to control playback"),
-			Self::Auth(msg) => write!(f, "spotify login failed: {msg}"),
 			Self::Parse(msg) => write!(f, "unexpected spotify response: {msg}"),
 			Self::Io(err) => err.fmt(f),
 		}
@@ -110,9 +109,9 @@ impl Clone for Error {
 			Self::QuotaExceeded { retry_after } => Self::QuotaExceeded { retry_after: *retry_after },
 			Self::AuthRequired => Self::AuthRequired,
 			Self::AuthExpired => Self::AuthExpired,
+			Self::NativeAuthRequired => Self::NativeAuthRequired,
 			Self::DeviceNotFound => Self::DeviceNotFound,
 			Self::PremiumRequired => Self::PremiumRequired,
-			Self::Auth(msg) => Self::Auth(msg.clone()),
 			Self::Parse(msg) => Self::Parse(msg.clone()),
 			Self::Io(err) => Self::Io(io::Error::new(err.kind(), err.to_string())),
 		}
@@ -122,6 +121,16 @@ impl Clone for Error {
 impl From<io::Error> for Error {
 	fn from(err: io::Error) -> Self {
 		Self::Io(err)
+	}
+}
+
+impl From<librespot_core::Error> for Error {
+	fn from(err: librespot_core::Error) -> Self {
+		if err.kind == librespot_core::error::ErrorKind::Unauthenticated {
+			Self::NativeAuthRequired
+		} else {
+			Self::Network(err.to_string())
+		}
 	}
 }
 

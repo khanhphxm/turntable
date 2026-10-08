@@ -1,9 +1,9 @@
 //! Native, occurrence-based queue management through the in-process Connect player.
 //!
-//! `QueueRemove` and `QueueJump` index all of [`State::upcoming`]. `QueueMoveTo`
-//! uses absolute indices too, but both rows must belong to “Next in queue”; its destination
-//! is the final index after removal. `QueueClear` clears only the user queue. `QueueRow`
-//! appends, `QueuePlayNext` inserts at its front, and `QueueTracks` supports batches/URI cards.
+//! `QueueRemove`, `QueueJump` and `QueueMoveTo` index all of [`State::upcoming`], including
+//! context/autoplay occurrences. A move's destination is its final index after removal;
+//! occurrence UIDs and source metadata stay intact. `QueueClear` clears only the user queue. `QueueRow`
+//! appends and `QueuePlayNext` inserts at its front.
 //! Album/playlist `QueueContext` reads every page through the authenticated native session.
 //!
 //! Edits mutate `State::upcoming` immediately and carry a monotonically increasing revision.
@@ -56,11 +56,11 @@ impl State {
 	}
 
 	pub(super) fn queue_move(&mut self, from: usize, to: usize, cmds: &mut Vec<Command>) {
-		if from == to || ![from, to].into_iter().all(|i| self.upcoming.get(i).is_some_and(|e| e.source == "queue")) {
+		if from == to || from >= self.upcoming.len() || to >= self.upcoming.len() {
 			return;
 		}
 		let entry = self.upcoming.remove(from);
-		let before = self.upcoming.get(to).filter(|e| e.source == "queue").map(|e| e.uid.clone());
+		let before = self.upcoming.get(to).map(|e| e.uid.clone());
 		let uid = entry.uid.clone();
 		self.upcoming.insert(to, entry);
 		cmds.push(self.queue_edit.command(QueueEdit::Move { uid, before }));
@@ -133,12 +133,37 @@ mod tests {
 		assert_eq!(uids(&s), ["b", "c", "a", "d"]);
 		s.update(Msg::QueueMoveTo(2, 0));
 		assert_eq!(uids(&s), ["a", "b", "c", "d"]);
-		assert!(s.update(Msg::QueueMoveTo(0, 3)).is_empty());
+		assert!(s.update(Msg::QueueMoveTo(3, 3)).is_empty());
 		assert!(s.update(Msg::QueueMoveTo(99, 0)).is_empty());
 		s.update(Msg::QueueRemove(1));
 		assert_eq!(uids(&s), ["a", "c", "d"]);
 		s.update(Msg::QueueClear);
 		assert_eq!(uids(&s), ["d"]);
+	}
+
+	#[test]
+	fn context_and_autoplay_rows_move_across_sections_without_losing_their_occurrence() {
+		let mut s = state();
+		s.upcoming.push(entry("e", "context"));
+		s.upcoming.push(entry("auto", "autoplay"));
+		let effects = s.update(Msg::QueueMoveTo(4, 3));
+		assert!(matches!(effects.as_slice(), [crate::app::Effect::Player(Command::EditQueue {
+			edit: QueueEdit::Move { uid, before: Some(before) }, ..
+		})] if uid == "e" && before == "d"));
+		assert_eq!(uids(&s), ["a", "b", "c", "e", "d", "auto"]);
+		let effects = s.update(Msg::QueueMoveTo(5, 0));
+		assert!(matches!(effects.as_slice(), [crate::app::Effect::Player(Command::EditQueue {
+			edit: QueueEdit::Move { uid, before: Some(before) }, ..
+		})] if uid == "auto" && before == "a"));
+		assert_eq!(uids(&s), ["auto", "a", "b", "c", "e", "d"]);
+		assert_eq!(s.upcoming.first().map(|e| e.source.as_str()), Some("autoplay"));
+		let effects = s.update(Msg::QueueMoveTo(1, 5));
+		assert!(matches!(effects.as_slice(), [crate::app::Effect::Player(Command::EditQueue {
+			edit: QueueEdit::Move { uid, before: None }, ..
+		})] if uid == "a"));
+		assert_eq!(uids(&s), ["auto", "b", "c", "e", "d", "a"]);
+		s.update(Msg::QueueClear);
+		assert_eq!(uids(&s), ["auto", "e", "d"]);
 	}
 
 	#[test]
@@ -182,12 +207,12 @@ mod tests {
 			}],
 			..crate::library::Listing::default()
 		});
-		let effects = s.update(Msg::QueueRow(0));
+		let effects = s.update(Msg::QueueRow(s.library.row_target(0).unwrap()));
 		assert!(matches!(
 			effects.first(),
 			Some(crate::app::Effect::Player(Command::EditQueue { edit: QueueEdit::Add { next: false, .. }, .. }))
 		));
-		let effects = s.update(Msg::QueuePlayNext(0));
+		let effects = s.update(Msg::QueuePlayNext(s.library.row_target(0).unwrap()));
 		assert!(matches!(
 			effects.first(),
 			Some(crate::app::Effect::Player(Command::EditQueue { edit: QueueEdit::Add { next: true, .. }, .. }))

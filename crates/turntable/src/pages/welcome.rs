@@ -1,17 +1,18 @@
-//! First run: the app's mark, one sentence, and a single button that signs in through the browser.
+//! First run: browser sign-in, with cancellation while an authorization attempt is pending.
 
 use gpui_kit::{
-	Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, img,
-	prelude::FluentBuilder as _, px,
+	Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _, Styled as _, Window,
+	div, img, prelude::FluentBuilder as _, px,
 };
 
 use crate::{shell::Shell, theme};
 
 impl Shell {
-	pub fn welcome_page(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-		let waiting = self.st().starting_player();
+	pub fn welcome_page(&mut self, window: &Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+		let waiting = self.st().starting;
 		div()
 			.size_full()
+			.relative()
 			.flex()
 			.flex_col()
 			.items_center()
@@ -20,7 +21,7 @@ impl Shell {
 			.bg(theme::base())
 			.text_color(theme::text())
 			.child(img("icons/app.svg").size(px(128.)))
-			.child(div().text_size(px(32.)).font_weight(FontWeight::BOLD).child("turntable"))
+			.child(div().text_size(px(32.)).font_weight(FontWeight::BOLD).child(crate::menus::NAME))
 			.child(div().text_size(px(16.)).text_color(theme::subdued()).child("A lightweight Spotify player. Spotify Premium required."))
 			.child(
 				div()
@@ -41,6 +42,18 @@ impl Shell {
 					.on_click(cx.listener(|this, _, _, cx| this.send(turntable_core::Msg::SignIn, cx)))
 					.child(if waiting { "Waiting for your browser…" } else { "Sign in with Spotify" }),
 			)
+			.when(waiting, |s| {
+				s.child(
+					div()
+						.id("cancel-sign-in")
+						.text_size(px(14.))
+						.text_color(theme::subdued())
+						.cursor_pointer()
+						.hover(|s| s.text_color(theme::text()))
+						.on_click(cx.listener(|this, _, _, cx| this.send(turntable_core::Msg::CancelSignIn, cx)))
+						.child("Cancel"),
+				)
+			})
 			.when_some(self.st().notice.clone(), |s, n| {
 				s.child(div().max_w(px(480.)).text_size(px(14.)).text_color(theme::subdued()).child(n))
 			})
@@ -52,5 +65,6 @@ impl Shell {
 						.child("Finish signing in in the browser window that opened, then come back here."),
 				)
 			})
+			.children(crate::topbar::window_titlebar(window))
 	}
 }

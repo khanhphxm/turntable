@@ -26,7 +26,7 @@ impl Shell {
 		let creators = item.creators();
 		let heading = [st.context.name(), item.parent_name()].into_iter().find(|n| !n.is_empty()).unwrap_or("Now playing").to_owned();
 		let body: AnyElement = if lyrics {
-			self.lyric_lines(40., 120., cx)
+			self.lyric_lines(40., 48., true, cx)
 		} else {
 			div()
 				.size_full()

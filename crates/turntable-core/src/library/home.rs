@@ -3,12 +3,10 @@
 
 use std::{
 	collections::HashSet,
-	sync::PoisonError,
-	thread,
 	time::{Duration, Instant},
 };
 
-use super::{Facet, Home, Response, Tile, artist::artist, pages::optional, worker::Session};
+use super::{Home, Response, Tile, artist::artist, pages::optional, worker::Session};
 use crate::{
 	net::par,
 	spotify::{self, PlayContext, Track, id_of},
@@ -50,8 +48,7 @@ pub(super) fn home(s: &mut Session, deliver: &dyn Fn(Response)) -> spotify::Resu
 		if let Some(context) = context
 			&& recents.len() < RECENTS
 			&& seen.insert(context.uri.clone())
-			&& let Some(tile) =
-				context_tile(s, context, track).or_else(|| s.snapshots.lock().unwrap_or_else(PoisonError::into_inner).context(context))
+			&& let Some(tile) = context_tile(s, context, track).or_else(|| s.snapshots.lock().context(context))
 		{
 			recents.push(tile);
 		}
@@ -59,48 +56,6 @@ pub(super) fn home(s: &mut Session, deliver: &dyn Fn(Response)) -> spotify::Resu
 	let h = Home { recents, followed, albums, recent_tracks, loaded: true };
 	s.home = Some((Instant::now(), h.clone()));
 	Ok(h)
-}
-
-/// Cached feeds paint immediately. Independent Pathfinder and native history/collection
-/// reads overlap, so a rejected personalised client never adds a round trip to Home.
-pub(super) fn refresh(s: &mut Session, facet: Facet, deliver: &dyn Fn(Response)) -> spotify::Result<Option<Response>> {
-	if let Some(feed) = s.home_feeds.get(&facet) {
-		deliver(Response::HomeFeed { facet, feed });
-		return home(s, deliver).map(|home| Some(Response::Home(home)));
-	}
-	let Some(reader) = s.player.as_ref().map(super::session::Reader::session_reader) else {
-		deliver(Response::HomeUnavailable { facet });
-		return home(s, deliver).map(|home| Some(Response::Home(home)));
-	};
-	let priority = spotify::priority();
-	let (native, feed) = thread::scope(|scope| {
-		let feed = scope.spawn(|| {
-			spotify::set_priority(priority);
-			spotify::home_feed::fetch(&reader, facet)
-		});
-		let native = home(s, deliver);
-		let feed = match feed.join() {
-			Ok(feed) => feed,
-			Err(panic) => std::panic::resume_unwind(panic),
-		};
-		(native, feed)
-	});
-	let personalised = feed.is_ok();
-	match feed {
-		Ok(feed) => {
-			s.home_feeds.insert(facet, feed.clone());
-			deliver(Response::HomeFeed { facet, feed });
-		},
-		Err(error) => {
-			crate::net::trace::mark("home", &error);
-			deliver(Response::HomeUnavailable { facet });
-		},
-	}
-	match native {
-		Ok(home) => Ok(Some(Response::Home(home))),
-		Err(_) if personalised => Ok(None),
-		Err(error) => Err(error),
-	}
 }
 
 pub(super) fn recent_tracks(played: &[(Track, Option<PlayContext>)]) -> Vec<Track> {
@@ -118,9 +73,9 @@ fn learn_contexts(s: &mut Session, played: &[(Track, Option<PlayContext>)]) {
 		}
 		let id = id_of(&context.uri);
 		match context.kind.as_str() {
-			"artist" if !s.artists.contains_key(id) => artists.push(id.to_owned()),
+			"artist" if s.artists.get_ref(id).is_none() => artists.push(id.to_owned()),
 			"playlist"
-				if !context.uri.ends_with(":collection") && !s.playlists.iter().any(|p| p.id == id) && !s.others.contains_key(id) =>
+				if !context.uri.ends_with(":collection") && !s.playlists.iter().any(|p| p.id == id) && s.others.get_ref(id).is_none() =>
 			{
 				playlists.push(id.to_owned());
 			},
@@ -178,7 +133,7 @@ fn context_tile(s: &mut Session, context: &PlayContext, track: &Track) -> Option
 				return Some(Tile::playlist(p));
 			}
 			// Someone else's playlist: its session metadata, asked once (Web API before playback connects).
-			if !s.others.contains_key(id) {
+			if s.others.get_ref(id).is_none() {
 				let p = match &s.player {
 					Some(player) => player.playlist(id, 0, false).map(|(p, _, _)| p),
 					None => s.client.playlist(id),
@@ -189,7 +144,7 @@ fn context_tile(s: &mut Session, context: &PlayContext, track: &Track) -> Option
 			// Spotify also plays Liked Songs as a generated playlist of its own (a `37i9dQZF1F…`
 			// id, named "Liked Songs", with the Liked Songs artwork): that is the pinned tile.
 			s.others
-				.get(id)
+				.get_ref(id)
 				.and_then(Option::as_ref)
 				.map(|p| if p.images.iter().any(|i| i.url.contains("/liked-songs/")) { Tile::liked() } else { Tile::playlist(p) })
 		},

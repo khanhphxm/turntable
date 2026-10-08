@@ -43,14 +43,8 @@ impl NowPlaying {
 					Command::Previous => Msg::Prev,
 					Command::Seek(by) => Msg::SeekBy(by),
 					Command::SetPosition(ms) => Msg::Seek(ms),
-					Command::Play | Command::Pause => {
-						let want = matches!(command, Command::Play);
-						let Ok(playing) = weak.update(cx, |s, _| s.st().playing()) else { break };
-						if playing == want {
-							continue;
-						}
-						Msg::TogglePlay
-					},
+					Command::Play => Msg::Play,
+					Command::Pause => Msg::Pause,
 				};
 				if weak.update(cx, |s, cx| s.send(msg, cx)).is_err() {
 					break;

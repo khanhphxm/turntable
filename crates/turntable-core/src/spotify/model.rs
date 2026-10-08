@@ -486,19 +486,17 @@ mod tests {
 	}
 
 	#[test]
-	fn pick_image_prefers_smallest_adequate() {
-		let imgs = [img("640", Some(640)), img("300", Some(300)), img("64", Some(64))];
-		assert_eq!(pick_image(&imgs, 200).unwrap().url, "300");
-		assert_eq!(pick_image(&imgs, 64).unwrap().url, "64");
-		assert_eq!(pick_image(&imgs, 1000).unwrap().url, "640");
-		assert_eq!(pick_image(&imgs, 1).unwrap().url, "64");
-	}
-
-	#[test]
-	fn pick_image_without_dimensions_takes_first() {
-		let imgs = [img("a", None), img("b", None)];
-		assert_eq!(pick_image(&imgs, 300).unwrap().url, "a");
-		assert!(pick_image(&[], 300).is_none());
+	fn image_selection_covers_size_boundaries_unknown_dimensions_and_empty_input() {
+		for (images, requested, expected) in [
+			(vec![img("640", Some(640)), img("300", Some(300)), img("64", Some(64))], 200, Some("300")),
+			(vec![img("640", Some(640)), img("64", Some(64))], 64, Some("64")),
+			(vec![img("640", Some(640)), img("64", Some(64))], 1000, Some("640")),
+			(vec![img("640", Some(640)), img("64", Some(64))], 1, Some("64")),
+			(vec![img("first", None), img("second", None)], 300, Some("first")),
+			(Vec::new(), 300, None),
+		] {
+			assert_eq!(pick_image(&images, requested).map(|image| image.url.as_str()), expected);
+		}
 	}
 
 	const PLAYLIST_ITEMS: &str = r#"{

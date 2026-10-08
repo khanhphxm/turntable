@@ -24,11 +24,6 @@ pub struct DetailsInputs {
 	description: Entity<TextareaState>,
 }
 
-/// UTF-16 length, the unit the core's edits count in.
-fn utf16_len(s: &str) -> usize {
-	s.encode_utf16().count()
-}
-
 /// The dim layer under a dialog, centring it; a click on the layer closes the dialog.
 fn scrim(card: impl IntoElement, cx: &mut Context<'_, Shell>) -> AnyElement {
 	div()
@@ -188,27 +183,22 @@ impl Shell {
 			.flex_col()
 			.gap_4()
 			.child(
-				div()
-					.h(px(180.))
-					.flex()
-					.gap_4()
-					.child(self.art(&route, cover.as_deref(), px(180.), cx).shadow_lg())
-					.child(
-						div()
-							.flex_1()
-							.flex()
-							.flex_col()
-							.gap_4()
-							.child(field("Name", focused == Some(Field::PlaylistName), Input::new(&name).appearance(false).into_any_element()))
-							.child(
-								field(
-									"Description",
-									focused == Some(Field::PlaylistDescription),
-									Textarea::new(&description).appearance(false).h_full().into_any_element(),
-								)
-								.flex_1(),
-							),
-					),
+				div().h(px(180.)).flex().gap_4().child(self.art(&route, cover.as_deref(), px(180.), cx).shadow_lg()).child(
+					div()
+						.flex_1()
+						.flex()
+						.flex_col()
+						.gap_4()
+						.child(field("Name", focused == Some(Field::PlaylistName), Input::new(&name).appearance(false).into_any_element()))
+						.child(
+							field(
+								"Description",
+								focused == Some(Field::PlaylistDescription),
+								Textarea::new(&description).appearance(false).h_full().into_any_element(),
+							)
+							.flex_1(),
+						),
+				),
 			)
 			.child(
 				div().flex().justify_end().child(
@@ -231,10 +221,7 @@ impl Shell {
 						.when(!can_save, |s| s.opacity(0.5))
 						.child("Save"),
 				),
-			)
-			.child(div().text_size(px(11.)).font_weight(FontWeight::BOLD).text_color(theme::text()).child(
-				"By proceeding, you agree to give Spotify access to the image you choose to upload. Please make sure you have the right to upload the image.",
-			));
+			);
 		scrim(card("Edit details", body, cx), cx)
 	}
 
@@ -247,9 +234,7 @@ impl Shell {
 		cx.subscribe(&name, |this, input, e: &InputEvent, cx| match e {
 			InputEvent::Change => {
 				let text = input.read(cx).value().to_string();
-				this.send(Msg::Focus(Some(Field::PlaylistName)), cx);
-				let old = utf16_len(&this.st().name_input);
-				this.send(Msg::Edit { from: 0, to: old, text }, cx);
+				this.send(Msg::SetText(Field::PlaylistName, text), cx);
 			},
 			InputEvent::PressEnter { .. } => this.send(Msg::SaveRename, cx),
 			// The field's label shows while it has focus.
@@ -260,9 +245,7 @@ impl Shell {
 		cx.subscribe(&description, |this, input, e: &InputEvent, cx| match e {
 			InputEvent::Change => {
 				let text = input.read(cx).value().to_string();
-				this.send(Msg::Focus(Some(Field::PlaylistDescription)), cx);
-				let old = utf16_len(&this.st().description_input);
-				this.send(Msg::Edit { from: 0, to: old, text }, cx);
+				this.send(Msg::SetText(Field::PlaylistDescription, text), cx);
 			},
 			InputEvent::Focus => this.send(Msg::Focus(Some(Field::PlaylistDescription)), cx),
 			InputEvent::Blur | InputEvent::PressEnter { .. } => {},

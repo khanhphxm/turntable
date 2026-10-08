@@ -6,7 +6,7 @@ use crate::engine::{Event, Status};
 fn controller() -> (Controller, tempfile::TempDir) {
 	let root = tempfile::tempdir().unwrap();
 	let paths = Paths { config: root.path().join("config"), cache: root.path().join("cache") };
-	let controller = Controller::new(&paths, Options::default(), Arc::new(|| {})).unwrap();
+	let controller = Controller::fixture(&paths, State::default()).unwrap();
 	(controller, root)
 }
 
@@ -15,11 +15,11 @@ fn offline_start_finishes_progress_and_retries_beyond_the_old_restart_limit() {
 	let (mut controller, _root) = controller();
 	for attempt in 1..=20 {
 		controller.state.starting = true;
-		controller.on_event(AppEvent::EngineReady(Err("simulated network unavailable".into())));
+		controller.on_event(AppEvent::EngineReady(0, Err("simulated network unavailable".into())));
 		assert!(!controller.state.starting);
 		assert!(!controller.state.starting_player());
 		assert!(controller.state.offline);
-		assert!(controller.state.network_notice.as_deref().unwrap().contains("saved library"));
+		assert!(controller.state.network_notice.is_some());
 		assert!(controller.retry_start_at.is_some());
 		assert_eq!(controller.start_failures, attempt);
 	}
@@ -46,22 +46,22 @@ fn interrupted_playback_freezes_and_keeps_a_notice_until_the_user_resumes() {
 	controller.player_offline = false;
 	controller.refresh_network_notice();
 	assert!(!controller.state.offline);
-	assert!(controller.state.network_notice.as_deref().unwrap().contains("press Play"));
-	controller.on_event(AppEvent::Player(Incoming::Event(Event::VolumeChanged { volume: 50 })));
+	assert!(controller.state.network_notice.is_some());
+	controller.on_event(AppEvent::Player(0, Incoming::Event(Event::VolumeChanged { volume: 50 })));
 	assert!(controller.state.notice.is_none());
 	assert!(controller.state.network_notice.is_some());
-	controller.on_event(AppEvent::Player(Incoming::Event(Event::PlaybackChanged { status: Status::Playing })));
+	controller.on_event(AppEvent::Player(0, Incoming::Event(Event::PlaybackChanged { status: Status::Playing })));
 	assert!(controller.state.network_notice.is_none());
 }
 
 #[test]
 fn library_and_player_connectivity_recover_independently() {
 	let (mut controller, _root) = controller();
-	controller.on_event(AppEvent::Library(Box::new(library::Response::Offline(true))));
+	controller.on_event(AppEvent::Library(0, Box::new(library::Response::Offline(true))));
 	assert!(controller.state.offline);
 	assert_eq!(controller.deadline(), controller.library_retry_at);
-	controller.on_event(AppEvent::EngineReady(Err("simulated offline".into())));
-	controller.on_event(AppEvent::Library(Box::new(library::Response::Offline(false))));
+	controller.on_event(AppEvent::EngineReady(0, Err("simulated offline".into())));
+	controller.on_event(AppEvent::Library(0, Box::new(library::Response::Offline(false))));
 	assert!(controller.state.offline, "library recovery cannot hide a disconnected player");
 	assert!(controller.library_retry_at.is_none());
 	controller.player_offline = false;

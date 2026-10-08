@@ -83,6 +83,11 @@ impl Controller {
 				self.state.show_toast(message);
 				self.poll_soon(CONTROL_POLL);
 			},
+			library::Response::ControlFailed { revision, message } => {
+				self.state.playback_failed(revision);
+				self.state.show_toast(message);
+				self.poll_soon(CONTROL_POLL);
+			},
 			_ => return false,
 		}
 		true

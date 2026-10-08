@@ -246,9 +246,9 @@ impl State {
 		self.active = false;
 		let Some(player) = playback else {
 			if self.connect.remote.take().is_some() {
-				self.status = Status::Paused;
-				self.anchor_to(self.position_ms(), 0.0);
+				self.playback_status(Status::Paused);
 			}
+			self.trace_playback("connect-state");
 			return true;
 		};
 		if player.status == Status::Playing || (self.connect.remote.is_some() && player.device.is_some()) {
@@ -256,17 +256,20 @@ impl State {
 			if let Some(volume) = self.connect.remote.as_ref().and_then(|device| device.volume_percent) {
 				self.volume = volume;
 			}
-			self.item = player.playback.item;
-			self.context = player.playback.context;
+			super::playback::refresh_entity(&mut self.item, player.playback.item);
+			super::playback::refresh_entity(&mut self.context, player.playback.context);
 			self.options = player.playback.options;
-			self.status = player.status;
-			self.anchor = Anchor::new(player.position.position_ms, player.position.timestamp_ms, player.position.speed);
+			self.playback_status(player.status);
+			self.playback_position(player.position);
 			self.upcoming.clear();
 		} else {
 			self.connect.remote = None;
-			self.status = Status::Paused;
+			if !self.playback_pending() {
+				self.status = Status::Paused;
+			}
 			self.restore_playback(player.playback);
 		}
+		self.trace_playback("connect-state");
 		true
 	}
 
@@ -284,20 +287,11 @@ impl State {
 	/// back to this player).
 	pub fn remote_update(&mut self, msg: &Msg) -> Option<Vec<Effect>> {
 		let device = self.connect.remote.clone()?;
-		let send = |command: PlayerCommand| vec![Effect::Library(Request::Control { device: device.id.clone(), command })];
-		Some(match msg {
-			Msg::TogglePlay => {
-				let pos = self.position_ms();
-				if self.playing() {
-					self.status = Status::Paused;
-					self.anchor_at(pos, 0.0);
-					send(PlayerCommand::Pause)
-				} else {
-					self.status = Status::Playing;
-					self.anchor_at(pos, 1.0);
-					send(PlayerCommand::Resume)
-				}
-			},
+		let send = |command: PlayerCommand| vec![Effect::Library(Request::Control { device: device.id.clone(), command, revision: 0 })];
+		let mut effects = match msg {
+			Msg::TogglePlay => send(if self.playing() { PlayerCommand::Pause } else { PlayerCommand::Resume }),
+			Msg::Play => send(PlayerCommand::Resume),
+			Msg::Pause => send(PlayerCommand::Pause),
 			Msg::Next => send(PlayerCommand::Next),
 			Msg::Prev => send(PlayerCommand::Previous),
 			Msg::Seek(position_ms) => {
@@ -315,10 +309,6 @@ impl State {
 				self.seek_to(pos.min(self.duration_ms().saturating_sub(1000)), &send)
 			},
 			Msg::Volume(percent) => self.remote_volume(&device, (*percent).min(100), &send),
-			Msg::VolumeBy(dir) => {
-				let v = if *dir >= 0 { self.volume.saturating_add(5).min(100) } else { self.volume.saturating_sub(5) };
-				self.remote_volume(&device, v, &send)
-			},
 			Msg::ToggleMute => {
 				let v = if self.volume > 0 {
 					self.unmute_to = self.volume;
@@ -347,7 +337,21 @@ impl State {
 				}))
 			},
 			_ => return None,
-		})
+		};
+		for effect in &mut effects {
+			if let Effect::Library(Request::Control { command, revision, .. }) = effect {
+				let transport = match command {
+					PlayerCommand::Resume => Command::Play { uri: None },
+					PlayerCommand::Pause => Command::Pause,
+					PlayerCommand::Next => Command::SkipNext,
+					PlayerCommand::Previous => Command::SkipPrev,
+					_ => continue,
+				};
+				self.optimistic_playback(&transport);
+				*revision = self.playback_command_id(&transport);
+			}
+		}
+		Some(effects)
 	}
 
 	fn seek_to(&mut self, position_ms: u64, send: &dyn Fn(PlayerCommand) -> Vec<Effect>) -> Vec<Effect> {
@@ -526,7 +530,7 @@ mod tests {
 		let sent = |effects| {
 			requests(effects)
 				.into_iter()
-				.filter_map(|r| if let Request::Control { device, command } = r { Some((device, command)) } else { None })
+				.filter_map(|r| if let Request::Control { device, command, .. } = r { Some((device, command)) } else { None })
 				.collect::<Vec<_>>()
 		};
 		assert_eq!(sent(s.update(Msg::TogglePlay)), vec![("p".to_owned(), PlayerCommand::Pause)]);
@@ -588,15 +592,6 @@ mod tests {
 		assert!(!s.apply_devices(Ok(vec![device("t", "turntable", "Computer", true)])));
 		assert!(!s.apply_devices(Err("x".into())));
 		assert!(matches!(s.connect.devices, DeviceList::Failed(_)));
-	}
-
-	#[test]
-	fn signing_out_forgets_the_other_device() {
-		let mut s = ready();
-		s.apply_playback(Ok(Some(playback(device("p", "Phone", "Smartphone", true), true, 0, "spotify:track:a"))), false);
-		s.library.conn = Conn::NeedsLogin;
-		s.drop_remote_if_signed_out();
-		assert!(s.remote().is_none());
 	}
 
 	fn native_player(device: Option<Device>, status: Status, position_ms: u64) -> crate::engine::ClusterPlayback {

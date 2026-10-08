@@ -139,6 +139,8 @@ enum SpircCommand {
     Load(LoadRequest),
     // turntable: local queue mutations preserve context, playback and options.
     EditQueue { revision: u64, edit: QueueEdit },
+    // turntable: execution errors must reach the optimistic host, not just the log.
+    Playback { revision: u64, command: PlaybackCommand },
 }
 
 /// Native queue operations. Track identity is an occurrence UID, never a URI.
@@ -156,11 +158,11 @@ pub enum QueueEdit {
         /// The occurrence to remove.
         uid: String,
     },
-    /// Move a queued occurrence before another; `None` means the end of the user queue.
+    /// Move any upcoming occurrence before another; `None` means the end of next_tracks.
     Move {
-        /// The queued occurrence to move.
+        /// The occurrence to move (queued, context or autoplay).
         uid: String,
-        /// The queued occurrence to insert before, or the end of the user queue.
+        /// The occurrence to insert before, or the end of the upcoming list.
         before: Option<String>,
     },
     /// Remove user-queued songs only.
@@ -170,6 +172,39 @@ pub enum QueueEdit {
         /// The upcoming occurrence to start.
         uid: String,
     },
+}
+
+/// Local transport commands carrying the host's optimistic revision.
+#[derive(Debug)]
+pub enum PlaybackCommand {
+    /// Resume the loaded track.
+    Play,
+    /// Pause the loaded track.
+    Pause,
+    /// Skip to the next occurrence.
+    Next,
+    /// Restart or skip to the previous occurrence.
+    Previous,
+    /// Load a context or explicit track list.
+    Load(LoadRequest),
+    /// Activate the local device without transfer.
+    Activate,
+    /// Transfer playback onto this device.
+    Transfer(Option<TransferRequest>),
+}
+
+impl PlaybackCommand {
+    fn into_command(self) -> SpircCommand {
+        match self {
+            Self::Play => SpircCommand::Play,
+            Self::Pause => SpircCommand::Pause,
+            Self::Next => SpircCommand::Next,
+            Self::Previous => SpircCommand::Prev,
+            Self::Load(load) => SpircCommand::Load(load),
+            Self::Activate => SpircCommand::Activate,
+            Self::Transfer(request) => SpircCommand::Transfer(request),
+        }
+    }
 }
 
 /// turntable: what the connect state holds besides the player events, sent after every change.
@@ -193,6 +228,8 @@ pub struct StateSnapshot {
     pub cluster: Option<Cluster>,
     /// This is registration's response (including a failed/empty cluster read).
     pub initial_cluster: bool,
+    /// A local transport command was rejected while executing (not while enqueueing).
+    pub command_error: Option<(u64, String)>,
 }
 
 
@@ -347,6 +384,11 @@ impl Spirc {
     /// bring the future initially returned to an end.
     pub fn shutdown(&self) -> Result<(), Error> {
         Ok(self.commands.send(SpircCommand::Shutdown)?)
+    }
+
+    /// Sends a transport command whose execution error is reported in StateSnapshot.
+    pub fn playback(&self, revision: u64, command: PlaybackCommand) -> Result<(), Error> {
+        Ok(self.commands.send(SpircCommand::Playback { revision, command })?)
     }
 
     /// Resumes the playback
@@ -574,8 +616,22 @@ impl SpircTask {
                     match |session_update| self.handle_session_update(session_update)
                 },
                 cmd = async { commands?.recv().await }, if commands.is_some() && self.connect_established => if let Some(cmd) = cmd {
-                    if let Err(e) = self.handle_command(cmd).await {
-                        debug!("could not dispatch command: {e}");
+                    let (cmd, revision) = match cmd {
+                        SpircCommand::Playback { revision, command } => (command.into_command(), revision),
+                        command => (command, 0),
+                    };
+                    let result = if revision != 0 && !self.connect_state.is_active()
+                        && !matches!(cmd, SpircCommand::Activate | SpircCommand::Transfer(_))
+                    {
+                        Err(Error::unavailable("The player is no longer active"))
+                    } else {
+                        self.handle_command(cmd).await
+                    };
+                    if let Err(error) = result {
+                        debug!("could not dispatch command: {error}");
+                        if let Some(tx) = &self.snapshots {
+                            let _ = tx.send(StateSnapshot { command_error: Some((revision, error.to_string())), ..StateSnapshot::default() });
+                        }
                     }
                 },
                 event = async { player_events?.recv().await }, if player_events.is_some() => if let Some(event) = event {
@@ -765,6 +821,7 @@ impl SpircTask {
                 }
                 self.queue_revision = revision;
             }
+            SpircCommand::Playback { .. } => return Err(Error::invalid_argument("Nested playback command")),
         };
 
         self.notify().await
@@ -1916,6 +1973,7 @@ impl SpircTask {
                 .collect(),
             cluster: None,
             initial_cluster: false,
+            command_error: None,
         };
         let _ = tx.send(snapshot);
     }

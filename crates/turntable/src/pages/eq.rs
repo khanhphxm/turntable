@@ -28,8 +28,11 @@ impl Shell {
 			(None, true) => "Custom".to_owned(),
 		};
 		div().id("eq").size_full().overflow_y_scroll().child(
+			// Centred in the main view, like Settings.
 			div()
+				.w_full()
 				.max_w(px(760.))
+				.mx_auto()
 				.px_8()
 				.pt_6()
 				.pb_12()

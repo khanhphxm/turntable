@@ -12,7 +12,7 @@
 
 use std::{collections::VecDeque, f64::consts::PI};
 
-use super::eq::SAMPLE_RATE;
+use super::{dsp_f32, eq::SAMPLE_RATE};
 
 /// [`SAMPLE_RATE`] as a float.
 const FS: f64 = 44_100.0;
@@ -24,14 +24,6 @@ pub const BLOCK: usize = 64;
 /// The output's true-peak ceiling, in dB: 1 dB under full scale leaves room for the
 /// converter that follows (CoreAudio resamples to the device's rate).
 pub const CEILING_DB: f32 = -1.0;
-
-/// A float as `f32` (audio samples keep f32 precision; the maths that makes them is f64).
-fn narrow(x: f64) -> f32 {
-	#[expect(clippy::cast_possible_truncation, reason = "audio samples are f32")]
-	{
-		x as f32
-	}
-}
 
 fn to_linear(db: f64) -> f64 {
 	10f64.powf(db / 20.0)
@@ -310,7 +302,7 @@ impl Leveler {
 
 	/// Applies the gain to the block, ramping from the last block's to the new one.
 	fn apply(&mut self, chunk: &mut [f32]) {
-		let end = narrow(to_linear(self.gain_db));
+		let end = dsp_f32(to_linear(self.gain_db));
 		let (frames, _) = chunk.as_chunks_mut::<2>();
 		let n = frames.len() as f32;
 		let step = (end - self.gain) / n.max(1.0);
@@ -398,15 +390,15 @@ fn kernel(phase: f64) -> [f32; TAPS] {
 		*tap = sinc * bessel_i0(BETA * (1.0 - ratio * ratio).sqrt()) / bessel_i0(BETA);
 	}
 	let total: f64 = taps.iter().sum();
-	taps.map(|t| narrow(t / total))
+	taps.map(|t| dsp_f32(t / total))
 }
 
 impl Limiter {
 	pub fn new() -> Self {
 		let mut limiter = Self {
-			ceiling:    narrow(to_linear(f64::from(CEILING_DB))),
+			ceiling:    dsp_f32(to_linear(f64::from(CEILING_DB))),
 			kernels:    [kernel(0.25), kernel(0.5), kernel(0.75)],
-			recover:    narrow(1.0 - (-1.0 / (RELEASE * FS)).exp()),
+			recover:    dsp_f32(1.0 - (-1.0 / (RELEASE * FS)).exp()),
 			history:    [[0.0; TAPS]; 2],
 			delay:      VecDeque::with_capacity(DELAY_FRAMES + 1),
 			window:     VecDeque::with_capacity(LOOKAHEAD + 2),
@@ -485,7 +477,7 @@ impl Limiter {
 		if let Some(old) = self.minima.pop_front() {
 			self.minima_sum -= f64::from(old);
 		}
-		let smooth = narrow(self.minima_sum / (LOOKAHEAD + 1) as f64).min(1.0);
+		let smooth = dsp_f32(self.minima_sum / (LOOKAHEAD + 1) as f64).min(1.0);
 		self.gain = if smooth < self.gain { smooth } else { self.gain + (smooth - self.gain) * self.recover };
 		delayed.map(|s| s * self.gain)
 	}

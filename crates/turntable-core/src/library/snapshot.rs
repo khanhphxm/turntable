@@ -1,7 +1,7 @@
 //! Account-scoped stale-while-revalidate data under `<cache>/library/<sha256(user-id)>.json`.
 //!
-//! Only one account, native Home, up to four personalised Home facets, eight first-page listings
-//! and eight searches are kept, at most 2 MiB altogether
+//! Only one account, native Home, eight first-page listings and eight searches are kept,
+//! at most 2 MiB altogether. Encoding holds the state lock; disk writes do not and never fsync
 //! (an atomic replacement can temporarily take another 2 MiB). The identity comes from the
 //! stored authorization, never from the cache. Corrupt, oversized or old-version files are
 //! ignored; a snapshot is a first paint, not proof that its data or authorization is current.
@@ -10,12 +10,17 @@ use std::{
 	fs,
 	io::{self, Read, Write},
 	path::{Path, PathBuf},
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering},
+	},
 };
 
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{Facet, Home, HomeFeed, Listing, Response, Route, Tile};
+use super::{Home, Listing, Response, Route, Tile};
 use crate::{
 	app::config,
 	spotify::{PlayContext, Playlist, SearchResults, Track, User, id_of},
@@ -27,24 +32,16 @@ pub(super) const LISTINGS_KEPT: usize = 8;
 
 #[derive(Serialize, Deserialize)]
 struct Snapshot {
-	version:    u32,
-	me:         User,
-	playlists:  Vec<Playlist>,
+	version:   u32,
+	me:        User,
+	playlists: Vec<Playlist>,
 	#[serde(default)]
-	rootlist:   Vec<super::RootEntry>,
-	home:       Option<Home>,
-	#[serde(default)]
-	home_feeds: Vec<SavedHomeFeed>,
+	rootlist:  Vec<super::RootEntry>,
+	home:      Option<Home>,
 	/// Least recently opened first; playlists, albums, artists and Liked Songs.
-	listings:   Vec<SavedListing>,
+	listings:  Vec<SavedListing>,
 	#[serde(default)]
-	searches:   Vec<SavedSearch>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct SavedHomeFeed {
-	facet: Facet,
-	feed:  HomeFeed,
+	searches:  Vec<SavedSearch>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -60,15 +57,24 @@ struct SavedSearch {
 }
 
 pub(super) struct Store {
-	dir:     PathBuf,
-	data:    Option<Snapshot>,
+	dir:        PathBuf,
+	data:       Option<Snapshot>,
 	/// Sign-out disables writes from already queued requests until the next connection.
-	enabled: bool,
+	enabled:    bool,
+	generation: Option<(Arc<AtomicU64>, u64)>,
 }
 
 impl Store {
 	pub(super) fn new(cache: &Path) -> Self {
-		Self { dir: cache.join("library"), data: None, enabled: true }
+		Self { dir: cache.join("library"), data: None, enabled: true, generation: None }
+	}
+
+	pub(super) fn bind_generation(&mut self, live: Arc<AtomicU64>, generation: u64) {
+		self.generation = Some((live, generation));
+	}
+
+	fn current(&self) -> bool {
+		self.generation.as_ref().is_none_or(|(live, generation)| live.load(Ordering::Acquire) == *generation)
 	}
 
 	fn path(&self, user_id: &str) -> PathBuf {
@@ -77,6 +83,9 @@ impl Store {
 
 	/// A new authorization without a verified identity cannot borrow the previous account's data.
 	pub(super) fn load(&mut self, user_id: Option<&str>) {
+		if !self.current() {
+			return;
+		}
 		self.enabled = true;
 		self.data = user_id.and_then(|id| self.read(id));
 	}
@@ -97,7 +106,6 @@ impl Store {
 			|| snapshot.me.id != user_id
 			|| snapshot.listings.len() > LISTINGS_KEPT
 			|| snapshot.searches.len() > LISTINGS_KEPT
-			|| snapshot.home_feeds.len() > Facet::ALL.len()
 		{
 			return None;
 		}
@@ -119,10 +127,6 @@ impl Store {
 
 	pub(super) fn home(&self) -> Option<Home> {
 		self.data.as_ref()?.home.clone()
-	}
-
-	pub(super) fn home_feed(&self, facet: Facet) -> Option<HomeFeed> {
-		self.data.as_ref()?.home_feeds.iter().find(|saved| saved.facet == facet).map(|saved| saved.feed.clone())
 	}
 
 	/// Last-played metadata for offline startup, preferring the checkpoint's exact track.
@@ -167,7 +171,7 @@ impl Store {
 
 	/// Updates only the data worth persisting; unrelated responses do not cause disk writes.
 	pub(super) fn record(&mut self, response: &Response) -> bool {
-		if !self.enabled {
+		if !self.enabled || !self.current() {
 			return false;
 		}
 		match response {
@@ -179,14 +183,13 @@ impl Store {
 					data.playlists = playlists.clone();
 				} else {
 					self.data = Some(Snapshot {
-						version:    VERSION,
-						me:         me.clone(),
-						playlists:  playlists.clone(),
-						rootlist:   Vec::new(),
-						home:       None,
-						home_feeds: Vec::new(),
-						listings:   Vec::new(),
-						searches:   Vec::new(),
+						version:   VERSION,
+						me:        me.clone(),
+						playlists: playlists.clone(),
+						rootlist:  Vec::new(),
+						home:      None,
+						listings:  Vec::new(),
+						searches:  Vec::new(),
 					});
 				}
 			},
@@ -204,11 +207,6 @@ impl Store {
 			Response::HomeRecentTracks(tracks) => {
 				let Some(data) = &mut self.data else { return false };
 				data.home.get_or_insert_with(Home::default).take_recent_tracks(tracks.clone());
-			},
-			Response::HomeFeed { facet, feed } => {
-				let Some(data) = &mut self.data else { return false };
-				data.home_feeds.retain(|saved| saved.facet != *facet);
-				data.home_feeds.push(SavedHomeFeed { facet: *facet, feed: feed.clone() });
 			},
 			Response::Listing {
 				route: route @ (Route::Playlist(_) | Route::Album(_) | Route::Artist(_) | Route::Liked),
@@ -264,11 +262,14 @@ impl Store {
 		self.data.as_mut()?.listings.iter_mut().find(|saved| &saved.route == route).map(|saved| &mut saved.listing)
 	}
 
-	/// Writes after delivery, so filesystem latency never holds up fresh data's first paint.
-	pub(super) fn save(&mut self) -> io::Result<()> {
-		let Some(data) = &self.data else { return Ok(()) };
+	/// Encodes a bounded cache under the state lock; the caller owns off-lock disk I/O.
+	fn prepare(&mut self) -> io::Result<Option<PendingWrite>> {
+		if !self.enabled || !self.current() {
+			return Ok(None);
+		}
+		let Some(data) = &self.data else { return Ok(None) };
 		let path = self.path(&data.me.id);
-		let Some(data) = &mut self.data else { return Ok(()) };
+		let Some(data) = &mut self.data else { return Ok(None) };
 		let bytes = loop {
 			match encode(data) {
 				Ok(bytes) => break bytes,
@@ -278,22 +279,23 @@ impl Store {
 				Err(_) if !data.searches.is_empty() => {
 					data.searches.remove(0);
 				},
-				Err(_) if data.home_feeds.len() > 1 => {
-					data.home_feeds.remove(0);
-				},
 				Err(error) => return Err(error),
 			}
 		};
-		fs::create_dir_all(&self.dir)?;
-		// This directory belongs to the snapshot store. Keeping only the current account bounds
-		// the total, not just each file, and discards abandoned atomic replacements as well.
-		for entry in fs::read_dir(&self.dir)? {
-			let entry = entry?;
-			if entry.path() != path && entry.file_type()?.is_file() {
-				fs::remove_file(entry.path())?;
+		Ok(Some(PendingWrite { dir: self.dir.clone(), path, bytes, generation: self.generation.clone() }))
+	}
+
+	#[cfg(test)]
+	pub(super) fn save(&mut self) -> io::Result<()> {
+		if let Some(write) = self.prepare()? {
+			let temporary = write.stage()?;
+			if write.current() {
+				fs::rename(temporary, write.path)?;
+			} else {
+				let _ = fs::remove_file(temporary);
 			}
 		}
-		config::write_private(&path, &bytes)
+		Ok(())
 	}
 
 	/// A successful unfollow must survive even when the following refresh fails.
@@ -305,14 +307,12 @@ impl Store {
 			super::folders::remove_playlist(&mut data.rootlist, id);
 			data.listings.retain(|saved| !matches!(&saved.route, Route::Playlist(known) if known == id));
 		}
-		let _ = self.save();
 	}
 
 	pub(super) fn forget(&mut self, route: &Route) {
 		if let Some(data) = &mut self.data {
 			data.listings.retain(|saved| &saved.route != route);
 		}
-		let _ = self.save();
 	}
 
 	pub(super) fn forget_listings(&mut self) {
@@ -320,19 +320,68 @@ impl Store {
 			data.listings.clear();
 			data.searches.clear();
 			data.home = None;
-			data.home_feeds.clear();
 		}
-		let _ = self.save();
 	}
 
 	pub(super) fn clear(&mut self) {
+		self.invalidate();
+		let _ = remove(&self.dir);
+	}
+
+	/// Invalidates account memory immediately; the worker removes the directory off-thread.
+	pub(super) fn invalidate(&mut self) {
 		self.data = None;
 		self.enabled = false;
-		let _ = remove(&self.dir);
 	}
 }
 
-/// Both the player's sign-out and the Web API's Disconnect forget library snapshots.
+struct PendingWrite {
+	dir:        PathBuf,
+	path:       PathBuf,
+	bytes:      Vec<u8>,
+	generation: Option<(Arc<AtomicU64>, u64)>,
+}
+
+impl PendingWrite {
+	fn current(&self) -> bool {
+		self.generation.as_ref().is_none_or(|(live, generation)| live.load(Ordering::Acquire) == *generation)
+	}
+
+	fn stage(&self) -> io::Result<PathBuf> {
+		fs::create_dir_all(&self.dir)?;
+		for entry in fs::read_dir(&self.dir)? {
+			let entry = entry?;
+			if entry.path() != self.path && entry.file_type()?.is_file() {
+				fs::remove_file(entry.path())?;
+			}
+		}
+		config::stage_cache(&self.path, &self.bytes)
+	}
+
+	fn commit(self, store: &Mutex<Store>, temporary: PathBuf) -> io::Result<()> {
+		let guard = store.lock();
+		if guard.enabled
+			&& guard.current()
+			&& self.current()
+			&& guard.generation.as_ref().map(|(_, generation)| generation) == self.generation.as_ref().map(|(_, generation)| generation)
+		{
+			fs::rename(temporary, self.path)
+		} else {
+			let _ = fs::remove_file(temporary);
+			Ok(())
+		}
+	}
+}
+
+/// All production saves encode under the lock and write the cache outside it. Only the
+/// atomic rename shares the state lock, preventing a stale account from being recreated.
+pub(super) fn save(store: &Mutex<Store>) -> io::Result<()> {
+	let Some(write) = store.lock().prepare()? else { return Ok(()) };
+	let temporary = write.stage()?;
+	write.commit(store, temporary)
+}
+
+/// Playback sign-out forgets every account's library snapshot.
 pub(crate) fn clear(cache: &Path) -> io::Result<()> {
 	remove(&cache.join("library"))
 }
@@ -386,6 +435,29 @@ mod tests {
 			me:        User { id: user.into(), display_name: Some("Alex".into()) },
 			playlists: vec![playlist],
 		});
+	}
+
+	#[test]
+	fn late_account_generation_cannot_reload_or_recreate_forgotten_snapshots() {
+		let directory = tempfile::tempdir().unwrap();
+		let live = Arc::new(AtomicU64::new(0));
+		let mut store = Store::new(directory.path());
+		store.bind_generation(live.clone(), 0);
+		connect(&mut store, "old-account");
+		store.save().unwrap();
+		live.store(1, Ordering::Release);
+		store.clear();
+		// An in-flight connect must not re-enable writes after the synchronous clear.
+		store.load(Some("old-account"));
+		connect(&mut store, "old-account");
+		store.save().unwrap();
+		assert!(store.connected().is_none());
+		assert!(!directory.path().join("library").exists());
+		store.bind_generation(live, 1);
+		store.load(Some("new-account"));
+		connect(&mut store, "new-account");
+		store.save().unwrap();
+		assert!(matches!(store.connected(), Some(Response::Connected { me, .. }) if me.id == "new-account"));
 	}
 
 	#[test]
@@ -590,6 +662,7 @@ mod tests {
 		}
 		store.save().unwrap();
 		store.remove_playlist("scratch");
+		store.save().unwrap();
 		let mut restored = Store::new(&dir);
 		restored.load(Some("alex"));
 		let Response::Connected { me, playlists } = restored.connected().unwrap() else { panic!() };
@@ -645,5 +718,19 @@ mod tests {
 		assert!(folder.children.is_empty());
 		restored.load(Some("bob"));
 		assert!(restored.rootlist().is_none());
+	}
+
+	#[test]
+	fn staged_snapshot_does_not_hold_the_state_lock_or_survive_invalidation() {
+		let directory = tempfile::tempdir().unwrap();
+		let mut state = Store::new(directory.path());
+		connect(&mut state, "account");
+		let store = Mutex::new(state);
+		let pending = store.lock().prepare().unwrap().unwrap();
+		let temporary = pending.stage().unwrap();
+		store.try_lock().unwrap().invalidate();
+		pending.commit(&store, temporary).unwrap();
+		assert!(store.lock().connected().is_none());
+		assert_eq!(fs::read_dir(directory.path().join("library")).unwrap().count(), 0);
 	}
 }

@@ -23,3 +23,10 @@ __pycache__/
 
 # Local reference material
 /screenshots/
+
+# Local notes and design docs (not published)
+/docs/
+
+# Local developer tools (snapshot harness, live checks, timing)
+/crates/*/examples/
+/tools/

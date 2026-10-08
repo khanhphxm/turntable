@@ -2,15 +2,23 @@
 //! the host dispatches messages, pumps events, and schedules the next deadline.
 
 mod connect;
+#[cfg(test)]
+mod e2e_tests;
 mod events;
+#[cfg(any(test, feature = "test-support"))]
+mod fixture;
 mod lifecycle;
 mod metadata;
 #[cfg(test)]
 mod network_tests;
+mod output;
+mod persistence;
 #[cfg(test)]
 mod premium_tests;
 mod queue;
 mod restore;
+#[cfg(test)]
+mod sign_in_tests;
 
 use std::{
 	sync::{Arc, mpsc},
@@ -21,42 +29,38 @@ use crate::{
 	app::{State, config::Paths},
 	engine::{Client, Engine, Incoming},
 	library::{self, covers},
-	sources::lyrics,
+	lyrics,
 };
 
 /// Overrides supplied by the application host.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Options {
 	/// Overrides the persisted Spotify Connect device name for this launch.
 	pub device_name: Option<String>,
-	/// Allow Spotify Web API requests (true by default). False serves saved library
-	/// snapshots and refuses API reads/writes before token refresh or network I/O.
-	/// Native Session/pathfinder reads and artwork downloads remain enabled.
+	/// Permit Web API requests (false by default). Native Session, anonymous web-player
+	/// metadata and artwork remain enabled. This never loads a separate OAuth account.
 	pub web_api:     bool,
-}
-
-impl Default for Options {
-	fn default() -> Self {
-		Self { device_name: None, web_api: true }
-	}
 }
 
 #[expect(clippy::large_enum_variant, reason = "player/Dealer snapshots travel by value to avoid allocating for every playback update")]
 enum AppEvent {
-	Progress(String),
-	EngineReady(Result<Engine, StartError>),
-	Player(Incoming),
-	Library(Box<library::Response>),
-	Lyrics(lyrics::Response),
+	Progress(u64, String),
+	EngineReady(u64, Result<Engine, StartError>),
+	Player(u64, Incoming),
+	Library(u64, Box<library::Response>),
+	Lyrics(u64, lyrics::Response),
 	Image { url: String, bytes: Vec<u8>, mime: String },
 	ImageFailed(String),
 	Devices,
-	CacheSize(u64),
-	CacheCleared(Result<(), String>),
+	Outputs(Vec<crate::audio::OutputDevice>, Option<String>),
+	AudioReady(u64, Option<String>, Result<crate::audio::Player, crate::audio::StartError>),
+	AudioFailed(u64),
+	SaveFailed(String),
 }
 
 enum StartError {
 	Premium(crate::engine::SignInError),
+	SignInTimedOut,
 	Other(String),
 }
 
@@ -69,11 +73,11 @@ impl From<&str> for StartError {
 const RETRY_START: Duration = Duration::from_secs(5);
 const HEALTH_EVERY: Duration = Duration::from_secs(30);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(350);
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 const AUDIO_RETRY: Duration = Duration::from_secs(5);
 const NO_AUDIO: &str = "No audio output: ";
 const CONTROL_POLL: Duration = Duration::from_millis(800);
 const TRANSFER_POLL: Duration = Duration::from_millis(1200);
-const SYSTEM_EVERY: Duration = Duration::from_secs(5);
 
 /// Owns application state, background workers and the in-process player.
 ///
@@ -89,12 +93,22 @@ const SYSTEM_EVERY: Duration = Duration::from_secs(5);
 pub struct Controller {
 	paths:                Paths,
 	state:                State,
+	account_generation:   u64,
+	start_authorization:  crate::engine::StartAuthorization,
 	tx:                   mpsc::Sender<AppEvent>,
-	rx:                   mpsc::Receiver<AppEvent>,
+	rx:                   Option<mpsc::Receiver<AppEvent>>,
 	wake:                 Arc<dyn Fn() + Send + Sync>,
 	engine:               Option<Engine>,
 	audio:                Option<crate::audio::Player>,
-	settings:             crate::app::settings::Settings,
+	output_worker:        output::Worker,
+	audio_generation:     u64,
+	audio_inflight:       bool,
+	outputs_inflight:     bool,
+	outputs_dirty:        bool,
+	saver:                persistence::Saver,
+	save_at:              Option<Instant>,
+	settings_dirty:       bool,
+	searches_dirty:       bool,
 	client:               Option<Client>,
 	library:              library::Worker,
 	images:               covers::Fetcher,
@@ -124,8 +138,9 @@ pub struct Controller {
 	force_poll:           bool,
 	poll_failures:        u32,
 	output_retry_at:      Option<Instant>,
-	system_at:            Option<Instant>,
 	_devices:             Option<crate::audio::DeviceWatch>,
+	#[cfg(any(test, feature = "test-support"))]
+	fixture_inbox:        Option<library::worker::FixtureInbox>,
 }
 
 impl Controller {
@@ -145,14 +160,15 @@ impl Controller {
 		}
 		crate::net::trace::init();
 		let (tx, rx) = mpsc::channel();
+		let output_worker = output::Worker::spawn(tx.clone(), wake.clone()).map_err(|error| error.to_string())?;
 		let images = spawn_covers(paths, tx.clone(), wake.clone());
+		let saver = spawn_saver(paths, tx.clone(), wake.clone())?;
 		let settings = crate::app::settings::Settings::load(&paths.config);
-		crate::app::settings::allowed::set(settings.prefs.sources);
 		let device_name = opts.device_name.clone().unwrap_or_else(|| settings.prefs.device.name.clone());
 		let library = {
 			let (tx, wake) = (tx.clone(), wake.clone());
-			library::Worker::spawn(paths.config.clone(), &paths.cache, opts.web_api, move |response| {
-				if tx.send(AppEvent::Library(Box::new(response))).is_ok() {
+			library::Worker::spawn(paths.config.clone(), &paths.cache, opts.web_api, move |generation, response| {
+				if tx.send(AppEvent::Library(generation, Box::new(response))).is_ok() {
 					wake();
 				}
 			})
@@ -163,11 +179,10 @@ impl Controller {
 			volume: settings.prefs.device.volume,
 			sys: crate::app::system::System { name_override: opts.device_name, ..crate::app::system::System::default() },
 			eq: settings.eq,
-			eq_preset: settings.eq_preset.clone(),
+			eq_preset: settings.eq_preset,
 			now_playing_view: settings.now_playing_view,
 			sidebar_collapsed: settings.sidebar_collapsed,
-			prefs: settings.prefs.clone(),
-			device_input: settings.prefs.device.name.clone(),
+			prefs: settings.prefs,
 			..State::default()
 		};
 		state.recent_searches.load(&paths.config, crate::app::recent_searches::saved_account(&paths.config));
@@ -175,12 +190,22 @@ impl Controller {
 			paths: paths.clone(),
 			restore: restore::Restore::new(state.signed_in),
 			state,
+			account_generation: 0,
+			start_authorization: crate::engine::StartAuthorization::default(),
 			tx,
-			rx,
+			rx: Some(rx),
 			wake,
 			engine: None,
 			audio: None,
-			settings,
+			output_worker,
+			audio_generation: 0,
+			audio_inflight: false,
+			outputs_inflight: false,
+			outputs_dirty: false,
+			saver,
+			save_at: None,
+			settings_dirty: false,
+			searches_dirty: false,
 			client: None,
 			library,
 			images,
@@ -207,8 +232,9 @@ impl Controller {
 			force_poll: false,
 			poll_failures: 0,
 			output_retry_at: None,
-			system_at: None,
 			_devices: None,
+			#[cfg(any(test, feature = "test-support"))]
+			fixture_inbox: None,
 		};
 		controller.initialize_system();
 		if controller.state.signed_in {
@@ -237,7 +263,7 @@ impl Controller {
 			self.resume();
 			changed = true;
 		}
-		while let Ok(event) = self.rx.try_recv() {
+		while let Some(Ok(event)) = self.rx.as_ref().map(mpsc::Receiver::try_recv) {
 			changed |= self.on_event(event);
 		}
 		self.remember_playback(false);
@@ -268,16 +294,18 @@ impl Controller {
 	pub fn deadline(&self) -> Option<Instant> {
 		[
 			self.engine.as_ref().map(|_| self.health_at),
+			self.start_authorization.deadline(),
 			self.search_at,
 			self.retry_start_at,
 			self.library_retry_at,
 			self.checkpoint_deadline(),
 			self.audio_retry_at,
 			self.visible.then(|| self.state.next_lyric_at()).flatten(),
+			(self.visible && self.state.lyrics_shown() && self.engine.is_some()).then_some(self.state.lyrics_retry_at).flatten(),
 			self.poll_at,
 			self.state.rules_deadline(),
 			self.output_retry_at,
-			self.system_at,
+			self.save_at,
 		]
 		.into_iter()
 		.flatten()
@@ -287,6 +315,10 @@ impl Controller {
 	fn run_timers(&mut self) -> bool {
 		let now = Instant::now();
 		let mut changed = false;
+		if self.state.starting && self.start_authorization.deadline().is_some_and(|at| now >= at) {
+			self.cancel_sign_in(true);
+			changed = true;
+		}
 		if self.library_retry_at.is_some_and(|at| now >= at) {
 			self.library_retry_at = None;
 			self.library.send(library::Request::Connect);
@@ -321,10 +353,8 @@ impl Controller {
 			self.reconcile_output();
 			changed = true;
 		}
-		if self.system_at.is_some_and(|at| now >= at) {
-			self.system_at = None;
-			self.refresh_memory();
-			changed = true;
+		if self.save_at.is_some_and(|at| now >= at) {
+			self.flush_preferences();
 		}
 		if self.engine.is_some() && now >= self.health_at {
 			self.health_at = now + HEALTH_EVERY;
@@ -336,13 +366,27 @@ impl Controller {
 
 impl Drop for Controller {
 	fn drop(&mut self) {
+		self.start_authorization.cancel();
 		self.remember_playback(true);
 		self.client = None;
-		self.audio = None;
-		self.engine = None;
+		self.flush_preferences();
+		if let Some(engine) = &self.engine {
+			engine.stop();
+		}
+		if let Some(events) = self.rx.take() {
+			self.output_worker.finish(self.audio.take(), self.engine.take(), events);
+		}
 	}
 }
 
+fn spawn_saver(paths: &Paths, tx: mpsc::Sender<AppEvent>, wake: Arc<dyn Fn() + Send + Sync>) -> Result<persistence::Saver, String> {
+	persistence::Saver::spawn(&paths.config, move |message| {
+		if tx.send(AppEvent::SaveFailed(message)).is_ok() {
+			wake();
+		}
+	})
+	.map_err(|error| error.to_string())
+}
 /// Appends a line to `$TMPDIR/turntable-debug.log` when `TURNTABLE_DEBUG` is set.
 fn debug_log(line: &str) {
 	use std::io::Write;
@@ -382,13 +426,13 @@ mod tests {
 	use super::*;
 	use crate::{
 		app::{Anchor, LyricsState, Panel},
-		sources::external::Lyrics,
+		lyrics::Lyrics,
 	};
 
 	#[test]
 	fn startup_volume_uses_saved_preference_until_the_player_reports() -> Result<(), Box<dyn std::error::Error>> {
-		let root = std::env::temp_dir().join(format!("turntable-startup-volume-{}", std::process::id()));
-		let paths = Paths { config: root.join("config"), cache: root.join("cache") };
+		let root = tempfile::tempdir()?;
+		let paths = Paths { config: root.path().join("config"), cache: root.path().join("cache") };
 		std::fs::create_dir_all(&paths.config)?;
 		let mut settings = crate::app::settings::Settings::default();
 		settings.prefs.device.volume = 37;
@@ -401,16 +445,14 @@ mod tests {
 		controller.state.apply(crate::engine::Event::VolumeChanged { volume: 61 });
 		assert_eq!(controller.state().volume, 61, "the actual player volume takes precedence");
 		drop(controller);
-		std::fs::remove_dir_all(root)?;
 		Ok(())
 	}
 
 	#[test]
 	fn deadlines_pick_the_earliest_timer_and_hidden_lyrics_do_not_tick() {
-		let root = std::env::temp_dir().join(format!("turntable-deadlines-{}", std::process::id()));
-		let _ = std::fs::remove_dir_all(&root);
-		let paths = Paths { config: root.join("config"), cache: root.join("cache") };
-		let mut controller = Controller::new(&paths, Options::default(), Arc::new(|| {})).unwrap();
+		let root = tempfile::tempdir().unwrap();
+		let paths = Paths { config: root.path().join("config"), cache: root.path().join("cache") };
+		let mut controller = Controller::fixture(&paths, State::default()).unwrap();
 		controller.state.item.uri = "spotify:track:a".into();
 		controller.state.panel = Some(Panel::Lyrics);
 		let now = Instant::now();
@@ -426,6 +468,5 @@ mod tests {
 		controller.search_at = None;
 		assert!(controller.deadline().is_none());
 		drop(controller);
-		std::fs::remove_dir_all(root).unwrap();
 	}
 }

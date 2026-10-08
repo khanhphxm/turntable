@@ -9,7 +9,7 @@ use librespot_core::Session;
 use librespot_protocol::playlist4_external::{Add, Item, MetaItem, Mov, Op, Rem, SelectedListContent, op::Kind};
 use protobuf::MessageField;
 
-use super::{Reader, artwork, network, playlist};
+use super::{Reader, artwork, playlist};
 use crate::{
 	library::{Folder, RootEntry},
 	spotify::{self, Playlist},
@@ -256,7 +256,7 @@ impl Reader {
 				)
 				.await
 			})
-			.map_err(network)?;
+			.map_err(spotify::Error::from)?;
 		self.roots = None;
 		Ok(id)
 	}
@@ -269,7 +269,7 @@ impl Reader {
 				let ops = rename(&current.items, begin, id, name)?;
 				change(self.shared.session(), &current, ops).await
 			})
-			.map_err(network)?;
+			.map_err(spotify::Error::from)?;
 		self.roots = None;
 		Ok(())
 	}
@@ -281,7 +281,7 @@ impl Reader {
 				let ops = delete(&current.items, id)?;
 				change(self.shared.session(), &current, ops).await
 			})
-			.map_err(network)?;
+			.map_err(spotify::Error::from)?;
 		self.roots = None;
 		Ok(())
 	}
@@ -293,9 +293,9 @@ impl Reader {
 				if let Some(op) = move_to(&current.items, uri, folder)? {
 					change(self.shared.session(), &current, vec![op]).await?;
 				}
-				Ok(())
+				Ok::<_, librespot_core::Error>(())
 			})
-			.map_err(network)?;
+			.map_err(spotify::Error::from)?;
 		self.roots = None;
 		Ok(())
 	}

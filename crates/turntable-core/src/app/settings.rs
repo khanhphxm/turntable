@@ -15,8 +15,6 @@ pub const MAX_DEVICE_NAME: usize = 48;
 pub const CACHE_SIZES: [u32; 6] = [100, 250, 500, 1024, 2048, 0];
 /// The volume the player starts at until the user picks one.
 pub const DEFAULT_VOLUME: u8 = 50;
-/// Balance steps from the middle to either side.
-pub const BALANCE_STEPS: i8 = 10;
 /// Longest overlap between naturally advancing songs, in seconds (0 disables it).
 pub const MAX_CROSSFADE: u8 = 12;
 
@@ -55,7 +53,6 @@ pub struct Prefs {
 	pub audio:    Audio,
 	pub device:   Device,
 	pub display:  Display,
-	pub sources:  Sources,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -81,8 +78,6 @@ impl Default for Playback {
 pub struct Audio {
 	pub normalize: Normalize,
 	pub mono:      bool,
-	/// From `-BALANCE_STEPS` (all left) to `BALANCE_STEPS` (all right).
-	pub balance:   i8,
 	/// The output device the user picked; `None` plays on the system's default.
 	pub output:    Option<Output>,
 }
@@ -127,27 +122,9 @@ impl Default for Display {
 	}
 }
 
-/// Optional metadata sources outside Spotify's authenticated player session.
-/// Retired `lyrics` and `wikipedia` keys in saved settings are ignored on load and
-/// omitted on the next save; unrelated preferences and `web_player` retain their values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Sources {
-	/// Listeners, photos, credits, play counts and other people's playlists from Spotify's
-	/// anonymous web player.
-	pub web_player: bool,
-}
-
-impl Default for Sources {
-	fn default() -> Self {
-		Self { web_player: true }
-	}
-}
-
 impl Prefs {
 	/// Brings hand-edited or newer settings files into the app's supported ranges.
 	pub fn sanitized(mut self) -> Self {
-		self.audio.balance = self.audio.balance.clamp(-BALANCE_STEPS, BALANCE_STEPS);
 		self.playback.crossfade = self.playback.crossfade.min(MAX_CROSSFADE);
 		self.device.volume = self.device.volume.min(100);
 		self.device.cache_mb = sanitize_cache(self.device.cache_mb);
@@ -169,15 +146,6 @@ pub fn sanitize_name(name: &str) -> String {
 	if clean.is_empty() { DEFAULT_DEVICE_NAME.to_owned() } else { clean.to_owned() }
 }
 
-/// What a cache limit is called.
-pub fn cache_label(mb: u32) -> String {
-	match mb {
-		0 => "Off".to_owned(),
-		mb if mb >= 1024 && mb.is_multiple_of(1024) => format!("{} GB", mb / 1024),
-		mb => format!("{mb} MB"),
-	}
-}
-
 /// One change the settings page makes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pref {
@@ -187,17 +155,13 @@ pub enum Pref {
 	Crossfade(u8),
 	Normalize(Normalize),
 	Mono(bool),
-	/// Steps from the middle, `-BALANCE_STEPS` to `BALANCE_STEPS`.
-	Balance(i8),
 	/// A device to play on (`None`: the system's default).
 	Output(Option<Output>),
 	StartupVolume(u8),
-	CacheMb(u32),
 	/// Whether the now-playing view opens by itself (kept apart from [`Prefs`], with the layout).
 	NowPlayingView(bool),
 	Compact(bool),
 	PlayCounts(bool),
-	WebPlayer(bool),
 }
 
 impl Prefs {
@@ -209,13 +173,10 @@ impl Prefs {
 			Pref::Crossfade(seconds) => self.playback.crossfade = (*seconds).min(MAX_CROSSFADE),
 			Pref::Normalize(level) => self.audio.normalize = *level,
 			Pref::Mono(on) => self.audio.mono = *on,
-			Pref::Balance(steps) => self.audio.balance = (*steps).clamp(-BALANCE_STEPS, BALANCE_STEPS),
 			Pref::Output(device) => self.audio.output.clone_from(device),
 			Pref::StartupVolume(volume) => self.device.volume = (*volume).min(100),
-			Pref::CacheMb(mb) => self.device.cache_mb = sanitize_cache(*mb),
 			Pref::Compact(on) => self.display.compact = *on,
 			Pref::PlayCounts(on) => self.display.play_counts = *on,
-			Pref::WebPlayer(on) => self.sources.web_player = *on,
 			Pref::NowPlayingView(_) => return false,
 		}
 		true
@@ -226,6 +187,7 @@ impl Settings {
 	pub fn load(config: &Path) -> Self {
 		let mut settings: Self =
 			fs::read(config.join("settings.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+		settings.eq = settings.eq.sanitized();
 		settings.prefs = settings.prefs.sanitized();
 		settings
 	}
@@ -237,110 +199,97 @@ impl Settings {
 	}
 }
 
-/// What the optional metadata workers may ask: the current [`Sources`],
-/// readable from any thread. The UI thread sets it whenever the preference changes, and every
-/// request those threads make checks it first, so a source that is off is never contacted.
-pub mod allowed {
-	use std::sync::atomic::{AtomicBool, Ordering};
-
-	use super::Sources;
-
-	static WEB_PLAYER: AtomicBool = AtomicBool::new(true);
-
-	pub fn set(sources: Sources) {
-		WEB_PLAYER.store(sources.web_player, Ordering::Relaxed);
-	}
-
-	/// Spotify's anonymous web player.
-	pub fn web_player() -> bool {
-		WEB_PLAYER.load(Ordering::Relaxed)
-	}
-
-	/// Runs `f` with these sources allowed and nothing else running meanwhile (the flags are
-	/// process-wide, and tests run in parallel), then allows everything again.
-	#[cfg(test)]
-	pub fn only_with<T>(sources: Sources, f: impl FnOnce() -> T) -> T {
-		static EXCLUSIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-		let _guard = EXCLUSIVE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-		set(sources);
-		let result = f();
-		set(Sources::default());
-		result
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
 
-	fn scratch(name: &str) -> std::path::PathBuf {
-		let dir = std::env::temp_dir().join(format!("tt-settings-{name}-{}", std::process::id()));
-		fs::create_dir_all(&dir).unwrap();
-		dir
+	#[test]
+	fn eq_integer_db_settings_migrate_and_half_db_values_survive_restart() {
+		let directory = tempfile::tempdir().unwrap();
+		let dir = directory.path();
+		fs::write(
+			dir.join("settings.json"),
+			br#"{"eq":{"enabled":true,"preamp_db":-3,"gains_db":[4,3,2,0,-1,-1,0,2,3,4]},"eq_preset":"rock"}"#,
+		)
+		.unwrap();
+		let mut settings = Settings::load(dir);
+		let rock = EqSettings::preset("rock").unwrap();
+		assert_eq!(settings.eq.gains_db, rock.gains_db, "integers are dB, not slider or half-dB units");
+		assert!(settings.eq.enabled);
+		assert_eq!(settings.eq.preamp_db, -3.0);
+		assert_eq!(settings.eq_preset.as_deref(), Some("rock"));
+		settings.eq.gains_db = [-11.5, -3.5, -0.5, 0.0, 0.5, 1.5, 3.5, 5.5, 9.5, 11.5];
+		settings.eq_preset = None;
+		settings.save(dir).unwrap();
+		assert_eq!(Settings::load(dir), settings);
+		fs::write(dir.join("settings.json"), br#"{"eq":{"preamp_db":-99,"gains_db":[99,-99,0.25,-0.25,3.74,-3.74,11.9,-11.9,1,-1]}}"#)
+			.unwrap();
+		let settings = Settings::load(dir);
+		assert_eq!(settings.eq.gains_db, [12.0, -12.0, 0.5, -0.5, 3.5, -3.5, 12.0, -12.0, 1.0, -1.0]);
+		assert_eq!(settings.eq.preamp_db, -24.0);
 	}
 
 	#[test]
 	fn older_and_corrupt_files_do_not_block_startup() {
-		let dir = scratch("older-and-corrupt");
+		let directory = tempfile::tempdir().unwrap();
+		let dir = directory.path();
 		// A file from an older version with fewer fields still loads.
 		fs::write(dir.join("settings.json"), br#"{"eq_preset":"vocal"}"#).unwrap();
-		assert_eq!(Settings::load(&dir).eq_preset.as_deref(), Some("vocal"));
+		assert_eq!(Settings::load(dir).eq_preset.as_deref(), Some("vocal"));
 		// A corrupt file falls back to defaults instead of failing startup.
 		fs::write(dir.join("settings.json"), b"{not json").unwrap();
-		assert_eq!(Settings::load(&dir), Settings::default());
-		fs::remove_dir_all(dir).unwrap();
+		assert_eq!(Settings::load(dir), Settings::default());
 	}
 
 	#[test]
 	fn retired_sources_do_not_reset_saved_preferences() {
-		let dir = scratch("source-migration");
+		let directory = tempfile::tempdir().unwrap();
+		let dir = directory.path();
 		fs::write(
 			dir.join("settings.json"),
 			br#"{"eq_preset":"rock","sources":{"lyrics":false,"wikipedia":false,"web_player":false},"audio":{"mono":true}}"#,
 		)
 		.unwrap();
-		let settings = Settings::load(&dir);
+		let settings = Settings::load(dir);
 		assert_eq!(settings.eq_preset.as_deref(), Some("rock"));
 		assert!(settings.prefs.audio.mono);
-		assert!(!settings.prefs.sources.web_player);
-		settings.save(&dir).unwrap();
+		settings.save(dir).unwrap();
 		let saved: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("settings.json")).unwrap()).unwrap();
-		assert!(saved["sources"].get("wikipedia").is_none());
-		assert!(saved["sources"].get("lyrics").is_none());
-		assert_eq!(Settings::load(&dir), settings);
-		fs::remove_dir_all(dir).unwrap();
+		assert!(saved.get("sources").is_none());
+		assert_eq!(Settings::load(dir), settings);
 	}
 
 	#[test]
 	fn an_unknown_normalize_level_costs_nothing_else() {
-		let dir = scratch("future");
+		let directory = tempfile::tempdir().unwrap();
+		let dir = directory.path();
 		fs::write(dir.join("settings.json"), br#"{"eq_preset":"rock","audio":{"normalize":"ultra","mono":true},"future_thing":[1,2]}"#)
 			.unwrap();
-		let s = Settings::load(&dir);
+		let s = Settings::load(dir);
 		assert_eq!(s.eq_preset.as_deref(), Some("rock"));
 		assert_eq!(s.prefs.audio.normalize, Normalize::Off);
 		assert!(s.prefs.audio.mono);
-		fs::remove_dir_all(dir).unwrap();
 	}
 
 	#[test]
 	fn values_a_hand_edit_could_break_are_brought_into_range() {
-		let dir = scratch("range");
+		let directory = tempfile::tempdir().unwrap();
+		let dir = directory.path();
 		fs::write(
 			dir.join("settings.json"),
 			br#"{"audio":{"balance":100},"device":{"name":"  \u0007Den\u0000 ","volume":250,"cache_mb":50}}"#,
 		)
 		.unwrap();
-		let s = Settings::load(&dir);
-		assert_eq!(s.prefs.audio.balance, BALANCE_STEPS);
+		let s = Settings::load(dir);
+		let saved = serde_json::to_value(&s).unwrap();
+		assert!(saved["audio"].get("balance").is_none(), "retired balance settings cannot pan audio or persist");
 		assert_eq!(s.prefs.device.volume, 100);
 		assert_eq!(s.prefs.device.cache_mb, 100);
 		assert_eq!(s.prefs.device.name, "Den");
 		fs::write(dir.join("settings.json"), br#"{"device":{"name":"   ","cache_mb":99999}}"#).unwrap();
-		let s = Settings::load(&dir);
+		let s = Settings::load(dir);
 		assert_eq!(s.prefs.device.name, DEFAULT_DEVICE_NAME);
 		assert_eq!(s.prefs.device.cache_mb, 2048);
-		fs::remove_dir_all(dir).unwrap();
 	}
 
 	type Check = fn(&Prefs) -> bool;
@@ -349,23 +298,18 @@ mod tests {
 	fn each_change_lands_in_its_own_preference_and_stays_in_range() {
 		let mut p = Prefs::default();
 		let out = Output { uid: "u".into(), name: "n".into() };
-		let checks: [(Pref, Check); 16] = [
+		let checks: [(Pref, Check); 11] = [
 			(Pref::Autoplay(false), |p| !p.playback.autoplay),
 			(Pref::Explicit(false), |p| !p.playback.explicit),
 			(Pref::Crossfade(255), |p| p.playback.crossfade == MAX_CROSSFADE),
 			(Pref::Crossfade(0), |p| p.playback.crossfade == 0),
 			(Pref::Normalize(Normalize::Quiet), |p| p.audio.normalize == Normalize::Quiet),
 			(Pref::Mono(true), |p| p.audio.mono),
-			(Pref::Balance(99), |p| p.audio.balance == BALANCE_STEPS),
-			(Pref::Balance(-99), |p| p.audio.balance == -BALANCE_STEPS),
 			(Pref::Output(Some(out)), |p| p.audio.output.as_ref().is_some_and(|out| out.uid == "u" && out.name == "n")),
 			(Pref::Output(None), |p| p.audio.output.is_none()),
 			(Pref::StartupVolume(250), |p| p.device.volume == 100),
-			(Pref::CacheMb(50), |p| p.device.cache_mb == 100),
-			(Pref::CacheMb(0), |p| p.device.cache_mb == 0),
 			(Pref::Compact(true), |p| p.display.compact),
 			(Pref::PlayCounts(false), |p| !p.display.play_counts),
-			(Pref::WebPlayer(false), |p| !p.sources.web_player),
 		];
 		for (pref, check) in checks {
 			assert!(p.set(&pref), "{pref:?}");
@@ -379,17 +323,17 @@ mod tests {
 
 	#[test]
 	fn crossfade_survives_restart_and_old_settings_keep_it_off() {
-		let dir = scratch("crossfade");
+		let directory = tempfile::tempdir().unwrap();
+		let dir = directory.path();
 		let mut settings = Settings::default();
 		assert_eq!(settings.prefs.playback.crossfade, 0);
 		settings.prefs.set(&Pref::Crossfade(6));
-		settings.save(&dir).unwrap();
-		assert_eq!(Settings::load(&dir).prefs.playback.crossfade, 6);
+		settings.save(dir).unwrap();
+		assert_eq!(Settings::load(dir).prefs.playback.crossfade, 6);
 		fs::write(dir.join("settings.json"), br#"{"playback":{"crossfade":255}}"#).unwrap();
-		assert_eq!(Settings::load(&dir).prefs.playback.crossfade, MAX_CROSSFADE);
+		assert_eq!(Settings::load(dir).prefs.playback.crossfade, MAX_CROSSFADE);
 		fs::write(dir.join("settings.json"), br#"{"playback":{"autoplay":false}}"#).unwrap();
-		assert_eq!(Settings::load(&dir).prefs.playback.crossfade, 0);
-		fs::remove_dir_all(dir).unwrap();
+		assert_eq!(Settings::load(dir).prefs.playback.crossfade, 0);
 	}
 
 	#[test]

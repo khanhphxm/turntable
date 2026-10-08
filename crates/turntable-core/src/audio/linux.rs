@@ -77,20 +77,18 @@ impl Output {
 
 	fn start_with(shared: Arc<Shared>, commands: impl IntoIterator<Item = Command>) -> io::Result<Self> {
 		let (command, child, input) = select(commands)?;
+		shared.running.store(true, Ordering::Release);
 		let child = Arc::new(Mutex::new(Some(child)));
 		let worker = {
 			let shared = shared.clone();
 			let child = child.clone();
 			thread::Builder::new().name("turntable-audio".into()).spawn(move || {
-				shared.control.get_or_init(thread::current);
 				let mut render = Render::new(shared.clone());
-				let _ = run(&shared, &child, &mut render, command, input);
-				// An exited utility must not leave the decoder blocked on a full ring.
-				shared.stop.store(true, Ordering::Release);
-				shared.running.store(false, Ordering::Release);
-				if let Some(writer) = shared.writer.get() {
-					writer.unpark();
+				if run(&shared, &child, &mut render, command, input).is_err() && !shared.stop.load(Ordering::Acquire) {
+					// Failure is not decoder shutdown: the controller rebuilds this output from its feed.
+					shared.output_failed();
 				}
+				shared.running.store(false, Ordering::Release);
 				terminate(&child);
 			})
 		};
@@ -133,7 +131,9 @@ impl Drop for Output {
 fn run(shared: &Shared, child: &Mutex<Option<Child>>, render: &mut Render, mut command: Command, input: ChildStdin) -> io::Result<()> {
 	let mut input = Some(input);
 	let mut samples = [0.0; FRAMES * 2];
+	let waker = super::control_waker();
 	while !shared.stop.load(Ordering::Acquire) {
+		shared.control.register(&waker);
 		// Stop only if still idle; new PCM may have arrived since Render's request.
 		if shared.want_stop.swap(false, Ordering::AcqRel) && shared.ring.len() == 0 {
 			shared.running.store(false, Ordering::Release);
@@ -302,12 +302,28 @@ mod tests {
 	}
 
 	#[test]
-	fn an_exited_utility_releases_the_writer_and_is_reaped() {
+	fn an_exited_utility_is_reaped_and_its_feed_rebuilds_without_pausing_the_writer() {
 		let (writer, feed) = channel();
-		let shared = feed.0;
-		let output = Output::start_with(shared.clone(), [fake("exit 7")]).unwrap();
-		wait_for(|| shared.stop.load(Ordering::Acquire) && lock(&output.child).is_none());
-		assert!(!writer.write(&[0.5; REBUFFER_SAMPLES]));
-		drop(output);
+		let shared = feed.0.clone();
+		let player = crate::audio::Player::start_with(feed, None, |shared, _| Output::start_with(shared, [fake("exit 7")])).unwrap();
+		wait_for(|| player.is_dead() && lock(&player.out.child).is_none());
+		assert!(!shared.stop.load(Ordering::Acquire), "failure is not permanent decoder shutdown");
+		assert!(writer.write(&[0.5; 2]), "a lost utility must not pause librespot");
+		let feed = player.into_feed();
+		assert!(shared.stop.load(Ordering::Acquire), "the old backend has shut down");
+		assert!(writer.write(&[0.5; 2]), "the feed can wait for an output retry without a sink error");
+		let files = Files::new();
+		let pcm = files.0.join("pcm");
+		let mut command = fake("exec cat >> \"$1\"");
+		command.arg(&pcm);
+		let player = crate::audio::Player::start_with(feed, None, |shared, _| Output::start_with(shared, [command])).unwrap();
+		assert!(!shared.stop.load(Ordering::Acquire), "rebuild clears the old stop flag");
+		assert!(!player.is_dead());
+		wait_for(|| !shared.running.load(Ordering::Acquire) && lock(&player.out.child).is_none());
+		assert!(writer.write(&[0.25; REBUFFER_SAMPLES]));
+		wait_for(|| fs::read(&pcm).is_ok_and(|bytes| bytes.as_chunks::<4>().0.iter().any(|sample| sample == &0.25f32.to_le_bytes())));
+		assert!(!player.is_dead(), "the replacement's own control waker restarts its idle child");
+		drop(player);
+		assert!(!writer.write(&[0.0; 2]));
 	}
 }

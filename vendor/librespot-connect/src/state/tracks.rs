@@ -432,10 +432,10 @@ impl<'ct> ConnectState {
                 }
             }
             crate::QueueEdit::Move { uid, before } => {
-                let source = self.next_tracks().iter().position(|t| t.uid == uid && t.is_queue());
+                let source = self.next_tracks().iter().position(|t| t.uid == uid);
                 let destination = match &before {
-                    Some(uid) => self.next_tracks().iter().position(|t| t.uid == *uid && t.is_queue()),
-                    None => Some(self.next_tracks().iter().take_while(|t| t.is_queue()).count()),
+                    Some(uid) => self.next_tracks().iter().position(|t| t.uid == *uid),
+                    None => Some(self.next_tracks().len()),
                 };
                 if let (Some(from), Some(to)) = (source, destination) {
                     let track = self.next_tracks_mut().remove(from);
@@ -508,14 +508,14 @@ mod tests {
         assert_eq!(uids(&state), ["a", "b", "c1", "c2"]);
         state.edit_queue(QueueEdit::Move { uid: "b".into(), before: Some("a".into()) })?;
         assert_eq!(uids(&state), ["b", "a", "c1", "c2"]);
-        state.edit_queue(QueueEdit::Move { uid: "b".into(), before: None })?;
+        state.edit_queue(QueueEdit::Move { uid: "b".into(), before: Some("c1".into()) })?;
         assert_eq!(uids(&state), ["a", "b", "c1", "c2"]);
         state.edit_queue(QueueEdit::Remove { uid: "a".into() })?;
         assert_eq!(uids(&state), ["b", "c1", "c2"]);
         state.edit_queue(QueueEdit::Add { tracks: vec![("next".into(), "spotify:track:next".into())], next: true })?;
         assert_eq!(uids(&state), ["next", "b", "c1", "c2"]);
         state.edit_queue(QueueEdit::Move { uid: "c1".into(), before: Some("b".into()) })?;
-        assert_eq!(uids(&state), ["next", "b", "c1", "c2"]);
+        assert_eq!(uids(&state), ["next", "c1", "b", "c2"]);
         state.edit_queue(QueueEdit::Clear)?;
         assert_eq!(uids(&state), ["c1", "c2"]);
         assert_eq!(state.current_track(|t| t.uid.as_str()), "c0");
@@ -551,4 +551,24 @@ mod tests {
         assert!(state.shuffling_context());
         Ok(())
     }
+
+    #[tokio::test]
+    async fn context_and_autoplay_occurrences_reorder_in_native_next_tracks() -> Result<(), Error> {
+        let mut state = state();
+        state.set_track(context_track(0));
+        let mut autoplay = context_track(3);
+        autoplay.set_provider(Provider::Autoplay);
+        state.player_mut().next_tracks = vec![context_track(1), context_track(2), autoplay];
+        state.edit_queue(QueueEdit::Move { uid: "c2".into(), before: Some("c1".into()) })?;
+        assert_eq!(uids(&state), ["c2", "c1", "c3"]);
+        state.edit_queue(QueueEdit::Move { uid: "c3".into(), before: Some("c2".into()) })?;
+        assert_eq!(uids(&state), ["c3", "c2", "c1"]);
+        assert!(state.next_tracks().first().is_some_and(|track| track.is_autoplay()));
+        state.edit_queue(QueueEdit::Move { uid: "c2".into(), before: None })?;
+        assert_eq!(uids(&state), ["c3", "c1", "c2"]);
+        assert!(state.next_tracks().last().is_some_and(|track| track.is_context()));
+        assert_eq!(state.current_track(|track| track.uid.as_str()), "c0");
+        Ok(())
+    }
+
 }

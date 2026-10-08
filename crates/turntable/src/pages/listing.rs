@@ -1,9 +1,9 @@
-//! A playlist, album or Liked Songs: header, action bar, then the track table (virtualised;
-//! the next page loads as the end comes into view).
+//! A playlist, album or Liked Songs: a virtualised header, track table and footer. Pagination
+//! changes only the suffix, preserving the visible row/offset and previously measured heights.
 
 use gpui_kit::{
 	AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
-	Styled as _, Window, div, list, prelude::FluentBuilder as _, px,
+	Styled as _, Window, canvas, div, list, prelude::FluentBuilder as _, px,
 };
 use turntable_core::{Msg, Route, spotify::id_of};
 
@@ -18,18 +18,25 @@ impl Shell {
 	pub fn listing_page(&mut self, route: Route, cx: &mut Context<'_, Self>) -> impl IntoElement {
 		let rows = self.st().library.listing.as_ref().map_or(0, |l| l.tracks.len());
 		let album = matches!(route, Route::Album(_));
-		// The list's items: the header, the rows, then a footer (loading / show more).
-		if self.list_for.as_ref() != Some(&(route.clone(), rows)) {
-			if self.list_for.as_ref().is_some_and(|(r, _)| *r == route) {
-				// More rows arrived for the same page: keep the scroll position.
-				self.list.splice(0..self.list.item_count(), rows + 2);
-			} else {
-				self.list.reset(rows + 2);
+		let compact = self.st().prefs.display.compact;
+		let row_height = if compact { theme::ROW_COMPACT_H } else { theme::ROW_H };
+		// Header, tracks, footer. Replacing the entire range resets GPUI's anchor to item zero.
+		if self.list_for.as_ref().is_none_or(|(r, count)| *r != route || *count != rows) {
+			match self.list_for.as_ref() {
+				Some((r, count)) if *r == route && rows > *count => {
+					self.list.splice(count + 1..count + 2, rows - count + 1);
+					// Newly appended rows need height hints too, without measuring the whole playlist.
+					self.list = self.list.clone().with_uniform_item_height(row_height);
+				},
+				Some((r, count)) if *r == route => self.list.splice(rows + 1..count + 2, 1),
+				_ => self.list.reset_with_uniform_height(rows + 2, row_height),
 			}
 			self.list_for = Some((route, rows));
 		}
-		// The footer's height follows the finder and its results: measure it afresh each frame.
-		self.list.remeasure_items(rows + 1..rows + 2);
+		if self.list_compact != compact {
+			self.list.remeasure();
+			self.list_compact = compact;
+		}
 		list(
 			self.list.clone(),
 			cx.processor(move |this, ix: usize, window, cx| {
@@ -37,7 +44,7 @@ impl Shell {
 					return this.listing_header(cx);
 				}
 				let i = ix - 1;
-				let Some(t) = this.st().library.listing.as_ref().and_then(|l| l.tracks.get(i)).cloned() else {
+				let Some(t) = this.st().library.listing.as_ref().and_then(|l| l.tracks.get(i)) else {
 					return this.listing_footer(window, cx);
 				};
 				let plays = this.st().library.listing.as_ref().and_then(|l| l.plays.get(i).copied());
@@ -77,11 +84,36 @@ impl Shell {
 								.child(format!("Disc {}", t.disc_number)),
 						)
 					})
-					.child(this.track_row(i, &t, column, plays, !album, cx))
+					.child(this.track_row(i, t, column, plays, !album, cx))
 					.into_any_element()
 			}),
 		)
 		.size_full()
+	}
+
+	/// Core changes and finder toggles can resize the chrome; wheel frames cannot.
+	pub fn invalidate_listing_chrome(&self) {
+		if let Some((_, rows)) = &self.list_for {
+			self.list.remeasure_items(0..1);
+			self.list.remeasure_items(rows + 1..rows + 2);
+		}
+	}
+
+	/// Neither list callbacks (which borrow ListState) nor prepaint may dispatch core work.
+	/// Wait for the frame boundary, then reject a page/continuation which has been replaced.
+	pub fn schedule_load_more(&self, window: &Window, cx: &mut Context<'_, Self>) {
+		let Some(offset) = self.st().library.listing.as_ref().filter(|l| !l.loading).and_then(|l| l.next_offset) else { return };
+		let route = self.st().library.route.clone();
+		let shell = cx.weak_entity();
+		window.on_next_frame(move |_, cx| {
+			let _ = shell.update(cx, |this, cx| {
+				if this.st().library.route == route
+					&& this.st().library.listing.as_ref().is_some_and(|l| !l.loading && l.next_offset == Some(offset))
+				{
+					this.send(Msg::LoadMore, cx);
+				}
+			});
+		});
 	}
 
 	fn listing_footer(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> AnyElement {
@@ -110,11 +142,8 @@ impl Shell {
 		};
 		let more = l.next_offset.is_some();
 		let loading = l.loading;
-		if more && !loading {
-			// The end came into view: fetch the next page (Spotify's lists never need a click).
-			self.send(Msg::LoadMore, cx);
-		}
 		div()
+			.relative()
 			.px_6()
 			.pt_4()
 			.pb_10()
@@ -122,6 +151,23 @@ impl Shell {
 			.text_color(theme::subdued())
 			.when_some(text, |s, t| s.child(t))
 			.when(more, |s| s.child("Loading more…"))
+			// A short first page may not scroll yet. Its visible marker also schedules loading,
+			// but never sends a core message while constructing or measuring a list item.
+			.when(more && !loading, |s| {
+				let load = cx.listener(|this, &(), window, cx| this.schedule_load_more(window, cx));
+				s.child(
+					canvas(
+						move |bounds, window, cx| {
+							if bounds.intersects(&window.content_mask().bounds) {
+								load(&(), window, cx);
+							}
+						},
+						|_, (), _, _| {},
+					)
+					.absolute()
+					.inset_0(),
+				)
+			})
 			.when(!more && !empty, |s| s.children(self.album_footer(cx)))
 			.when_some(own.filter(|_| !more), |s, id| s.child(self.finder(&id, empty, window, cx)))
 			.into_any_element()

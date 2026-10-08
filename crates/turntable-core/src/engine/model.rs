@@ -171,15 +171,61 @@ pub struct QueueEntry {
 
 #[derive(Debug, Clone)]
 pub enum Event {
-	AuthState { logged_in: bool, is_active: bool, device_name: String },
-	TrackChanged { item: Entity },
-	PlaybackChanged { status: Status },
-	VolumeChanged { volume: u8 },
-	DeviceChanged { is_active: bool },
-	ContextChanged { context: Entity },
-	OptionsChanged { options: Options },
-	PositionSync { position: Position },
-	QueueChanged { upcoming: Vec<QueueEntry>, revision: u64 },
+	AuthState {
+		logged_in:   bool,
+		is_active:   bool,
+		device_name: String,
+	},
+	TrackChanged {
+		item: Entity,
+	},
+	/// Optional enrichment for the current item/context; never changes transport or its clock.
+	MetadataChanged {
+		entity: Entity,
+	},
+	PlaybackChanged {
+		status: Status,
+	},
+	VolumeChanged {
+		volume: u8,
+	},
+	DeviceChanged {
+		is_active: bool,
+	},
+	ContextChanged {
+		context: Entity,
+	},
+	OptionsChanged {
+		options: Options,
+	},
+	PositionSync {
+		position: Position,
+	},
+	QueueChanged {
+		upcoming: Vec<QueueEntry>,
+		revision: u64,
+	},
+}
+
+impl Event {
+	pub(crate) fn trace(&self, stage: &str) {
+		match self {
+			Self::PlaybackChanged { status } => crate::net::trace::playback(stage, status.name(), None),
+			Self::PositionSync { position } => crate::net::trace::playback(stage, "position", Some(position.position_ms)),
+			_ => {},
+		}
+	}
+}
+
+impl Status {
+	pub(crate) const fn name(self) -> &'static str {
+		match self {
+			Self::Idle => "idle",
+			Self::Playing => "playing",
+			Self::Paused => "paused",
+			Self::Buffering => "buffering",
+		}
+	}
 }
 
 // ---------------------------------------------------------------- commands
@@ -225,6 +271,24 @@ pub enum Command {
 }
 
 impl Command {
+	pub(crate) const fn name(&self) -> &'static str {
+		match self {
+			Self::GetQueue => "queue",
+			Self::Play { .. } => "play",
+			Self::Pause => "pause",
+			Self::SkipNext => "next",
+			Self::SkipPrev => "previous",
+			Self::Seek { .. } => "seek",
+			Self::SetVolume { .. } => "volume",
+			Self::SetShuffle { .. } => "shuffle",
+			Self::SetRepeatContext { .. } | Self::SetRepeatTrack { .. } => "repeat",
+			Self::EditQueue { .. } => "edit-queue",
+			Self::Transfer { .. } => "transfer",
+			Self::Activate => "activate",
+			Self::Load(_) => "load",
+		}
+	}
+
 	/// The two commands that set a repeat mode, in the order the API requires.
 	pub fn repeat(mode: Repeat) -> [Self; 2] {
 		match mode {
@@ -279,7 +343,10 @@ pub enum Incoming {
 	/// A passive account/player/device update from the session's Dealer subscription.
 	ConnectState(ConnectState),
 	/// A requested native player command failed; the session may remain usable.
-	CommandFailed(String),
+	CommandFailed {
+		id:      u64,
+		message: String,
+	},
 	/// The player stopped (its session ended); the client is done.
 	Closed(String),
 }

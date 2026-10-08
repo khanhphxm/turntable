@@ -8,7 +8,7 @@ use gpui_kit::{
 	Animation, AnimationExt as _, AnyElement, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
 	StatefulInteractiveElement as _, Styled as _, StyledImage as _, div, ease_out_quint, prelude::FluentBuilder as _, px,
 };
-use turntable_core::{LyricsState, Msg, engine::CoverSize, sources::external::Lyrics};
+use turntable_core::{LyricsState, Msg, engine::CoverSize, lyrics::Lyrics};
 
 use crate::{shell::Shell, theme};
 
@@ -43,8 +43,9 @@ impl Shell {
 			.into_any_element()
 	}
 
-	/// The lyric lines at `size`, `pad` from the sides; a short note when there are none.
-	pub fn lyric_lines(&mut self, size: f32, pad: f32, cx: &mut Context<'_, Self>) -> AnyElement {
+	/// The lyric lines at `size`, `pad` from the sides (centred in full view, left-aligned in the
+	/// side panel); a short note when there are none.
+	pub fn lyric_lines(&mut self, size: f32, pad: f32, centred: bool, cx: &mut Context<'_, Self>) -> AnyElement {
 		let st = self.st();
 		let (lines, times): (Vec<String>, Vec<Option<u64>>) = match st.lyrics_state() {
 			None | Some(LyricsState::Loading) => return lyric_note("Loading lyrics…", size),
@@ -71,6 +72,7 @@ impl Shell {
 			.track_scroll(&self.lyrics_scroll)
 			.flex()
 			.flex_col()
+			.when(centred, |s| s.items_center().text_center())
 			.gap(px(size * 0.55))
 			.px(px(pad))
 			.pt(px(size))
@@ -82,6 +84,7 @@ impl Shell {
 				let current = line == Some(i);
 				let row = div()
 					.id(("lyric", i))
+					.when(centred, |s| s.max_w(px(size * 22.)))
 					.text_color(theme::text())
 					.when(synced && !current, |s| s.opacity(DIM).hover(|s| s.opacity(0.6)))
 					.when_some(at.filter(|_| synced), |s, at| {

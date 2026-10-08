@@ -54,7 +54,6 @@ impl Output {
 				return Err(error);
 			},
 		};
-		let _ = shared.control.set(control.thread().clone());
 		Ok(Self { shared, out: Some(out), control: Some(control), device })
 	}
 }
@@ -66,6 +65,10 @@ impl DeviceControl for Output {
 
 	fn has_output(&self) -> bool {
 		self.out.is_some()
+	}
+
+	fn is_stale(&self) -> bool {
+		self.out.as_ref().is_none_or(Stream::is_stale)
 	}
 
 	fn set_device(&mut self, uid: Option<&str>) -> io::Result<()> {
@@ -132,8 +135,9 @@ fn stop_unit(shared: &Shared) {
 
 /// Only this thread starts/stops devices; neither the decoder nor real-time render does.
 fn control_output(shared: &Shared) {
+	let waker = super::control_waker();
 	loop {
-		thread::park();
+		shared.control.register(&waker);
 		if shared.stop.load(Ordering::Acquire) {
 			return;
 		}
@@ -149,6 +153,7 @@ fn control_output(shared: &Shared) {
 				start_unit(shared);
 			}
 		}
+		thread::park();
 	}
 }
 

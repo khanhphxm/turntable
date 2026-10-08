@@ -18,3 +18,11 @@ GPUI's Windows manifest (PerMonitorV2 DPI awareness, segment heap, and
 These packages are not Authenticode-signed; SmartScreen may warn about an unknown
 publisher. Only download packages from the project's GitHub releases. For a
 portable ZIP install, remove the extracted directory and shortcuts to uninstall.
+
+## Window controls
+
+Minimize, maximize/restore and close are at the top bar's right edge, including
+on the welcome screen. They use native Windows caption hit-testing; hover the
+maximize button for Windows 11 snap layouts. Drag an empty part of the top bar
+to move the window, or double-click it to maximize/restore. Resize using the
+window's edges or corners.

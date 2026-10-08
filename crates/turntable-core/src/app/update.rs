@@ -8,8 +8,6 @@ use crate::{
 	library::{self, Route},
 };
 
-const VOLUME_STEP: u8 = 5;
-
 impl State {
 	/// Handles every UI message once; action helpers keep their state and effects together.
 	#[expect(clippy::too_many_lines, reason = "one exhaustive arm per UI message; nontrivial actions are delegated to small helpers")]
@@ -29,12 +27,17 @@ impl State {
 		let mut effects = Vec::new();
 		match msg {
 			Msg::TogglePlay => self.toggle_play(&mut cmds),
+			Msg::Play => {
+				if !self.playing() {
+					self.toggle_play(&mut cmds);
+				}
+			},
+			Msg::Pause => cmds.push(Command::Pause),
 			Msg::Next => self.activate_command(Command::SkipNext, &mut cmds),
 			Msg::Prev => self.activate_command(Command::SkipPrev, &mut cmds),
 			Msg::Seek(position_ms) => self.seek_absolute(position_ms, &mut cmds),
 			Msg::SeekBy(delta) => self.seek_by(delta, &mut cmds),
 			Msg::Volume(percent) => cmds.push(self.set_volume(percent.min(100))),
-			Msg::VolumeBy(dir) => cmds.push(self.volume_by(dir)),
 			Msg::ToggleMute => cmds.push(self.toggle_mute()),
 			Msg::ToggleShuffle => {
 				self.options.shuffle = !self.options.shuffle;
@@ -42,10 +45,13 @@ impl State {
 			},
 			Msg::CycleRepeat => self.cycle_repeat(&mut cmds),
 			Msg::DevicesMenu => effects.extend(self.toggle_devices_menu()),
-			Msg::RefreshDevices => effects.extend(self.refresh_devices()),
 			Msg::PickDevice(id) => effects.extend(self.pick_device(&id)),
 			Msg::TogglePanel(panel) => self.toggle_panel(panel, &mut cmds, &mut effects),
-			Msg::RetryLyrics => self.lyrics = None,
+			Msg::RetryLyrics => {
+				self.lyrics = None;
+				self.lyrics_retry_at = None;
+				self.lyrics_failures = 0;
+			},
 			Msg::PlayContext(uri) => {
 				effects.push(Effect::Player(Command::Load(crate::spotify::PlayStart::Context { uri, offset_uri: None, position_ms: 0 })));
 			},
@@ -62,16 +68,13 @@ impl State {
 			Msg::LibraryMenu => self.library_menu = !self.library_menu,
 			Msg::ClearLibraryFilter => self.clear_library_filter(),
 			Msg::ToggleShelf(id) => self.toggle_shelf(id),
-			Msg::HomeFacet(facet) => effects.push(Effect::Library(self.library.select_home_facet(facet))),
-			Msg::HomeSectionMore(uri) => effects.push(Effect::Library(self.library.open_home_section(uri))),
-			Msg::CloseHomeSection => self.library.close_home_section(),
 			Msg::OpenUrl(url) => effects.push(Effect::OpenUrl(url)),
 			Msg::EqEnabled(on) => {
 				self.eq.enabled = on;
 				effects.push(Effect::SetEq);
 			},
-			Msg::EqBand(band, step) => self.eq_band(band, step, &mut effects),
-			Msg::EqMenu => self.eq_menu = !self.eq_menu,
+			Msg::EqBand(band, step) => self.eq_set(band, eq_step_db(step), &mut effects),
+			Msg::EqSet(band, db) => self.eq_set(band, crate::audio::sanitize_gain_db(db), &mut effects),
 			Msg::EqPreset(name) => self.eq_preset(name, &mut effects),
 			Msg::Navigate(route) => self.navigate(route, &mut effects),
 			Msg::Prefetch(_) => {},
@@ -83,18 +86,25 @@ impl State {
 				self.forget_search(&route);
 				effects.push(Effect::SaveRecentSearches);
 			},
-			Msg::ClearRecentSearches => {
-				self.recent_searches.clear();
-				effects.push(Effect::SaveRecentSearches);
+			Msg::Select(row) => {
+				if let Some(i) = self.library.resolve_row(&row) {
+					self.library.select(i);
+				}
 			},
-			Msg::Select(i) => self.library.select(i),
-			Msg::MoveSelection(delta) => self.library.move_selection(delta),
-			Msg::PlayRow(i) => self.play_row(i, &mut effects),
+			Msg::PlayRow(row) => {
+				if let Some(i) = self.library.resolve_row(&row) {
+					self.play_row(i, &mut effects);
+				}
+			},
 			Msg::OpenTrack { album, uri } => {
 				effects.extend(self.update(Msg::Navigate(Route::Album(album))));
-				self.library.reveal = Some(uri);
+				if let Some(index) = self.library.rows().iter().position(|track| track.uri == uri) {
+					self.library.select(index);
+					self.library.reveal = None;
+				} else {
+					self.library.reveal = Some(uri);
+				}
 			},
-			Msg::PlaySelected => self.play_selected(&mut effects),
 			Msg::ToggleFollow => self.toggle_follow(&mut effects),
 			Msg::FollowArtist(id, name) => self.follow_artist(&id, name, &mut effects),
 			Msg::CreatePlaylist => effects.push(Effect::Library(library::Request::CreatePlaylist(self.new_playlist_name(), Vec::new()))),
@@ -124,15 +134,22 @@ impl State {
 				}
 			},
 			Msg::AddContextToPlaylist(route) => effects.extend(self.add_context_to_playlist(route).map(Effect::Library)),
-			Msg::AddRowToPlaylist(i) => self.add_row_to_playlist(i),
+			Msg::AddRowToPlaylist(row) => {
+				if let Some(i) = self.library.resolve_row(&row) {
+					self.add_row_to_playlist(i);
+				}
+			},
 			Msg::AddNowPlayingToPlaylist => self.add_now_playing_to_playlist(),
 			Msg::AddToPlaylist(target) => self.add_to_playlist(target, &mut effects),
 			Msg::AddToPlaylistDirect { playlist, uris } => effects.push(Effect::Library(self.playlist_add_request(playlist, uris))),
-			Msg::RemoveRow(i) => self.remove_row(i, &mut effects),
+			Msg::RemoveRow(row) => {
+				if let Some(i) = self.library.resolve_row(&row) {
+					self.remove_row(i, &mut effects);
+				}
+			},
 			Msg::MoveRow(from, to) => self.move_playlist_row(from, to, &mut effects),
 			Msg::RenamePlaylist => self.open_playlist_details(),
 			Msg::SaveRename => effects.extend(self.save_playlist_details().map(Effect::Library)),
-			Msg::TogglePlaylistPublic => self.public_input = Some(!self.public_input.unwrap_or(false)),
 			Msg::CloseDialog => {
 				self.dialog = None;
 				self.pending_library_dialog = None;
@@ -142,45 +159,39 @@ impl State {
 			Msg::Discography(i) => self.discography = i,
 			Msg::ToggleLike => self.toggle_like(&mut effects),
 			Msg::AddToLiked(uri) => self.set_row_liked(uri, true, &mut effects),
-			Msg::RemoveFromLiked(uri) => self.set_row_liked(uri, false, &mut effects),
 			Msg::QueueRemove(i) => self.queue_remove(i, &mut cmds),
-			Msg::QueueMove(i, delta) => {
-				if let Some(to) = i.checked_add_signed(isize::from(delta)) {
-					self.queue_move(i, to, &mut cmds);
-				}
-			},
 			Msg::QueueMoveTo(from, to) => self.queue_move(from, to, &mut cmds),
 			Msg::QueueClear => self.queue_clear(&mut cmds),
 			Msg::QueueJump(i) => self.queue_jump(i, &mut cmds),
-			Msg::QueueRow(i) => self.queue_row(i, false, &mut cmds),
-			Msg::QueuePlayNext(i) => self.queue_row(i, true, &mut cmds),
-			Msg::QueueTracks { uris, next } => cmds.extend(self.queue_tracks(uris, next)),
+			Msg::QueueRow(row) => {
+				if let Some(i) = self.library.resolve_row(&row) {
+					self.queue_row(i, false, &mut cmds);
+				}
+			},
+			Msg::QueuePlayNext(row) => {
+				if let Some(i) = self.library.resolve_row(&row) {
+					self.queue_row(i, true, &mut cmds);
+				}
+			},
 			Msg::PlayListing => self.play_listing(&mut effects),
 			Msg::LoadMore => self.load_more(&mut effects),
 			Msg::SearchSubmit(text) => self.search_submit(&text, &mut effects),
 			Msg::SignIn => effects.push(Effect::SignIn),
+			Msg::CancelSignIn => effects.push(Effect::CancelSignIn),
 			Msg::SignOut => effects.push(Effect::SignOut),
-			Msg::SaveClientId(id) => effects.extend(nonempty_text(id).map(Effect::SaveClientId)),
-			Msg::ConnectSpotify => {
-				self.library.conn = library::Conn::LoggingIn(None);
-				effects.push(Effect::Library(library::Request::Login));
-			},
-			Msg::DisconnectSpotify => effects.push(Effect::Library(library::Request::Logout)),
 			Msg::Focus(field) => self.focus = field,
-			Msg::Type(text) => self.type_input(text, &mut effects),
-			Msg::Backspace => self.backspace_input(&mut effects),
+			Msg::SetText(field, text) => self.set_text(field, text, &mut effects),
 			Msg::Edit { from, to, text } => self.edit_input(from, to, text, &mut effects),
 			Msg::Submit => return self.submit_input(),
-			Msg::Quit => self.quit = true,
 			Msg::Pref(pref) => effects.extend(self.set_pref(pref)),
-			Msg::Dropdown(menu) => self.sys.menu = if self.sys.menu == Some(menu) { None } else { Some(menu) },
 			Msg::Sleep(choice) => self.set_sleep(choice, Instant::now()),
-			Msg::SaveDeviceName => effects.extend(self.save_device_name()),
-			Msg::RestartPlayer => effects.push(Effect::RestartPlayer),
-			Msg::ClearCache => self.request_clear_cache(&mut effects),
-			Msg::OpenFolder(folder) => effects.push(Effect::OpenUrl(self.sys.places.get(folder).to_string_lossy().into_owned())),
 		}
 		effects.splice(0..0, cmds.into_iter().map(Effect::Player));
+		for effect in &effects {
+			if let Effect::Player(command) = effect {
+				self.optimistic_playback(command);
+			}
+		}
 		self.release_hidden_controls();
 		effects
 	}
@@ -188,21 +199,15 @@ impl State {
 	fn close_menus(&mut self, msg: &Msg) {
 		// The library filter gives the keys back on a click elsewhere.
 		if self.focus == Some(Field::LibraryFilter)
-			&& !matches!(msg, Msg::Focus(_) | Msg::Type(_) | Msg::Backspace | Msg::Edit { .. } | Msg::Submit | Msg::ClearLibraryFilter)
+			&& !matches!(msg, Msg::Focus(_) | Msg::SetText(_, _) | Msg::Edit { .. } | Msg::Submit | Msg::ClearLibraryFilter)
 		{
 			self.focus = None;
 		}
 		if !matches!(msg, Msg::LibraryMenu | Msg::LibrarySort(_) | Msg::LibraryView(_)) {
 			self.library_menu = false;
 		}
-		if !matches!(msg, Msg::Dropdown(_)) {
-			self.sys.menu = None;
-		}
-		if !matches!(msg, Msg::DevicesMenu | Msg::RefreshDevices) {
+		if !matches!(msg, Msg::DevicesMenu) {
 			self.connect.menu = false;
-		}
-		if !matches!(msg, Msg::EqMenu) {
-			self.eq_menu = false;
 		}
 	}
 
@@ -261,11 +266,6 @@ impl State {
 			let pos = self.position_ms().saturating_add_signed(delta * 1000);
 			cmds.push(self.seek(pos.min(self.duration_ms().saturating_sub(1000))));
 		}
-	}
-
-	fn volume_by(&mut self, dir: i8) -> Command {
-		let volume = if dir >= 0 { self.volume.saturating_add(VOLUME_STEP).min(100) } else { self.volume.saturating_sub(VOLUME_STEP) };
-		self.set_volume(volume)
 	}
 
 	fn toggle_mute(&mut self) -> Command {
@@ -327,11 +327,11 @@ impl State {
 		}
 	}
 
-	fn eq_band(&mut self, band: usize, step: u8, effects: &mut Vec<Effect>) {
+	fn eq_set(&mut self, band: usize, db: f32, effects: &mut Vec<Effect>) {
 		if let Some(gain) = self.eq.gains_db.get_mut(band) {
-			// Clicking its present position keeps the preset.
-			if *gain != eq_step_db(step) {
-				*gain = eq_step_db(step);
+			// Setting its present gain keeps the preset.
+			if *gain != db {
+				*gain = db;
 				self.eq_preset = None;
 			}
 			self.eq.enabled = true;
@@ -359,12 +359,6 @@ impl State {
 		self.library.select(index);
 		self.played_from = Some(self.library.route.clone());
 		effects.extend(self.library.play_start(index).map(|start| Effect::Player(Command::Load(start))));
-	}
-
-	fn play_selected(&self, effects: &mut Vec<Effect>) {
-		if let Some(index) = self.library.selected {
-			effects.extend(self.library.play_start(index).map(|start| Effect::Player(Command::Load(start))));
-		}
 	}
 
 	fn toggle_follow(&mut self, effects: &mut Vec<Effect>) {
@@ -414,6 +408,10 @@ impl State {
 	}
 
 	fn add_to_playlist(&mut self, target: Option<String>, effects: &mut Vec<Effect>) {
+		if let Some(super::playlist::PendingDialog::AddContext { target: pending, .. }) = &mut self.pending_library_dialog {
+			*pending = Some(target);
+			return;
+		}
 		if let Some(Dialog::AddToPlaylist { uris, .. }) = self.dialog.take() {
 			let request = match target {
 				Some(id) => self.playlist_add_request(id, uris),
@@ -423,7 +421,7 @@ impl State {
 		}
 	}
 
-	fn playlist_add_request(&self, id: String, uris: Vec<String>) -> library::Request {
+	pub(super) fn playlist_add_request(&self, id: String, uris: Vec<String>) -> library::Request {
 		let name = self.library.playlists.iter().find(|p| p.id == id).map_or_else(String::new, |p| p.name.clone());
 		library::Request::AddToPlaylist(id, name, uris)
 	}
@@ -432,7 +430,7 @@ impl State {
 		if let (Route::Playlist(id), Some(track), Some(listing)) =
 			(&self.library.route, self.library.rows().get(index), &self.library.listing)
 			&& listing.editable
-			&& let Ok(position) = u32::try_from(index)
+			&& let Some(position) = listing.positions.get(index).copied()
 		{
 			effects.push(Effect::Library(library::Request::RemoveFromPlaylist(id.clone(), track.uri.clone(), position)));
 		}
@@ -442,11 +440,16 @@ impl State {
 		if let (Route::Playlist(id), Some(listing)) = (&self.library.route, &self.library.listing)
 			&& listing.editable
 			&& from != to
-			&& from < listing.tracks.len()
-			&& to < listing.tracks.len()
-			&& let (Ok(from), Ok(to)) = (u32::try_from(from), u32::try_from(to))
+			&& let (Some(source), Some(target), Some(from), Some(to)) =
+				(listing.tracks.get(from), listing.tracks.get(to), listing.positions.get(from), listing.positions.get(to))
 		{
-			effects.push(Effect::Library(library::Request::MovePlaylistRow(id.clone(), from, to)));
+			effects.push(Effect::Library(library::Request::MovePlaylistRow {
+				id:     id.clone(),
+				from:   *from,
+				to:     *to,
+				source: source.uri.clone(),
+				target: target.uri.clone(),
+			}));
 		}
 	}
 
@@ -490,15 +493,12 @@ impl State {
 	}
 
 	fn load_more(&mut self, effects: &mut Vec<Effect>) {
-		if self.library.home_section.is_some() && self.library.route == Route::Home {
-			effects.extend(self.library.home_section_more().map(Effect::Library));
-			return;
-		}
 		if let Some(listing) = &mut self.library.listing
 			&& let Some(offset) = listing.next_offset
 			&& !listing.loading
 		{
 			listing.loading = true;
+			self.library.pending_offset = Some(offset);
 			effects.push(Effect::Library(library::Request::Open(self.library.route.clone(), offset)));
 		}
 	}
@@ -509,13 +509,6 @@ impl State {
 		if !query.is_empty() {
 			effects.push(Effect::CancelSearchSoon);
 			effects.push(Effect::Library(library::Request::Search(query)));
-		}
-	}
-
-	fn request_clear_cache(&mut self, effects: &mut Vec<Effect>) {
-		if !self.sys.clearing_cache {
-			self.sys.clearing_cache = true;
-			effects.push(Effect::ClearCache);
 		}
 	}
 }

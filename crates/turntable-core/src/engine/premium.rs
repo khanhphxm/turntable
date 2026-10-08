@@ -127,33 +127,26 @@ mod tests {
 	use super::*;
 
 	#[tokio::test]
-	async fn premium_including_family_duo_and_student_product_is_accepted() {
-		// Spotify reports product=premium for all paid plan variants, regardless of catalogue type.
-		for plan in ["premium", "family", "duo", "student"] {
+	async fn accepted_subscriptions_and_disconnected_unknown_sessions_do_not_reject_credentials() {
+		for (kind, product, disconnected) in [
+			(None, Some("premium"), false),
+			(Some("premium"), None, false),
+			(Some("premium"), Some("\n  "), false),
+			(Some("premium"), Some("unknown"), false),
+			(None, None, true),
+		] {
 			let session = Session::new(librespot_core::SessionConfig::default(), None);
-			let _ = session.set_user_attribute("type", plan);
-			let _ = session.set_user_attribute("product", "premium");
-			wait(&session, None).await.unwrap();
-		}
-	}
-
-	#[tokio::test]
-	async fn premium_catalogue_with_missing_or_container_product_is_accepted() {
-		for product in [None, Some("\n  "), Some("unknown")] {
-			let session = Session::new(librespot_core::SessionConfig::default(), None);
-			let _ = session.set_user_attribute("type", "premium");
+			if let Some(kind) = kind {
+				let _ = session.set_user_attribute("type", kind);
+			}
 			if let Some(product) = product {
 				let _ = session.set_user_attribute("product", product);
 			}
+			if disconnected {
+				session.shutdown();
+			}
 			wait(&session, None).await.unwrap();
 		}
-	}
-
-	#[tokio::test]
-	async fn disconnected_unconfirmed_session_is_not_rejected() {
-		let session = Session::new(librespot_core::SessionConfig::default(), None);
-		session.shutdown();
-		wait(&session, None).await.unwrap();
 	}
 
 	#[test]
@@ -169,19 +162,13 @@ mod tests {
 	}
 
 	#[test]
-	fn unknown_during_connection_waits() {
-		assert_eq!(decision(None, None, false), None);
-	}
-
-	#[test]
 	fn premium_connection_error_preserves_account_and_reason() {
 		let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
 		let _context = runtime.enter();
 		let session = Session::new(librespot_core::SessionConfig::default(), None);
 		let error = connection_error(AuthenticationError::LoginFailed(ErrorCode::PremiumAccountRequired).into(), &session, Some("alice"));
 		let error = error.get_ref().unwrap().downcast_ref::<SignInError>().unwrap();
-		assert!(error.message().contains("alice"));
-		assert!(error.message().contains("Spotify Premium"));
+		assert_eq!(error, &SignInError::PremiumRequired { account: Some("alice".into()), product: None });
 		let network = connection_error(librespot_core::Error::unavailable("offline"), &session, None);
 		assert!(network.get_ref().unwrap().downcast_ref::<SignInError>().is_none());
 	}
@@ -196,7 +183,7 @@ mod tests {
 		let _ = session.set_user_attribute("product", "free");
 		let error = wait(&session, None).await.unwrap_err();
 		let error = error.get_ref().unwrap().downcast_ref::<SignInError>().unwrap();
-		assert!(error.message().contains("Alice is on Spotify Free"));
+		assert_eq!(error, &SignInError::PremiumRequired { account: Some("Alice".into()), product: Some("free".into()) });
 		let _ = session.set_user_attribute("product", "premium");
 		wait(&session, None).await.unwrap();
 	}

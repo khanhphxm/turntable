@@ -1,13 +1,12 @@
 //! Your Library: the left-hand panel of Liked Songs, playlists, albums and artists. Collapses to
-//! a rail of covers.
+//! a rail of covers. Scroll frames share cached rows; menu data is gathered only on right-click.
+
+use std::rc::Rc;
 
 use gpui_kit::{
-	AnyElement, AppContext as _, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
+	AnyElement, AppContext as _, Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
 	StatefulInteractiveElement as _, Styled as _,
-	component::{
-		input::{Input, InputEvent, InputState},
-		menu::ContextMenuExt as _,
-	},
+	component::input::{Input, InputEvent, InputState},
 	deferred, div,
 	prelude::FluentBuilder as _,
 	px, uniform_list,
@@ -21,79 +20,103 @@ use crate::{
 	libmenu,
 	shell::{Page, Shell},
 	theme,
-	widgets::{Icon, chip, icon, icon_button},
+	widgets::{Icon, chip, icon, icon_button, reveal_row},
 };
 
 /// One row of Your Library, owned so the virtual list can render it later.
-#[derive(Clone)]
-struct Entry {
+pub(crate) struct Entry {
 	route:  Route,
-	title:  String,
-	sub:    String,
+	title:  SharedString,
+	sub:    SharedString,
 	image:  Option<String>,
-	/// Nesting under folders (0 at the top).
-	depth:  usize,
-	/// A folder's expansion.
-	open:   Option<bool>,
 	pinned: bool,
-	menu:   libmenu::Target,
 }
 
 impl Shell {
-	fn library_entries(&self) -> Vec<Entry> {
+	fn library_entries(&self) -> Rc<[Entry]> {
 		let lib = &self.st().library;
-		let me = lib.me.as_ref().map(|m| m.id.as_str()).unwrap_or_default();
-		let mut folders = Vec::new();
-		libmenu::folders(&lib.rootlist, 0, &mut folders);
-		let playlists: Vec<(String, String)> =
-			lib.playlists.iter().filter(|p| p.owner.id == me || p.collaborative).map(|p| (p.id.clone(), p.name.clone())).collect();
-		lib.tree(true)
-			.iter()
-			.map(|row| {
-				let e = &row.entry;
-				let (uri, owned, public, collaborative) = match e {
-					LibEntry::Liked(_) => ("spotify:collection:tracks".to_owned(), true, None, false),
-					LibEntry::Playlist(p) => (p.uri.clone(), p.owner.id == me, p.public, p.collaborative),
-					LibEntry::Folder { id, .. } => (format!("spotify:folder:{id}"), true, None, false),
-					LibEntry::Album(a) => (a.uri.clone(), false, None, false),
-					LibEntry::Artist(a) => (a.uri.clone(), false, None, false),
+		// Spotify opens a folder in place: Your Library lists only what's inside it.
+		let parent = self.library_folder.last().cloned();
+		let rows: Vec<LibEntry<'_>> = match &parent {
+			Some(id) => lib.folder_entries(id, true),
+			None => lib.tree(true).iter().filter(|row| row.depth == 0).map(|row| row.entry).collect(),
+		};
+		rows.iter()
+			.map(|e| {
+				let uri = match e {
+					LibEntry::Liked(_) => "spotify:collection:tracks".to_owned(),
+					LibEntry::Playlist(p) => p.uri.clone(),
+					LibEntry::Folder { id, .. } => format!("spotify:folder:{id}"),
+					LibEntry::Album(a) => a.uri.clone(),
+					LibEntry::Artist(a) => a.uri.clone(),
 				};
 				let pinned = lib.is_pinned(&uri);
-				let open = match e {
-					LibEntry::Folder { id, .. } => Some(lib.folder_expanded(id)),
-					_ => None,
-				};
 				Entry {
 					route: e.route(),
-					title: e.title().to_owned(),
-					sub: e.sub(),
+					title: e.title().to_owned().into(),
+					sub: e.sub().into(),
 					image: e.image(64).map(str::to_owned),
-					depth: row.depth,
-					open,
 					pinned,
-					menu: libmenu::Target {
-						route: e.route(),
-						excluded: lib.is_excluded(&uri),
-						uri,
-						owned,
-						public,
-						collaborative,
-						pinned,
-						parent: row.parent.map(str::to_owned),
-						folders: folders.clone(),
-						playlists: playlists.clone(),
-					},
 				}
 			})
-			.collect()
+			.collect::<Vec<_>>()
+			.into()
+	}
+
+	/// Context menus need the current account/folders, not a copy of every playlist per row.
+	fn library_menu(&self, route: &Route) -> Vec<crate::menu::Item> {
+		let lib = &self.st().library;
+		let me = lib.me.as_ref().map_or("", |m| m.id.as_str());
+		let (uri, owned, public, collaborative) = match route {
+			Route::Liked => ("spotify:collection:tracks".to_owned(), true, None, false),
+			Route::Playlist(id) => {
+				let Some(p) = lib.playlists.iter().find(|p| p.id == *id) else { return Vec::new() };
+				(p.uri.clone(), p.owner.id == me, p.public, p.collaborative)
+			},
+			Route::Folder(id) => (format!("spotify:folder:{id}"), true, None, false),
+			Route::Album(id) => (format!("spotify:album:{id}"), false, None, false),
+			Route::Artist(id) => (format!("spotify:artist:{id}"), false, None, false),
+			_ => return Vec::new(),
+		};
+		let mut folders = Vec::new();
+		libmenu::folders(&lib.rootlist, 0, &mut folders);
+		libmenu::items(&libmenu::Target {
+			route: route.clone(),
+			pinned: lib.is_pinned(&uri),
+			excluded: lib.is_excluded(&uri),
+			uri,
+			owned,
+			public,
+			collaborative,
+			parent: self.library_folder.last().cloned(),
+			folders,
+			playlists: lib
+				.playlists
+				.iter()
+				.filter(|p| p.owner.id == me || p.collaborative)
+				.map(|p| (p.id.clone(), p.name.clone()))
+				.collect(),
+		})
 	}
 
 	pub fn sidebar(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-		let entries = self.library_entries();
+		let entries = if let Some(entries) = &self.library_rows {
+			Rc::clone(entries)
+		} else {
+			let entries = self.library_entries();
+			self.library_rows = Some(Rc::clone(&entries));
+			entries
+		};
 		let collapsed = self.sidebar_folded();
 		div()
+			.id("library-panel")
 			.w(self.sidebar_w())
 			.group("library")
+			.on_hover(cx.listener(|this, over: &bool, _, cx| {
+				if this.library_reveal.set(*over) {
+					cx.notify();
+				}
+			}))
 			.flex_none()
 			.h_full()
 			.rounded(theme::RADIUS)
@@ -120,23 +143,45 @@ impl Shell {
 	}
 
 	fn library_header(&mut self, collapsed: bool, cx: &mut Context<'_, Self>) -> impl IntoElement {
-		// Spotify's: the title alone; hovering the panel shows the fold icon beside it.
+		// Spotify's: the title alone; hovering the panel slides it over for the fold icon.
+		let fold_icon = icon(if collapsed { Icon::SidebarOpen } else { Icon::SidebarClose }, px(24.), theme::subdued())
+			.group_hover("library-title", |s| s.text_color(theme::text()));
 		let toggle = div()
 			.id("library-title")
 			.group("library-title")
+			.h(px(40.))
+			.min_w_0()
 			.flex()
 			.items_center()
-			.gap_2()
-			.h(px(40.))
+			.overflow_hidden()
 			.cursor_pointer()
 			.on_click(cx.listener(|this, _, _, cx| this.toggle_library(cx)))
-			.child(
-				div().size(px(24.)).flex_none().when(!collapsed, |s| s.invisible().group_hover("library", |s| s.visible())).child(
-					icon(if collapsed { Icon::SidebarOpen } else { Icon::SidebarClose }, px(24.), theme::subdued())
-						.group_hover("library-title", |s| s.text_color(theme::text())),
-				),
-			)
-			.when(!collapsed, |s| s.child(div().text_size(px(16.)).font_weight(FontWeight::BOLD).child("Your Library")));
+			.map(|s| {
+				if collapsed {
+					s.child(fold_icon)
+				} else {
+					s.child(reveal_row(
+						"library-reveal",
+						self.library_reveal,
+						fold_icon,
+						div().text_size(px(16.)).font_weight(FontWeight::BOLD).child("Your Library"),
+					))
+				}
+			});
+		// Inside a folder the header is a back arrow and the folder's name.
+		let folder = self.library_folder.last().and_then(|id| self.st().library.folder(id)).map(|f| f.name.clone());
+		let toggle = match folder.filter(|_| !collapsed) {
+			None => toggle.into_any_element(),
+			Some(name) => div()
+				.h(px(40.))
+				.min_w_0()
+				.flex()
+				.items_center()
+				.gap_1()
+				.child(icon_button("folder-back", Icon::Back, px(16.), false, cx.listener(|this, _, _, cx| this.leave_folder(cx))))
+				.child(div().min_w_0().truncate().text_size(px(16.)).font_weight(FontWeight::BOLD).child(name))
+				.into_any_element(),
+		};
 		let wide = self.library_wide;
 		div()
 			.flex()
@@ -258,44 +303,36 @@ impl Shell {
 		};
 		// Spotify renames a folder in place: the row's title becomes the field.
 		let renaming = folder.as_ref().is_some_and(|id| matches!(&self.st().dialog, Some(Dialog::RenameFolder { id: r, .. }) if r == id));
-		let art = if folder.is_some() {
-			div().size(px(48.)).flex_none().rounded(px(4.)).bg(theme::raised()).flex().items_center().justify_center().child(icon(
-				Icon::Folder,
-				px(24.),
-				theme::subdued(),
-			))
-		} else {
-			self.art(&e.route, e.image.as_deref(), px(48.), cx)
-		};
+		let art = self.art(&e.route, e.image.as_deref(), px(48.), cx);
 		let route = e.route.clone();
 		let hovered = e.route.clone();
-		let target = e.menu.clone();
-		let shell = cx.entity().downgrade();
-		let indent = if collapsed { 0. } else { 16. * e.depth as f32 };
+		let target = e.route.clone();
 		div()
 			.id(i)
-			.on_hover(cx.listener(move |this, over: &bool, _, cx| {
-				if *over {
-					this.send(Msg::Prefetch(hovered.clone()), cx);
-				}
-			}))
+			.on_hover(cx.listener(move |this, over: &bool, _, cx| this.prefetch_on_hover(&hovered, *over, cx)))
 			.w_full()
 			.h(if compact && !collapsed { px(32.) } else { px(64.) })
 			.p_2()
-			.pl(px(8. + indent))
 			.flex()
 			.items_center()
 			.gap_3()
 			.rounded(px(6.))
 			.cursor_pointer()
-			.when(open, |s| s.bg(theme::selected()))
-			.when(!open, |s| s.hover(|s| s.bg(theme::hover())))
-			.on_click(cx.listener(move |this, ev: &gpui_kit::ClickEvent, _, cx| match &route {
-				// A folder opens its page; its chevron (or a double-click) folds it open in place.
-				Route::Folder(id) if ev.click_count() >= 2 => this.send(Msg::ToggleFolder(id.clone()), cx),
+			// The open page's row is highlighted in the full list; the rail only marks hover, as
+			// Spotify's does.
+			.when(open && !collapsed, |s| s.bg(theme::selected()))
+			.when(!open || collapsed, |s| s.hover(|s| s.bg(theme::hover())))
+			.on_click(cx.listener(move |this, _, _, cx| match &route {
+				// A folder opens in place in Your Library, as Spotify's does.
+				Route::Folder(id) => this.enter_folder(id.clone(), cx),
 				_ => this.go(route.clone(), cx),
 			}))
-			.context_menu(move |menu, window, cx| libmenu::build(menu, &shell, &target, window, cx))
+			.on_mouse_down(
+				gpui_kit::MouseButton::Right,
+				cx.listener(move |this, e: &gpui_kit::MouseDownEvent, _, cx| {
+					this.open_menu(e.position, this.library_menu(&target), cx);
+				}),
+			)
 			.when(!compact || collapsed, |s| s.child(art))
 			.when(!collapsed, |s| {
 				let title: AnyElement = if renaming {
@@ -334,21 +371,6 @@ impl Shell {
 						),
 				)
 				.when(here && self.st().playing(), |s| s.child(icon(Icon::Volume, px(16.), theme::accent())))
-				.when_some(folder.clone().zip(e.open), |s, (id, expanded)| {
-					s.child(
-						div()
-							.id(("folder-toggle", i))
-							.size(px(24.))
-							.flex()
-							.items_center()
-							.justify_center()
-							.on_click(cx.listener(move |this, _, _, cx| {
-								cx.stop_propagation();
-								this.send(Msg::ToggleFolder(id.clone()), cx);
-							}))
-							.child(icon(if expanded { Icon::Down } else { Icon::Forward }, px(16.), theme::subdued())),
-					)
-				})
 			})
 			.into_any_element()
 	}
@@ -389,11 +411,12 @@ fn sort_menu(sort: Sort, view: View, cx: &mut Context<'_, Shell>) -> impl IntoEl
 				.items_center()
 				.justify_center()
 				.rounded(px(4.))
-				.when(on, |d| d.bg(theme::raised_hover()))
-				.hover(|d| d.bg(theme::raised_hover()))
+				// The chosen view stands out on a light fill, as in Spotify's menu.
+				.when(on, |d| d.bg(theme::alpha(theme::text(), 0.18)))
+				.when(!on, |d| d.hover(|d| d.bg(theme::alpha(theme::text(), 0.08))))
 				.cursor_pointer()
 				.on_click(cx.listener(move |this, _, _, cx| this.send(Msg::LibraryView(v), cx)))
-				.child(icon(view_icon(v), px(16.), if on { theme::accent() } else { theme::subdued() }))
+				.child(icon(view_icon(v), px(16.), if on { theme::text() } else { theme::subdued() }))
 		})
 		.collect();
 	let label =
@@ -436,6 +459,35 @@ fn view_icon(v: View) -> Icon {
 }
 
 impl Shell {
+	/// Open (or refocus) the same filter used by the magnifier and Cmd/Ctrl+F.
+	pub fn focus_library_filter(&mut self, window: &mut gpui_kit::Window, cx: &mut Context<'_, Self>) {
+		if self.st().sidebar_collapsed() {
+			self.send(Msg::ToggleSidebar, cx);
+		}
+		self.library_first = true;
+		let input = self.library_filter.clone().unwrap_or_else(|| {
+			let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search in Your Library"));
+			cx.subscribe(&input, |this, input, e: &InputEvent, cx| match e {
+				InputEvent::Change => {
+					let text = input.read(cx).value().to_string();
+					this.send(Msg::SetText(Field::LibraryFilter, text), cx);
+				},
+				InputEvent::PressEnter { .. } => this.send(Msg::Submit, cx),
+				InputEvent::Focus => this.send(Msg::Focus(Some(Field::LibraryFilter)), cx),
+				InputEvent::Blur if input.read(cx).value().is_empty() => {
+					this.library_filter = None;
+					cx.notify();
+				},
+				InputEvent::Blur => {},
+			})
+			.detach();
+			input
+		});
+		input.update(cx, |s, cx| s.focus(window, cx));
+		self.library_filter = Some(input);
+		cx.notify();
+	}
+
 	/// Spotify's "Search in Your Library": a magnifier that opens into a field filtering the rows.
 	fn library_search(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
 		let Some(input) = self.library_filter.clone() else {
@@ -444,29 +496,7 @@ impl Shell {
 				Icon::Search,
 				px(16.),
 				false,
-				cx.listener(|this, _, window, cx| {
-					let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search in Your Library"));
-					cx.subscribe(&input, |this, input, e: &InputEvent, cx| match e {
-						InputEvent::Change => {
-							let text = input.read(cx).value().to_string();
-							this.send(Msg::Focus(Some(Field::LibraryFilter)), cx);
-							let old = this.st().library.filter.encode_utf16().count();
-							this.send(Msg::Edit { from: 0, to: old, text }, cx);
-						},
-						// Enter opens the first match (the core's Submit for this field).
-						InputEvent::PressEnter { .. } => this.send(Msg::Submit, cx),
-						// Leaving an empty field folds it back into the magnifier.
-						InputEvent::Blur if input.read(cx).value().is_empty() => {
-							this.library_filter = None;
-							cx.notify();
-						},
-						_ => {},
-					})
-					.detach();
-					input.update(cx, |s, cx| s.focus(window, cx));
-					this.library_filter = Some(input);
-					cx.notify();
-				}),
+				cx.listener(|this, _, window, cx| this.focus_library_filter(window, cx)),
 			)
 			.into_any_element();
 		};

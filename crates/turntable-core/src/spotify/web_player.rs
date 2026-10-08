@@ -2,14 +2,11 @@
 //! (artist pages, play counts, playlists of any owner and credits).
 //!
 //! Embed pages carry an anonymous token for search and metadata at the web player's
-//! Pathfinder endpoint, never the quota-limited Web API. Personalised Home instead uses
-//! the playback Session's login5 bearer and native client-token; an anonymous answer
-//! is only an explicit diagnostic, never an account feed. Account-scoped disk feeds
-//! paint before refresh; native collection/history shelves remain the failure path.
-//! Settings → Sources controls all requests here. Private endpoints can change.
+//! Pathfinder endpoint, never the quota-limited Web API. Home uses native history and
+//! collection shelves; unsupported personalised queries are not requested.
+//! Pathfinder/web-player reads are always enabled. Private endpoints can change.
 
 mod browse;
-pub mod home;
 
 use std::{
 	collections::HashMap,
@@ -178,7 +175,6 @@ impl WebPlayer {
 	/// An artist's popular tracks as Spotify ranks them (ten at most) and its overview,
 	/// both from one overview request.
 	pub fn artist(&self, artist_id: &str) -> Result<ArtistPage, String> {
-		allowed()?;
 		let id = clean(artist_id);
 		// The embed page lists the popular tracks in Spotify's order, which the overview's own list
 		// lacks. With a token at hand both are asked at once; else the page gives the token first.
@@ -223,7 +219,6 @@ impl WebPlayer {
 
 	/// The artist's overview alone (the now-playing card), reused when `artist` fetched it.
 	pub fn overview(&self, artist_id: &str) -> Result<ArtistOverview, String> {
-		allowed()?;
 		let id = clean(artist_id);
 		if let Some(o) = self.overviews.lock().unwrap_or_else(PoisonError::into_inner).get(&id) {
 			return Ok(o.clone());
@@ -248,7 +243,6 @@ impl WebPlayer {
 
 	/// All-time plays of an album's tracks, by track id.
 	pub fn album_plays(&self, album_id: &str) -> Result<HashMap<String, u64>, String> {
-		allowed()?;
 		let id = clean(album_id);
 		if let Some(p) = self.plays.lock().unwrap_or_else(PoisonError::into_inner).get(&id) {
 			return Ok(p.clone());
@@ -284,7 +278,6 @@ impl WebPlayer {
 
 	/// A page of a playlist, whoever owns it (including Spotify's own).
 	pub fn playlist(&self, playlist_id: &str, offset: u32, limit: u32) -> Result<WebPlaylist, String> {
-		allowed()?;
 		let id = clean(playlist_id);
 		let token = self.token()?;
 		let json = self.query(
@@ -307,7 +300,6 @@ impl WebPlayer {
 	/// The dark tone of a cover's colors (`#rrggbb`), for tinting a page; `None` when
 	/// Spotify had no real colors for it.
 	pub fn colors(&self, image_url: &str) -> Option<String> {
-		allowed().ok()?;
 		let token = self.token().ok()?;
 		let variables = serde_json::json!({ "imageUris": [image_url] }).to_string();
 		let json = self.query(&token, EXTRACTED_COLORS, &variables).ok()?;
@@ -320,7 +312,6 @@ impl WebPlayer {
 
 	/// Who made a track, merged across the credit groups (a writer who also produced is one line).
 	pub fn credits(&self, track_id: &str) -> Result<Vec<Credit>, String> {
-		allowed()?;
 		let token = self.token()?;
 		let span = crate::net::trace::start();
 		let url = format!("{CREDITS}/{}/credits", clean(track_id));
@@ -342,9 +333,7 @@ impl WebPlayer {
 
 	/// Warms the shared transport/token while native startup is in progress; never calls the Web API.
 	pub fn warm(&self) {
-		if allowed().is_ok() {
-			let _ = self.token();
-		}
+		let _ = self.token();
 	}
 
 	/// The anonymous token, from an embed page when none is valid. Callers that need one at the same
@@ -421,11 +410,6 @@ fn query(token: &str, client_token: Option<&str>, (op, hash): (&str, &str), vari
 		..crate::net::trace::Reply::default()
 	});
 	fetched.and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| e.to_string()))
-}
-
-/// Spotify's web player is asked only while the user allows it (Settings, "Data sources").
-fn allowed() -> Result<(), String> {
-	if crate::app::settings::allowed::web_player() { Ok(()) } else { Err("Spotify's web player is turned off in Settings".to_owned()) }
 }
 
 fn overview_variables(id: &str) -> String {
@@ -896,13 +880,6 @@ mod tests {
 	}
 
 	#[test]
-	fn overview_without_data_is_empty() {
-		let (v, top) = parse_overview(&json(r#"{"errors":[]}"#));
-		assert_eq!(v, ArtistOverview::default());
-		assert!(top.is_empty());
-	}
-
-	#[test]
 	fn overview_exposes_latest_release_pick_background_and_concerts() {
 		let (v, _) = parse_overview(&json(
 			r#"{"data":{"artistUnion":{
@@ -966,21 +943,6 @@ mod tests {
 		assert!(parse_latest_release(&Value::Null).is_none());
 	}
 
-	/// Live diagnostic: embed token + pathfinder only, never the quota-limited Web API.
-	#[test]
-	#[ignore = "requires network access to Spotify's embed and pathfinder endpoints"]
-	fn artist_overviews_live() {
-		let web = WebPlayer::new();
-		for (name, id) in [("Radiohead", "4Z8W4fKeB5YxbusRsdQVPb"), ("Taylor Swift", "06HL4z0CvFAxyc27GXpf02")] {
-			let overview = web.overview(id).unwrap();
-			println!("{name} ({id}): {overview:#?}");
-			assert_eq!(overview.name, name);
-			assert!(overview.monthly_listeners.is_some(), "no listeners for {name}");
-			assert!(overview.header.is_some(), "no header for {name}");
-			assert!(!overview.cities.is_empty(), "no cities for {name}");
-		}
-	}
-
 	#[test]
 	fn credits_merge_roles_of_one_person() {
 		let c = json(
@@ -1016,22 +978,5 @@ mod tests {
 		assert_eq!(hex("#A16B05").as_deref(), Some("#a16b05"));
 		assert_eq!(hex("red"), None);
 		assert_eq!(hex("#12345"), None);
-	}
-
-	#[test]
-	fn the_web_player_is_not_asked_for_anything_while_it_is_off() {
-		use crate::app::settings::{Sources, allowed};
-		let off = Sources { web_player: false };
-		allowed::only_with(off, || {
-			// Every public call answers before it asks for a token or a page.
-			let web = WebPlayer::new();
-			assert!(web.artist("4Z8W4fKeB5YxbusRsdQVPb").is_err());
-			assert!(web.overview("4Z8W4fKeB5YxbusRsdQVPb").is_err());
-			assert!(web.album_plays("4aawyAB9vmqN3uQ7FjRGTy").is_err());
-			assert!(web.playlist("37i9dQZF1DXcBWIGoYBM5M", 0, 50).is_err());
-			assert!(web.credits("2JRo0gjbX4GrCqBYdRohoo").is_err());
-			assert!(web.search("radiohead", 0).is_err());
-			assert_eq!(web.colors("https://i.scdn.co/image/ab67616d00001e02"), None);
-		});
 	}
 }

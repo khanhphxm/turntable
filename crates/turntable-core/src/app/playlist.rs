@@ -12,7 +12,11 @@ use crate::{
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PendingDialog {
 	EditPlaylist(String),
-	AddContext(Route),
+	/// `None` opens the picker; `Some(None)` creates a new playlist; `Some(Some(id))` adds directly.
+	AddContext {
+		route:  Route,
+		target: Option<Option<String>>,
+	},
 }
 
 impl State {
@@ -126,7 +130,7 @@ impl State {
 		}
 		self.dialog = None;
 		self.focus = None;
-		self.pending_library_dialog = Some(PendingDialog::AddContext(route.clone()));
+		self.pending_library_dialog = Some(PendingDialog::AddContext { route: route.clone(), target: None });
 		Some(library::Request::AddContextToPlaylist(route))
 	}
 
@@ -143,7 +147,7 @@ impl State {
 		self.focus = Some(Field::PlaylistName);
 	}
 
-	pub(crate) fn apply_library_dialog(&mut self, response: &mut library::Response) {
+	pub(crate) fn apply_library_dialog(&mut self, response: &mut library::Response) -> Option<library::Request> {
 		match response {
 			library::Response::FolderCreated { id, name } => self.show_folder_rename(id.clone(), name.clone()),
 			library::Response::PlaylistDetails(playlist) if matches!(&self.pending_library_dialog, Some(PendingDialog::EditPlaylist(wanted)) if wanted == &playlist.id) =>
@@ -162,14 +166,20 @@ impl State {
 				if self
 					.pending_library_dialog
 					.as_ref()
-					.is_some_and(|pending| matches!(pending, PendingDialog::AddContext(wanted) if wanted == route)) =>
+					.is_some_and(|pending| matches!(pending, PendingDialog::AddContext { route: wanted, .. } if wanted == route)) =>
 			{
-				self.pending_library_dialog = None;
-				self.dialog = Some(Dialog::AddToPlaylist { uris: std::mem::take(uris), label: std::mem::take(label) });
+				let Some(PendingDialog::AddContext { target, .. }) = self.pending_library_dialog.take() else { return None };
+				let uris = std::mem::take(uris);
+				match target {
+					Some(Some(id)) => return Some(self.playlist_add_request(id, uris)),
+					Some(None) => return Some(library::Request::CreatePlaylist(self.new_playlist_name(), uris)),
+					None => self.dialog = Some(Dialog::AddToPlaylist { uris, label: std::mem::take(label) }),
+				}
 			},
 			library::Response::NeedsLogin => self.pending_library_dialog = None,
 			_ => {},
 		}
+		None
 	}
 
 	pub(super) fn set_library_saved(&mut self, uri: String, saved: bool, effects: &mut Vec<Effect>) {

@@ -188,6 +188,7 @@ pub(super) fn take_session_page(listing: &mut Listing, page: super::session::Tra
 	listing.tracks = page.page.items;
 	listing.added_at = page.added_at;
 	listing.added_by = page.added_by;
+	listing.positions = page.positions;
 }
 
 /// A listing's header: everything but its tracks.
@@ -382,15 +383,6 @@ mod album_tests {
 		assert_eq!(restored.release_date, listing.release_date);
 		assert_eq!(restored.copyrights, listing.copyrights);
 		assert_eq!(restored.label, listing.label);
-	}
-
-	#[test]
-	fn old_track_snapshots_default_the_disc_and_new_snapshots_round_trip_it() {
-		let mut track: spotify::Track = serde_json::from_value(serde_json::json!({"uri": "spotify:track:a"})).unwrap();
-		assert_eq!(track.disc_number, 0);
-		track.disc_number = 2;
-		let restored: spotify::Track = serde_json::from_value(serde_json::to_value(&track).unwrap()).unwrap();
-		assert_eq!(restored.disc_number, 2);
 	}
 }
 

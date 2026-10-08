@@ -121,15 +121,3 @@ impl MediaControls {
 		self.backend.set_playback(playback)
 	}
 }
-
-#[cfg(test)]
-mod tests {
-	use super::Playback;
-
-	#[test]
-	fn playback_positions_are_milliseconds() {
-		assert_eq!(Playback::Playing { position_ms: 12_345 }.position_ms(), 12_345);
-		assert_eq!(Playback::Paused { position_ms: 98_765 }.position_ms(), 98_765);
-		assert_eq!(Playback::Stopped.position_ms(), 0);
-	}
-}

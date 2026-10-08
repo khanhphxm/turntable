@@ -1,8 +1,8 @@
-# Thresholds and test exemptions for the lint set in Cargo.toml ([workspace.lints]).
-# Tests may unwrap, panic, index and print: a failing test should fail loudly, not be defensive.
-allow-unwrap-in-tests = true
-allow-expect-in-tests = true
-allow-panic-in-tests = true
-allow-indexing-slicing-in-tests = true
-allow-print-in-tests = true
+# Production code uses the curated workspace lints; tests may fail loudly at the assertion site.
+# Test exemptions do not relax the workspace's production lint levels.
 allow-dbg-in-tests = true
+allow-expect-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-panic-in-tests = true
+allow-print-in-tests = true
+allow-unwrap-in-tests = true

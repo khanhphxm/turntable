@@ -1,6 +1,5 @@
-//! Web API access tokens. They come from the player's Spotify session (the engine signs in once,
-//! in the browser, and keeps the sign-in): a [`TokenSource`] mints a fresh token when the last
-//! one runs out. There is no app registration and no refresh token to keep.
+//! Optional Web API token plumbing and platform browser handoff. The application uses
+//! native playback authentication and never loads a separate OAuth account.
 
 #[cfg(unix)]
 use std::process::{Command, Stdio};
@@ -32,7 +31,7 @@ impl std::fmt::Debug for Token {
 }
 
 impl Token {
-	/// True when the access token is still usable for at least [`REFRESH_SKEW_SECS`].
+	/// True when the access token remains usable beyond the refresh safety margin.
 	pub fn is_fresh(&self, now: u64) -> bool {
 		now.saturating_add(REFRESH_SKEW_SECS) < self.expires_at
 	}
@@ -44,13 +43,21 @@ pub type TokenSource = Arc<dyn Fn() -> Result<Token> + Send + Sync>;
 
 /// The current token and where the next one comes from.
 pub struct Session {
-	source: TokenSource,
+	source: Option<TokenSource>,
 	token:  Option<Token>,
 }
 
 impl Session {
 	pub fn new(source: TokenSource) -> Self {
-		Self { source, token: None }
+		Self { source: Some(source), token: None }
+	}
+
+	pub(super) fn empty() -> Self {
+		Self { source: None, token: None }
+	}
+
+	pub(super) fn has_source(&self) -> bool {
+		self.source.is_some()
 	}
 
 	/// An access token with time left, fetching a new one first when it runs out.
@@ -63,7 +70,7 @@ impl Session {
 
 	/// A new token (after the Web API refused the last one).
 	pub fn renew(&mut self) -> Result<String> {
-		let token = (self.source)()?;
+		let token = self.source.as_ref().ok_or(Error::AuthRequired)?()?;
 		if token.access_token.is_empty() {
 			return Err(Error::AuthRequired);
 		}

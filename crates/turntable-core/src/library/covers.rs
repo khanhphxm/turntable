@@ -6,17 +6,18 @@
 //! asked for, so each URL is requested once; a failure is tried again after a pause.
 
 use std::{
-	collections::{HashMap, HashSet},
+	collections::HashSet,
 	fs,
 	path::{Path, PathBuf},
-	sync::{Arc, Mutex, PoisonError, mpsc},
+	sync::{Arc, mpsc},
 	thread,
-	time::{Duration, Instant, SystemTime},
+	time::{Duration, SystemTime},
 };
 
+use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 
-use crate::net::{Profile, trace};
+use crate::net::{Profile, cache::Cache, trace};
 
 /// Covers fetched at once.
 const THREADS: usize = 2;
@@ -42,10 +43,17 @@ pub enum Cover {
 pub struct Fetcher {
 	tx:        mpsc::Sender<String>,
 	requested: HashSet<String>,
-	failed:    HashMap<String, Instant>,
+	failed:    Cache<String, ()>,
 }
 
 impl Fetcher {
+	/// A request sink without threads or network, used only by offline controller fixtures.
+	#[cfg(any(test, feature = "test-support"))]
+	pub(crate) fn fixture() -> Self {
+		let (tx, _) = mpsc::channel();
+		Self { tx, requested: HashSet::new(), failed: Cache::new(512, RETRY) }
+	}
+
 	/// Starts the fetcher threads; `deliver` runs on them. Covers are cached under `dir`.
 	pub fn spawn(dir: PathBuf, deliver: impl Fn(Cover) + Send + Sync + 'static) -> Self {
 		let (tx, rx) = mpsc::channel::<String>();
@@ -58,7 +66,7 @@ impl Fetcher {
 			let _ = thread::Builder::new().name(format!("covers{n}")).stack_size(512 * 1024).spawn(move || {
 				loop {
 					// One thread waits for the next URL, the others for their turn at it.
-					let next = rx.lock().unwrap_or_else(PoisonError::into_inner).recv();
+					let next = rx.lock().recv();
 					let Ok(url) = next else { return };
 					deliver(match cover(&dir, &url) {
 						Some((bytes, mime)) => Cover::Loaded { url, bytes, mime },
@@ -67,11 +75,11 @@ impl Fetcher {
 				}
 			});
 		}
-		Self { tx, requested: HashSet::new(), failed: HashMap::new() }
+		Self { tx, requested: HashSet::new(), failed: Cache::new(512, RETRY) }
 	}
 
 	pub fn request(&mut self, url: String) {
-		if self.requested.contains(&url) || self.failed.get(&url).is_some_and(|at| at.elapsed() < RETRY) {
+		if self.requested.contains(&url) || self.failed.get(&url).is_some() {
 			return;
 		}
 		self.failed.remove(&url);
@@ -85,7 +93,7 @@ impl Fetcher {
 
 	pub fn failed(&mut self, url: String) {
 		self.requested.remove(&url);
-		self.failed.insert(url, Instant::now());
+		self.failed.insert(url, ());
 	}
 
 	/// Covers asked for and not yet answered.
@@ -181,13 +189,6 @@ fn prune(dir: &Path, limit: u64) {
 mod tests {
 	use super::*;
 
-	fn scratch(name: &str) -> PathBuf {
-		let dir = std::env::temp_dir().join(format!("turntable-covers-{name}-{}", std::process::id()));
-		let _ = fs::remove_dir_all(&dir);
-		fs::create_dir_all(&dir).unwrap();
-		dir
-	}
-
 	#[test]
 	fn images_are_told_apart_by_their_first_bytes() {
 		assert_eq!(sniff(&[0xFF, 0xD8, 0xFF, 0xE0, 0]), Some("image/jpeg"));
@@ -199,16 +200,16 @@ mod tests {
 
 	#[test]
 	fn a_cover_is_stored_and_read_back_and_junk_is_not_stored() {
-		let dir = scratch("store");
+		let directory = tempfile::tempdir().unwrap();
+		let dir = directory.path();
 		let png = b"\x89PNG\r\n\x1a\nrest".to_vec();
 		let file = dir.join(file_name("https://i.scdn.co/image/a"));
-		store(&dir, &file, &png);
+		store(dir, &file, &png);
 		assert_eq!(fs::read(&file).unwrap(), png);
 		let junk = dir.join(file_name("https://i.scdn.co/image/b"));
-		store(&dir, &junk, b"<html>");
+		store(dir, &junk, b"<html>");
 		assert!(!junk.exists());
-		assert!(fs::read_dir(&dir).unwrap().all(|e| e.unwrap().path().extension().is_none()), "no temporary file is left behind");
-		let _ = fs::remove_dir_all(&dir);
+		assert!(fs::read_dir(dir).unwrap().all(|e| e.unwrap().path().extension().is_none()), "no temporary file is left behind");
 	}
 
 	#[test]
@@ -228,19 +229,31 @@ mod tests {
 
 	#[test]
 	fn pruning_removes_the_oldest_files_down_to_three_quarters_of_the_limit() {
-		let dir = scratch("prune");
+		let directory = tempfile::tempdir().unwrap();
+		let dir = directory.path();
 		let start = SystemTime::now();
 		for i in 0..10_u64 {
 			let path = dir.join(format!("f{i}"));
 			fs::write(&path, vec![0_u8; 100]).unwrap();
 			fs::File::options().write(true).open(&path).unwrap().set_modified(start + Duration::from_secs(i)).unwrap();
 		}
-		prune(&dir, 1000);
-		assert_eq!(fs::read_dir(&dir).unwrap().count(), 10, "at the limit nothing goes");
-		prune(&dir, 800);
-		let mut kept: Vec<String> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+		prune(dir, 1000);
+		assert_eq!(fs::read_dir(dir).unwrap().count(), 10, "at the limit nothing goes");
+		prune(dir, 800);
+		let mut kept: Vec<String> = fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
 		kept.sort();
 		assert_eq!(kept, ["f4", "f5", "f6", "f7", "f8", "f9"].map(String::from), "600 bytes are left: the six newest");
-		let _ = fs::remove_dir_all(&dir);
+	}
+
+	#[test]
+	fn failed_cover_cache_evicts_old_entries_and_expires_retries() {
+		let mut fetcher = Fetcher::fixture();
+		for index in 0..600 {
+			fetcher.failed(format!("cover-{index}"));
+		}
+		assert!(fetcher.failed.get("cover-0").is_none());
+		assert!(fetcher.failed.get("cover-599").is_some());
+		assert!(fetcher.failed.get("cover-100").is_some(), "retention evicts one old entry at a time");
+		assert!(fetcher.failed.get_at("cover-599", std::time::Instant::now() + RETRY).is_none());
 	}
 }

@@ -2,7 +2,7 @@
 //! ProductInfo attributes supply the plan. Display names use the same session's
 //! spclient profile only if absent from attributes and the account-scoped snapshot.
 
-use super::{Reader, network};
+use super::Reader;
 use crate::{
 	net::trace,
 	spotify::{self, User},
@@ -42,9 +42,9 @@ impl Reader {
 						bytes: bytes.len(),
 						..trace::Reply::default()
 					});
-					Ok(bytes)
+					Ok::<_, librespot_core::Error>(bytes)
 				})
-				.map_err(network)?;
+				.map_err(spotify::Error::from)?;
 			let profile: Profile = serde_json::from_slice(&bytes)?;
 			user.display_name = profile.name.filter(|name| !name.is_empty());
 		}

@@ -18,6 +18,10 @@ pub fn raised() -> Rgba {
 pub fn raised_hover() -> Rgba {
 	rgb(0x002a_2a2a)
 }
+/// A context menu's panel (Spotify's elevated grey).
+pub fn menu() -> Rgba {
+	rgb(0x0028_2828)
+}
 /// A row or card under the pointer.
 pub fn hover() -> Rgba {
 	rgba(0xffff_ff12)
@@ -62,6 +66,8 @@ pub const RIGHT_W: Pixels = px(280.);
 /// The right panel folded to a strip with a chevron.
 pub const RIGHT_FOLDED_W: Pixels = px(28.);
 pub const ROW_H: Pixels = px(56.);
+/// A track row with Settings → Compact rows on.
+pub const ROW_COMPACT_H: Pixels = px(32.);
 
 /// `c` at `alpha` (0..=1).
 pub fn alpha(c: Rgba, alpha: f32) -> Hsla {

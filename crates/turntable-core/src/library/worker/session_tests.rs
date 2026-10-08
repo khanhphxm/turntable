@@ -1,10 +1,6 @@
 //! Routing contracts: even native errors must not fall through to the quota-limited API.
 
-use std::{
-	cell::RefCell,
-	error::Error,
-	sync::atomic::{AtomicUsize, Ordering},
-};
+use std::{cell::RefCell, error::Error, sync::atomic::AtomicUsize};
 
 use librespot_core::{Session as PlayerSession, SessionConfig};
 use librespot_protocol::connect::{Cluster, DeviceInfo};
@@ -92,7 +88,7 @@ fn session_connect_uses_native_profile_and_preserves_snapshot_first_paint() -> R
 	let Fixture { runtime: _runtime, stop: _stop, directory, session: previous, minted, .. } = fixture()?;
 	let snapshots = previous.snapshots.clone();
 	{
-		let mut store = snapshots.lock().map_err(|error| std::io::Error::other(error.to_string()))?;
+		let mut store = snapshots.lock();
 		store.record(&Response::Connected {
 			me:        spotify::User { id: "alice".into(), display_name: Some("Cached Alice".into()) },
 			playlists: Vec::new(),
@@ -128,7 +124,7 @@ fn session_product_free_enforces_premium_without_me_or_a_snapshot() -> Result<()
 	let replies = RefCell::new(Vec::new());
 	connect(directory.path(), &snapshots, &mut session, &mut reader, true, &|reply| replies.borrow_mut().push(reply));
 	assert!(session.is_none());
-	assert!(matches!(replies.borrow().as_slice(), [Response::LoginFailed(_)]));
+	assert!(matches!(replies.borrow().as_slice(), [Response::SignInRejected(_)]));
 	assert_eq!(minted.load(Ordering::Relaxed), 0);
 	Ok(())
 }
@@ -152,19 +148,41 @@ fn connect_transfers_controls_and_missing_cluster_never_fall_back_with_session()
 	let Fixture { runtime: _runtime, stop, directory: _directory, mut session, minted, .. } = fixture()?;
 	stop.send_replace(true);
 	for request in [Request::Devices, Request::Playback, Request::Transfer { id: "phone".into(), play: false }, Request::Control {
-		device:  "phone".into(),
-		command: spotify::PlayerCommand::Pause,
+		device:   "phone".into(),
+		command:  spotify::PlayerCommand::Pause,
+		revision: 1,
 	}] {
 		let result = connect_request(&session, request)?;
-		assert!(matches!(result, Some(Response::Devices(Err(_)) | Response::Playback(Err(_)) | Response::PlayerError(_))));
+		assert!(matches!(
+			result,
+			Some(
+				Response::Devices(Err(_))
+					| Response::Playback(Err(_))
+					| Response::PlayerError(_)
+					| Response::ControlFailed { revision: 1, .. }
+			)
+		));
 	}
 	assert_eq!(minted.load(Ordering::Relaxed), 0);
 	session.player = None;
 	for request in [Request::Devices, Request::Playback, Request::Transfer { id: "phone".into(), play: false }, Request::Control {
-		device:  "phone".into(),
-		command: spotify::PlayerCommand::Pause,
+		device:   "phone".into(),
+		command:  spotify::PlayerCommand::Pause,
+		revision: 1,
 	}] {
-		assert!(matches!(connect_request(&session, request), Err(spotify::Error::AuthRequired)));
+		let result = connect_request(&session, request)?;
+		assert!(
+			matches!(
+				result,
+				Some(
+					Response::Devices(Err(_))
+						| Response::Playback(Err(_))
+						| Response::PlayerError(_)
+						| Response::ControlFailed { revision: 1, .. }
+				)
+			),
+			"a Web API token failure is a request error, never a lost native session"
+		);
 	}
 	assert_eq!(minted.load(Ordering::Relaxed), 4);
 	Ok(())

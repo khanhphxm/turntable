@@ -9,6 +9,10 @@ use crate::{
 #[derive(Debug, Clone, PartialEq)]
 pub enum Msg {
 	TogglePlay,
+	/// Resume playback; unlike TogglePlay, repeated media-key Play commands never pause.
+	Play,
+	/// Pause playback, even when the last decoder event has not reached the bar yet.
+	Pause,
 	Next,
 	Prev,
 	/// Seek to this absolute position in milliseconds (clamped to the track).
@@ -17,14 +21,11 @@ pub enum Msg {
 	SeekBy(i64),
 	/// Set volume to this percentage (clamped to 0..=100).
 	Volume(u8),
-	VolumeBy(i8),
 	ToggleMute,
 	ToggleShuffle,
 	CycleRepeat,
 	/// Open the device menu (listing the devices again), or close it.
 	DevicesMenu,
-	/// List the devices again (the menu's retry).
-	RefreshDevices,
 	/// Move playback to the device with this id (empty: this player, not listed yet).
 	PickDevice(String),
 	/// Open a side panel, or close it when it is the open one.
@@ -74,8 +75,8 @@ pub enum Msg {
 		uri:      String,
 		excluded: bool,
 	},
-	/// Open the playlist picker for row `n` of the listing, or for what's playing.
-	AddRowToPlaylist(usize),
+	/// Open the playlist picker for the rendered track/occurrence, if still present.
+	AddRowToPlaylist(library::RowTarget),
 	AddNowPlayingToPlaylist,
 	/// Add the picked tracks to playlist `id`, or to a new playlist (`None`).
 	AddToPlaylist(Option<String>),
@@ -84,12 +85,11 @@ pub enum Msg {
 		playlist: String,
 		uris:     Vec<String>,
 	},
-	RemoveRow(usize),
+	RemoveRow(library::RowTarget),
 	/// Move a playlist row to final zero-based row `to` (drag-and-drop).
 	MoveRow(usize, usize),
 	RenamePlaylist,
 	SaveRename,
-	TogglePlaylistPublic,
 	CloseDialog,
 	/// Add an album's or playlist's songs to the queue.
 	QueueContext(Route),
@@ -109,18 +109,12 @@ pub enum Msg {
 	ClearLibraryFilter,
 	/// Show a home shelf's every item instead of one row, or one row again.
 	ToggleShelf(&'static str),
-	/// Select Spotify's personalised Home filter chip.
-	HomeFacet(library::Facet),
-	/// Open a Home section's Show all page (URI from `HomeSection`).
-	HomeSectionMore(String),
-	/// Return from a Show all page to the selected Home feed without refetching it.
-	CloseHomeSection,
 	EqEnabled(bool),
-	/// Set band `0..10` to step `0..=EQ_STEPS` (bottom to top).
+	/// Set band `0..10` to step `0..=EQ_STEPS` (bottom to top, 0.5 dB apart).
 	EqBand(usize, u8),
+	/// Set band `0..10` to a typed dB value, clamped to ±12 and rounded to 0.5 dB.
+	EqSet(usize, f32),
 	EqPreset(&'static str),
-	/// Open the equalizer's preset menu, or close it.
-	EqMenu,
 	/// Open a link in the browser (the cover's link back to Spotify).
 	OpenUrl(String),
 	Navigate(Route),
@@ -130,40 +124,27 @@ pub enum Msg {
 	RememberSearch(library::Tile),
 	/// Remove the recent search selection with this route.
 	ForgetSearch(Route),
-	/// Empty this account's recent search selections.
-	ClearRecentSearches,
-	Select(usize),
-	MoveSelection(i32),
-	/// Play row `n` of the current listing.
-	PlayRow(usize),
+	Select(library::RowTarget),
+	/// Play the rendered track/occurrence, resolving its identity at dispatch.
+	PlayRow(library::RowTarget),
 	/// A song card: open its album with the song selected.
 	OpenTrack {
 		album: String,
 		uri:   String,
 	},
-	PlaySelected,
 	/// Play the current listing from the top.
 	PlayListing,
 	/// Add the now-playing track to Liked Songs, or take it out.
 	ToggleLike,
 	/// Add a row's track URI to Liked Songs (never changes owned playlists).
 	AddToLiked(String),
-	/// Remove a row's track URI from Liked Songs (never changes owned playlists).
-	RemoveFromLiked(String),
-	/// Append row `n` of the current listing to the user queue.
-	QueueRow(usize),
-	/// Insert row `n` at the front of the user queue, without starting it now.
-	QueuePlayNext(usize),
-	/// Queue playable URIs in order (`next`: insert at front instead of append).
-	QueueTracks {
-		uris: Vec<String>,
-		next: bool,
-	},
+	/// Append the rendered track/occurrence to the user queue, if still present.
+	QueueRow(library::RowTarget),
+	/// Insert the rendered track/occurrence at the front without starting it now.
+	QueuePlayNext(library::RowTarget),
 	/// Remove absolute upcoming row `n`, immediately and without restarting playback.
 	QueueRemove(usize),
-	/// Move upcoming queued row `n` one place up (-1) or down (+1).
-	QueueMove(usize, i8),
-	/// Drag a user-queued row to its final absolute upcoming index; cannot cross into context.
+	/// Drag any upcoming occurrence to its final absolute upcoming index, across sections.
 	QueueMoveTo(usize, usize),
 	/// Clear the songs queued by hand.
 	QueueClear,
@@ -173,18 +154,14 @@ pub enum Msg {
 	SearchSubmit(String),
 	/// Sign in to Spotify (in the browser) and start the player.
 	SignIn,
+	/// Cancel an unfinished browser sign-in and allow a fresh attempt.
+	CancelSignIn,
 	/// Forget the sign-in on this computer and stop the player.
 	SignOut,
-	/// Save the library app's Client ID.
-	SaveClientId(String),
-	/// Connect the library's Spotify app (browser sign-in), or disconnect it.
-	ConnectSpotify,
-	DisconnectSpotify,
 	/// Give a text field the caret (`None`: no field).
 	Focus(Option<Field>),
-	/// Typed or pasted text into the focused field.
-	Type(String),
-	Backspace,
+	/// Replace a host text field without depending on core focus or the current route.
+	SetText(Field, String),
 	/// Replace UTF-16 code-unit range `from..to` of the focused field with `text`.
 	Edit {
 		from: usize,
@@ -193,21 +170,10 @@ pub enum Msg {
 	},
 	/// Enter in the focused field.
 	Submit,
-	Quit,
 	/// Change a setting on the settings page.
 	Pref(crate::app::settings::Pref),
-	/// Open a dropdown of the settings page, or close it when it is the open one.
-	Dropdown(crate::app::system::Menu),
 	/// Start, change or cancel the sleep timer.
 	Sleep(crate::app::rules::SleepChoice),
-	/// Take the player's name from the field of the settings page.
-	SaveDeviceName,
-	/// Restart the player, so a new name or cache size takes effect.
-	RestartPlayer,
-	/// Empty the player's playback cache.
-	ClearCache,
-	/// Open the player's log, the settings folder or the cache in the system's file manager.
-	OpenFolder(crate::app::system::Folder),
 }
 
 /// What the player loop must do after an update.
@@ -217,14 +183,15 @@ pub enum Effect {
 	Library(library::Request),
 	/// Start the player, signing in first when there is no sign-in.
 	SignIn,
+	/// Revoke the unfinished sign-in's authorization and stop its listener.
+	CancelSignIn,
 	/// Stop the player and delete the sign-in.
 	SignOut,
-	SaveClientId(String),
-	/// Apply and persist new EQ settings.
+	/// Apply EQ immediately and schedule a debounced off-thread preference save.
 	SetEq,
-	/// Persist the settings.
+	/// Schedule a debounced off-thread settings save.
 	SaveSettings,
-	/// Persist this account's recent search selections.
+	/// Schedule an ordered off-thread save of this account's recent search selections.
 	SaveRecentSearches,
 	OpenUrl(String),
 	/// Search for the current query once typing pauses (the loop debounces).
@@ -234,8 +201,4 @@ pub enum Effect {
 	/// Apply what the settings drive outside the state (the audio stage and device, the sources
 	/// that may be asked) and save the settings.
 	ApplyPrefs,
-	/// Restart the player (a changed name or cache size only takes effect then).
-	RestartPlayer,
-	/// Empty the player's playback cache (the player stops while it is emptied).
-	ClearCache,
 }

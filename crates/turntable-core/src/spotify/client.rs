@@ -1,10 +1,8 @@
 //! Blocking Web API client, endpoint methods and shared authenticated request handling.
 
-use std::{
-	sync::{Arc, Mutex, PoisonError},
-	time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
+use parking_lot::Mutex;
 use serde::de::DeserializeOwned;
 
 use super::{
@@ -87,13 +85,16 @@ impl Client {
 	/// A client that authenticates with tokens from `source` (the player's Spotify session).
 	/// With `web_api` false, requests fail offline before token refresh or network I/O.
 	pub fn open(source: TokenSource, web_api: bool) -> Self {
-		// The UI harness points an isolated run (TURNTABLE_HOME) at its mock Web API;
-		// a normal run always talks to Spotify.
-		let base = crate::app::config::home_override()
-			.and_then(|_| std::env::var("TURNTABLE_API").ok())
-			.filter(|b| !b.is_empty())
-			.unwrap_or_else(|| API.to_owned());
-		Self::new(Session::new(source), base, web_api)
+		Self::new(Session::new(source), API.to_owned(), web_api)
+	}
+
+	pub(crate) fn without_token(web_api: bool) -> Self {
+		Self::new(Session::empty(), API.to_owned(), web_api)
+	}
+
+	/// Whether a Web API fallback can authenticate, without refreshing or probing a token.
+	pub fn has_token(&self) -> bool {
+		self.web_api && self.session.lock().has_source()
 	}
 
 	fn new(session: Session, base: String, web_api: bool) -> Self {
@@ -354,7 +355,7 @@ impl Client {
 	/// moment ago is not asked again.
 	fn get_bytes(&self, path: &str, query: &[(&str, &str)]) -> Result<Arc<Vec<u8>>> {
 		let key = format!("{path}?{}", query.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&"));
-		let recent = self.recent.lock().unwrap_or_else(PoisonError::into_inner).get(&key);
+		let recent = self.recent.lock().get(&key);
 		if let Some(body) = recent {
 			trace::hit("api", &trace::endpoint(&format!("{}{path}", self.base)), "mem");
 			return Ok(body);
@@ -367,7 +368,7 @@ impl Client {
 				span.done("api", "GET", &format!("{}{path}", self.base), reply);
 			},
 			Ok(body) if body.len() <= RECENT_MAX_BYTES => {
-				self.recent.lock().unwrap_or_else(PoisonError::into_inner).insert(key, body.clone());
+				self.recent.lock().insert(key, body.clone());
 			},
 			_ => {},
 		}
@@ -376,7 +377,7 @@ impl Client {
 
 	/// Lets go of the recent GET answers (they only serve requests made close together).
 	pub fn forget_recent(&self) {
-		self.recent.lock().unwrap_or_else(PoisonError::into_inner).clear();
+		self.recent.lock().clear();
 	}
 
 	/// Authenticated call. A 401 triggers one forced refresh and one retry.
@@ -391,15 +392,13 @@ impl Client {
 		}
 		if method != Method::Get {
 			// What was read before this write may not hold after it.
-			self.recent.lock().unwrap_or_else(PoisonError::into_inner).clear();
+			self.recent.lock().clear();
 		}
 		let url = format!("{}{path}", self.base);
 		let mut token = self.token()?;
 		let mut refreshed = false;
 		loop {
-			let result = self
-				.http
-				.send_conditional(&Req { method, url: &url, query, bearer: Some(&token), form: None, json, limit: JSON_LIMIT }, etag);
+			let result = self.http.send_conditional(&Req { method, url: &url, query, bearer: Some(&token), json, limit: JSON_LIMIT }, etag);
 			match result {
 				Err(Error::AuthExpired) if !refreshed => {
 					refreshed = true;
@@ -412,12 +411,12 @@ impl Client {
 
 	/// An access token with time left, renewed first when it runs out.
 	fn token(&self) -> Result<String> {
-		self.session.lock().unwrap_or_else(PoisonError::into_inner).access_token()
+		self.session.lock().access_token()
 	}
 
 	/// A new token after Spotify refused `stale`, unless another thread has renewed it already.
 	fn refreshed(&self, stale: &str) -> Result<String> {
-		let mut session = self.session.lock().unwrap_or_else(PoisonError::into_inner);
+		let mut session = self.session.lock();
 		match session.current() {
 			Some(current) if current != stale => Ok(current.to_owned()),
 			_ => session.renew(),

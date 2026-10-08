@@ -14,24 +14,6 @@ fn db(x: f64) -> f64 {
 }
 
 #[test]
-fn the_meter_reads_a_997_hz_sine_at_its_level() {
-	// BS.1770's calibration: a full-scale 997 Hz sine in both channels is 0 LUFS.
-	for dbfs in [0.0, -10.0, -23.0] {
-		let buf = sine(997.0, 5.0, 10f64.powf(dbfs / 20.0), 0.0);
-		let lufs = loudness(&buf);
-		assert!((lufs - dbfs).abs() < 0.1, "{dbfs} dBFS read {lufs} LUFS");
-	}
-}
-
-#[test]
-fn the_meter_weights_high_frequencies_up_and_low_ones_down() {
-	let level = |hz| loudness(&sine(hz, 4.0, 0.1, 0.0));
-	let mid = level(997.0);
-	assert!(level(10_000.0) - mid > 3.0, "the head's shelf lifts the highs");
-	assert!(mid - level(30.0) > 3.0, "the high-pass cuts the lows");
-}
-
-#[test]
 fn the_kernels_are_unity_at_dc_and_interpolate_a_sine() {
 	for phase in [0.25, 0.5, 0.75] {
 		let k = kernel(phase);

@@ -11,7 +11,7 @@ use std::{
 use priority_queue::PriorityQueue;
 use thiserror::Error;
 
-use crate::{Error, FileId, authentication::Credentials, error::ErrorKind};
+use crate::{authentication::Credentials, error::ErrorKind, Error, FileId};
 
 const CACHE_LIMITER_POISON_MSG: &str = "cache limiter mutex should not be poisoned";
 
@@ -31,20 +31,20 @@ impl From<CacheError> for Error {
 /// It keeps track of the file sizes and is able to pop the path with the oldest timestamp if
 /// a given limit is exceeded.
 struct SizeLimiter {
-    queue: PriorityQueue<PathBuf, Reverse<SystemTime>>,
-    sizes: HashMap<PathBuf, u64>,
+    queue:      PriorityQueue<PathBuf, Reverse<SystemTime>>,
+    sizes:      HashMap<PathBuf, u64>,
     size_limit: u64,
-    in_use: u64,
+    in_use:     u64,
 }
 
 impl SizeLimiter {
     /// Creates a new instance with the given size limit.
     fn new(limit: u64) -> Self {
         Self {
-            queue: PriorityQueue::new(),
-            sizes: HashMap::new(),
+            queue:      PriorityQueue::new(),
+            sizes:      HashMap::new(),
             size_limit: limit,
-            in_use: 0,
+            in_use:     0,
         }
     }
 
@@ -91,9 +91,7 @@ impl SizeLimiter {
 
     /// Updates the timestamp of an existing element. Returns `true` if the item did exist.
     fn update(&mut self, file: &Path, access_time: SystemTime) -> bool {
-        self.queue
-            .change_priority(file, Reverse(access_time))
-            .is_some()
+        self.queue.change_priority(file, Reverse(access_time)).is_some()
     }
 
     /// Removes an element with the specified path. Returns `true` if the item did exist.
@@ -144,7 +142,7 @@ impl FsSizeLimiter {
             Err(e) => {
                 warn!("Could not read directory {path:?} in cache dir: {e}");
                 return;
-            }
+            },
         };
 
         for entry in list_dir {
@@ -153,61 +151,44 @@ impl FsSizeLimiter {
                 Err(e) => {
                     warn!("Could not directory {path:?} in cache dir: {e}");
                     return;
-                }
+                },
             };
 
             match entry.file_type() {
                 Ok(file_type) if file_type.is_dir() || file_type.is_symlink() => {
                     Self::init_dir(limiter, &entry.path())
-                }
+                },
                 Ok(file_type) if file_type.is_file() => {
                     let path = entry.path();
                     match Self::get_metadata(&path) {
                         Ok((access_time, size)) => {
                             limiter.add(&path, size, access_time);
-                        }
+                        },
                         Err(e) => {
                             warn!("Could not read file {path:?} in cache dir: {e}")
-                        }
+                        },
                     }
-                }
+                },
                 Ok(ft) => {
-                    warn!(
-                        "File {:?} in cache dir has unsupported type {:?}",
-                        entry.path(),
-                        ft
-                    )
-                }
+                    warn!("File {:?} in cache dir has unsupported type {:?}", entry.path(), ft)
+                },
                 Err(e) => {
-                    warn!(
-                        "Could not get type of file {:?} in cache dir: {}",
-                        entry.path(),
-                        e
-                    )
-                }
+                    warn!("Could not get type of file {:?} in cache dir: {}", entry.path(), e)
+                },
             };
         }
     }
 
     fn add(&self, file: &Path, size: u64) {
-        self.limiter
-            .lock()
-            .expect(CACHE_LIMITER_POISON_MSG)
-            .add(file, size, SystemTime::now())
+        self.limiter.lock().expect(CACHE_LIMITER_POISON_MSG).add(file, size, SystemTime::now())
     }
 
     fn touch(&self, file: &Path) -> bool {
-        self.limiter
-            .lock()
-            .expect(CACHE_LIMITER_POISON_MSG)
-            .update(file, SystemTime::now())
+        self.limiter.lock().expect(CACHE_LIMITER_POISON_MSG).update(file, SystemTime::now())
     }
 
     fn remove(&self, file: &Path) -> bool {
-        self.limiter
-            .lock()
-            .expect(CACHE_LIMITER_POISON_MSG)
-            .remove(file)
+        self.limiter.lock().expect(CACHE_LIMITER_POISON_MSG).remove(file)
     }
 
     fn prune_internal<F: FnMut() -> Option<PathBuf>>(mut pop: F) -> Result<(), Error> {
@@ -251,19 +232,20 @@ impl FsSizeLimiter {
         Self::init_dir(&mut limiter, path);
         Self::prune_internal(|| limiter.pop())?;
 
-        Ok(Self {
-            limiter: Mutex::new(limiter),
-        })
+        Ok(Self { limiter: Mutex::new(limiter) })
     }
 }
+
+type CredentialsWriter = dyn Fn(&Credentials) -> io::Result<()> + Send + Sync;
 
 /// A cache for volume, credentials and audio files.
 #[derive(Clone)]
 pub struct Cache {
     credentials_location: Option<PathBuf>,
-    volume_location: Option<PathBuf>,
-    audio_location: Option<PathBuf>,
-    size_limiter: Option<Arc<FsSizeLimiter>>,
+    volume_location:      Option<PathBuf>,
+    audio_location:       Option<PathBuf>,
+    size_limiter:         Option<Arc<FsSizeLimiter>>,
+    credentials_writer:   Option<Arc<CredentialsWriter>>,
 }
 
 impl Cache {
@@ -279,9 +261,8 @@ impl Cache {
             fs::create_dir_all(location)?;
         }
 
-        let credentials_location = credentials_path
-            .as_ref()
-            .map(|p| p.as_ref().join("credentials.json"));
+        let credentials_location =
+            credentials_path.as_ref().map(|p| p.as_ref().join("credentials.json"));
 
         if let Some(location) = &volume_path {
             fs::create_dir_all(location)?;
@@ -305,6 +286,7 @@ impl Cache {
             volume_location,
             audio_location,
             size_limiter,
+            credentials_writer: None,
         };
 
         Ok(cache)
@@ -330,11 +312,25 @@ impl Cache {
                     warn!("Error reading credentials from cache: {e}");
                 }
                 None
-            }
+            },
         }
     }
 
+    /// Lets the host serialize credential persistence with account sign-out.
+    pub fn set_credentials_writer(
+        &mut self,
+        writer: impl Fn(&Credentials) -> io::Result<()> + Send + Sync + 'static,
+    ) {
+        self.credentials_writer = Some(Arc::new(writer));
+    }
+
     pub fn save_credentials(&self, cred: &Credentials) {
+        if let Some(writer) = &self.credentials_writer {
+            if let Err(error) = writer(cred) {
+                warn!("Cannot save credentials to cache: {error}");
+            }
+            return;
+        }
         if let Some(location) = &self.credentials_location {
             let result = File::create(location).and_then(|mut file| {
                 let data = serde_json::to_string(cred)?;
@@ -364,7 +360,7 @@ impl Cache {
                     warn!("Error reading volume from cache: {e}");
                 }
                 None
-            }
+            },
         }
     }
 
@@ -387,7 +383,7 @@ impl Cache {
             Err(e) => {
                 warn!("Invalid FileId: {e}");
                 None
-            }
+            },
         }
     }
 
@@ -401,13 +397,13 @@ impl Cache {
                     }
                 }
                 Some(file)
-            }
+            },
             Err(e) => {
                 if e.kind() != io::ErrorKind::NotFound {
                     warn!("Error reading file from cache: {e}")
                 }
                 None
-            }
+            },
         }
     }
 
@@ -443,8 +439,9 @@ impl Cache {
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use std::time::Duration;
+
+    use super::*;
 
     fn ordered_time(v: u64) -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(v)

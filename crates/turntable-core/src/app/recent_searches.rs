@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 use super::{State, config};
 use crate::library::{Route, Tile};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct RecentSearches {
 	account: Option<String>,
 	tiles:   Vec<Tile>,
@@ -116,7 +116,7 @@ mod tests {
 		assert_eq!(state.recent_searches(), &[replacement, tile(2)]);
 		state.update(Msg::ForgetSearch(Route::Album("1".into())));
 		assert_eq!(state.recent_searches(), &[tile(2)]);
-		state.update(Msg::ClearRecentSearches);
+		state.update(Msg::ForgetSearch(Route::Album("2".into())));
 		assert!(state.recent_searches().is_empty());
 	}
 
@@ -127,32 +127,5 @@ mod tests {
 			state.update(Msg::RememberSearch(tile(id)));
 		}
 		assert_eq!(state.recent_searches(), &(2..12).rev().map(tile).collect::<Vec<_>>());
-	}
-
-	#[test]
-	fn persistence_round_trip_and_account_isolation() {
-		let dir = tempfile::tempdir().unwrap();
-		let mut searches = RecentSearches::default();
-		searches.load(dir.path(), Some("alice".into()));
-		searches.remember(tile(1));
-		searches.remember(tile(2));
-		searches.save(dir.path()).unwrap();
-		let mut restored = RecentSearches::default();
-		restored.load(dir.path(), Some("alice".into()));
-		assert_eq!(restored.tiles, vec![tile(2), tile(1)]);
-		restored.load(dir.path(), Some("bob".into()));
-		assert!(restored.tiles.is_empty());
-		restored.remember(tile(3));
-		restored.save(dir.path()).unwrap();
-		restored.load(dir.path(), Some("alice".into()));
-		assert_eq!(restored.tiles, vec![tile(2), tile(1)]);
-		restored.clear();
-		restored.save(dir.path()).unwrap();
-		restored.load(dir.path(), None);
-		assert!(restored.tiles.is_empty());
-		restored.load(dir.path(), Some("alice".into()));
-		assert!(restored.tiles.is_empty());
-		restored.load(dir.path(), Some("bob".into()));
-		assert_eq!(restored.tiles, vec![tile(3)]);
 	}
 }

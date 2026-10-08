@@ -5,11 +5,14 @@
 //! that ask for the same thing at the same time share one answer.
 
 use std::{
+	borrow::Borrow,
 	collections::HashMap,
 	hash::Hash,
-	sync::{Arc, Condvar, Mutex, PoisonError},
+	sync::Arc,
 	time::{Duration, Instant},
 };
+
+use parking_lot::{Condvar, Mutex};
 
 /// A least-recently-used map whose entries also expire.
 pub struct Cache<K, V> {
@@ -32,12 +35,18 @@ impl<K: Hash + Eq + Clone, V: Clone> Cache<K, V> {
 	}
 
 	/// The entry, while it is younger than the lifetime.
-	pub fn get(&mut self, key: &K) -> Option<V> {
+	pub fn get<Q: Hash + Eq + ?Sized>(&mut self, key: &Q) -> Option<V>
+	where
+		K: Borrow<Q>,
+	{
 		self.get_at(key, Instant::now())
 	}
 
 	/// Borrows an unexpired entry without cloning a whole listing; still updates its LRU use.
-	pub fn get_ref(&mut self, key: &K) -> Option<&V> {
+	pub fn get_ref<Q: Hash + Eq + ?Sized>(&mut self, key: &Q) -> Option<&V>
+	where
+		K: Borrow<Q>,
+	{
 		self.tick += 1;
 		let slot = self.map.get_mut(key)?;
 		if slot.at.elapsed() >= self.ttl {
@@ -47,7 +56,10 @@ impl<K: Hash + Eq + Clone, V: Clone> Cache<K, V> {
 		Some(&slot.value)
 	}
 
-	pub fn get_at(&mut self, key: &K, now: Instant) -> Option<V> {
+	pub fn get_at<Q: Hash + Eq + ?Sized>(&mut self, key: &Q, now: Instant) -> Option<V>
+	where
+		K: Borrow<Q>,
+	{
 		match self.get_stale_at(key, now) {
 			Some((value, true)) => Some(value),
 			Some((_, false)) => {
@@ -58,7 +70,10 @@ impl<K: Hash + Eq + Clone, V: Clone> Cache<K, V> {
 		}
 	}
 
-	fn get_stale_at(&mut self, key: &K, now: Instant) -> Option<(V, bool)> {
+	fn get_stale_at<Q: Hash + Eq + ?Sized>(&mut self, key: &Q, now: Instant) -> Option<(V, bool)>
+	where
+		K: Borrow<Q>,
+	{
 		self.tick += 1;
 		let tick = self.tick;
 		let slot = self.map.get_mut(key)?;
@@ -82,7 +97,10 @@ impl<K: Hash + Eq + Clone, V: Clone> Cache<K, V> {
 		}
 	}
 
-	pub fn remove(&mut self, key: &K) -> Option<V> {
+	pub fn remove<Q: Hash + Eq + ?Sized>(&mut self, key: &Q) -> Option<V>
+	where
+		K: Borrow<Q>,
+	{
 		self.map.remove(key).map(|slot| slot.value)
 	}
 
@@ -137,9 +155,9 @@ struct Leader<'a, K: Hash + Eq, V> {
 
 impl<K: Hash + Eq, V> Drop for Leader<'_, K, V> {
 	fn drop(&mut self) {
-		self.flights.map.lock().unwrap_or_else(PoisonError::into_inner).remove(self.key);
+		self.flights.map.lock().remove(self.key);
 		if !self.done {
-			*self.flight.outcome.lock().unwrap_or_else(PoisonError::into_inner) = Outcome::Abandoned;
+			*self.flight.outcome.lock() = Outcome::Abandoned;
 			self.flight.changed.notify_all();
 		}
 	}
@@ -152,7 +170,7 @@ impl<K: Hash + Eq + Clone, V: Clone> Flights<K, V> {
 		let mut work = Some(work);
 		loop {
 			let (flight, leading) = {
-				let mut map = self.map.lock().unwrap_or_else(PoisonError::into_inner);
+				let mut map = self.map.lock();
 				match map.get(key) {
 					Some(flight) => (flight.clone(), false),
 					None => {
@@ -166,14 +184,14 @@ impl<K: Hash + Eq + Clone, V: Clone> Flights<K, V> {
 				let Some(work) = work.take() else { continue };
 				let mut leader = Leader { flights: self, key, flight, done: false };
 				let value = work();
-				*leader.flight.outcome.lock().unwrap_or_else(PoisonError::into_inner) = Outcome::Done(value.clone());
+				*leader.flight.outcome.lock() = Outcome::Done(value.clone());
 				leader.done = true;
 				leader.flight.changed.notify_all();
 				return (value, false);
 			}
-			let mut outcome = flight.outcome.lock().unwrap_or_else(PoisonError::into_inner);
+			let mut outcome = flight.outcome.lock();
 			while matches!(*outcome, Outcome::Running) {
-				outcome = flight.changed.wait(outcome).unwrap_or_else(PoisonError::into_inner);
+				flight.changed.wait(&mut outcome);
 			}
 			if let Outcome::Done(value) = &*outcome {
 				return (value.clone(), true);
@@ -185,10 +203,7 @@ impl<K: Hash + Eq + Clone, V: Clone> Flights<K, V> {
 
 #[cfg(test)]
 mod tests {
-	use std::{
-		sync::atomic::{AtomicUsize, Ordering},
-		thread,
-	};
+	use std::{sync::mpsc, thread};
 
 	use super::*;
 
@@ -239,46 +254,74 @@ mod tests {
 		assert_eq!(cache.len(), 1);
 	}
 
+	fn wait_for_waiters(flights: &Flights<u8, u8>, count: usize) {
+		let deadline = Instant::now() + Duration::from_secs(5);
+		loop {
+			// One reference belongs to the map and one to the blocked leader; every
+			// additional reference is a caller that has joined that same running flight.
+			if flights.map.lock().get(&1).is_some_and(|flight| Arc::strong_count(flight) == count + 2) {
+				return;
+			}
+			assert!(Instant::now() < deadline, "callers did not join the running request");
+			thread::yield_now();
+		}
+	}
+
 	#[test]
-	#[expect(clippy::needless_collect, reason = "every thread must start before the first join")]
 	fn callers_asking_together_share_one_run_of_the_work() {
-		let flights = Arc::new(Flights::<&'static str, usize>::default());
-		let runs = Arc::new(AtomicUsize::new(0));
-		let handles: Vec<_> = (0..6)
-			.map(|_| {
-				let (flights, runs) = (flights.clone(), runs.clone());
-				thread::spawn(move || {
-					flights.run(&"k", || {
-						thread::sleep(Duration::from_millis(150));
-						runs.fetch_add(1, Ordering::SeqCst) + 100
-					})
+		let flights = Arc::new(Flights::<u8, u8>::default());
+		let (started, ready) = mpsc::channel();
+		let (finish, release) = mpsc::channel();
+		let leader = {
+			let flights = flights.clone();
+			thread::spawn(move || {
+				flights.run(&1, || {
+					started.send(()).unwrap();
+					release.recv_timeout(Duration::from_secs(5)).unwrap();
+					100
 				})
 			})
-			.collect();
-		let answers: Vec<(usize, bool)> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-		assert_eq!(runs.load(Ordering::SeqCst), 1, "one request for six callers");
-		assert!(answers.iter().all(|(value, _)| *value == 100));
-		assert_eq!(answers.iter().filter(|(_, shared)| !shared).count(), 1, "one leader");
+		};
+		ready.recv_timeout(Duration::from_secs(5)).unwrap();
+		let mut waiters = Vec::new();
+		for _ in 0..5 {
+			let flights = flights.clone();
+			waiters.push(thread::spawn(move || flights.run(&1, || panic!("a waiter must share the running request"))));
+		}
+		wait_for_waiters(&flights, 5);
+		finish.send(()).unwrap();
+		assert_eq!(leader.join().unwrap(), (100, false));
+		for waiter in waiters {
+			assert_eq!(waiter.join().unwrap(), (100, true));
+		}
 	}
 
 	#[test]
 	fn a_waiter_takes_over_when_the_leader_fails_to_answer() {
 		let flights = Arc::new(Flights::<u8, u8>::default());
-		let leading = {
+		let (started, ready) = mpsc::channel();
+		let (abandon, release) = mpsc::channel();
+		let leader = {
 			let flights = flights.clone();
 			thread::spawn(move || {
 				std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
 					flights.run(&1, || {
-						thread::sleep(Duration::from_millis(200));
+						started.send(()).unwrap();
+						release.recv_timeout(Duration::from_secs(5)).unwrap();
 						panic!("the leader died");
 					})
 				}))
 				.is_err()
 			})
 		};
-		thread::sleep(Duration::from_millis(60));
-		let (value, shared) = flights.run(&1, || 5);
-		assert!(leading.join().unwrap(), "the leader panicked");
-		assert_eq!((value, shared), (5, false), "the waiter did the work itself");
+		ready.recv_timeout(Duration::from_secs(5)).unwrap();
+		let waiter = {
+			let flights = flights.clone();
+			thread::spawn(move || flights.run(&1, || 5))
+		};
+		wait_for_waiters(&flights, 1);
+		abandon.send(()).unwrap();
+		assert!(leader.join().unwrap(), "the leader panicked");
+		assert_eq!(waiter.join().unwrap(), (5, false), "the waiter did the work itself");
 	}
 }

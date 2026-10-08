@@ -19,7 +19,7 @@ use crate::{
 	components::grouped,
 	shell::{Shell, Side},
 	theme,
-	widgets::{Icon, added_badge, cover, icon, icon_button},
+	widgets::{Icon, added_badge, cover, icon, icon_button, reveal_row},
 };
 
 /// How long a panel takes to slide and fade in.
@@ -102,7 +102,7 @@ impl Shell {
 		};
 		let body = match side {
 			Side::Core(Panel::NowPlaying) => self.now_playing_body(cx),
-			Side::Core(Panel::Lyrics) => self.lyric_lines(24., 16., cx),
+			Side::Core(Panel::Lyrics) => self.lyric_lines(24., 16., false, cx),
 			Side::Devices => self.devices_body(cx),
 			Side::Core(_) => self.queue_body(cx),
 		};
@@ -120,6 +120,12 @@ impl Shell {
 			.flex()
 			.flex_col()
 			.group("right-panel")
+			.id("right-panel")
+			.on_hover(cx.listener(|this, over: &bool, _, cx| {
+				if this.panel_reveal.set(*over) {
+					cx.notify();
+				}
+			}))
 			.child(
 				div()
 					.h(px(56.))
@@ -129,24 +135,27 @@ impl Shell {
 					.gap_1()
 					.pl_4()
 					.pr_2()
-					// Spotify's header: the fold button shows on hover; the queue, lyrics and
-					// devices go back to now playing with it, now playing folds to the strip.
-					// Shown while the panel is hovered, as Spotify's is (visibility only: hover must
-					// never change layout, or GPUI paints what it didn't prepaint).
-					.child(div().invisible().group_hover("right-panel", |s| s.visible()).child(icon_button(
-						"panel-fold",
-						Icon::PanelClose,
-						px(16.),
-						false,
-						cx.listener(move |this, _, _, cx| {
-							if side == Side::Core(Panel::NowPlaying) {
-								this.fold_panel(cx);
-							} else {
-								this.toggle_side(Side::Core(Panel::NowPlaying), cx);
-							}
-						}),
-					)))
-					.child(div().flex_1().min_w_0().text_size(px(16.)).font_weight(FontWeight::BOLD).truncate().child(title))
+					// Spotify's header: hovering the panel slides the title over for the fold button;
+					// the queue, lyrics and devices go back to now playing with it, now playing folds
+					// to the strip.
+					.child(
+						div().flex_1().min_w_0().h_full().flex().items_center().overflow_hidden().child(reveal_row(
+							"panel-reveal",
+							self.panel_reveal,
+							div()
+								.id("panel-fold")
+								.cursor_pointer()
+								.on_click(cx.listener(move |this, _, _, cx| {
+									if side == Side::Core(Panel::NowPlaying) {
+										this.fold_panel(cx);
+									} else {
+										this.toggle_side(Side::Core(Panel::NowPlaying), cx);
+									}
+								}))
+								.child(icon(Icon::PanelClose, px(20.), theme::subdued())),
+							div().min_w_0().text_size(px(16.)).font_weight(FontWeight::BOLD).truncate().child(title),
+						)),
+					)
 					.when(side == Side::Core(Panel::NowPlaying) && !self.st().item.uri.is_empty(), |s| {
 						s.child(div().invisible().group_hover("right-panel", |s| s.visible()).child(icon_button(
 							"panel-full",
@@ -157,19 +166,21 @@ impl Shell {
 						)))
 					}),
 			)
-			// Lyrics scroll themselves (to follow the sung line); the rest scroll here.
+			// Lyrics scroll themselves (to follow the sung line); the rest scroll here. Switching
+			// panels slides the new content up over the old, as Spotify's does; the frame stays.
 			.child(
 				div()
 					.id(("panel-scroll", self.panel_gen))
 					.flex_1()
 					.min_h_0()
+					.relative()
 					.when(side != Side::Core(Panel::Lyrics), |s| s.overflow_y_scroll())
-					.child(body),
+					.child(body)
+					.with_animation(("panel", self.panel_gen), Animation::new(ENTER).with_easing(ease_out_quint()), |el, d| {
+						el.top(px(48. * (1. - d))).opacity(0.4 + 0.6 * d)
+					}),
 			)
 			.child(crate::widgets::corner_mask())
-			.with_animation(("panel", self.panel_gen), Animation::new(ENTER).with_easing(ease_out_quint()), |el, d| {
-				el.opacity(d).relative().left(px(32. * (1. - d)))
-			})
 	}
 
 	#[expect(clippy::too_many_lines, reason = "keep the declarative now-playing panel sections together")]
@@ -310,9 +321,9 @@ impl Shell {
 	}
 
 	/// A compact track line: cover, title, artists. `key` is its index in `State.upcoming`
-	/// (`usize::MAX`: now playing). Rows the user queued can be removed and dragged to reorder.
+	/// (`usize::MAX`: now playing). Every upcoming row can be removed and dragged to a new place.
 	fn queue_row(&self, key: usize, e: &Entity, current: bool, cx: &mut Context<'_, Self>) -> AnyElement {
-		let mine = !current && self.st().upcoming.get(key).is_some_and(|q| q.source == "queue");
+		let mine = !current;
 		let name = e.name().to_owned();
 		let playing = current && self.st().playing();
 		let url = e.cover(CoverSize::Small).map(str::to_owned);
@@ -364,7 +375,7 @@ impl Shell {
 					}),
 				)))
 			})
-			// The user's queued songs reorder by dragging, as in Spotify's queue.
+			// Upcoming songs reorder by dragging, as in Spotify's queue.
 			.when(mine, |row| {
 				row.on_drag(crate::components::DraggedQueue { from: key, title: name }, |d, _, _, cx| cx.new(|_| d.clone()))
 					.drag_over::<crate::components::DraggedQueue>(|s, _, _, _| s.border_t_2().border_color(theme::accent()))
@@ -384,10 +395,40 @@ impl Shell {
 		}
 		let item = st.item.clone();
 		let context = st.context.name().to_owned();
-		let upcoming = st.upcoming.clone();
-		let (mine, rest): (Vec<_>, Vec<_>) = upcoming.iter().enumerate().take(QUEUE_SHOWN).partition(|(_, q)| q.source == "queue");
-		let mine: Vec<_> = mine.iter().map(|(i, q)| self.queue_row(*i, &q.item, false, cx)).collect();
-		let rest: Vec<_> = rest.iter().map(|(i, q)| self.queue_row(*i, &q.item, false, cx)).collect();
+		let upcoming: Vec<_> = st.upcoming.iter().take(QUEUE_SHOWN).map(|q| (q.source == "queue", q.item.clone())).collect();
+		// In playback order, a heading wherever the source changes ("Next in queue" for what the
+		// user queued, "Next from …" for the context), so a row dragged across sections lands
+		// where it will play.
+		let mut sections: Vec<AnyElement> = Vec::new();
+		let mut last: Option<bool> = None;
+		for (i, (queued, entity)) in upcoming.iter().enumerate() {
+			if last != Some(*queued) {
+				sections.push(if *queued {
+					div()
+						.flex()
+						.items_center()
+						.justify_between()
+						.child(heading("Next in queue"))
+						.child(
+							div()
+								.id(("queue-clear", i))
+								.px_2()
+								.text_size(px(14.))
+								.font_weight(FontWeight::BOLD)
+								.text_color(theme::subdued())
+								.hover(|s| s.text_color(theme::text()))
+								.cursor_pointer()
+								.on_click(cx.listener(|this, _, _, cx| this.send(Msg::QueueClear, cx)))
+								.child("Clear queue"),
+						)
+						.into_any_element()
+				} else {
+					heading(if context.is_empty() { "Next up".to_owned() } else { format!("Next from: {context}") }).into_any_element()
+				});
+				last = Some(*queued);
+			}
+			sections.push(self.queue_row(i, entity, false, cx));
+		}
 		div()
 			.flex()
 			.flex_col()
@@ -395,26 +436,7 @@ impl Shell {
 			.pb_4()
 			.child(heading("Now playing"))
 			.child(self.queue_row(usize::MAX, &item, true, cx))
-			.when(!mine.is_empty(), |s| {
-				s.child(
-					div().flex().items_center().justify_between().child(heading("Next in queue")).child(
-						div()
-							.id("queue-clear")
-							.px_2()
-							.text_size(px(14.))
-							.font_weight(FontWeight::BOLD)
-							.text_color(theme::subdued())
-							.hover(|s| s.text_color(theme::text()))
-							.cursor_pointer()
-							.on_click(cx.listener(|this, _, _, cx| this.send(Msg::QueueClear, cx)))
-							.child("Clear queue"),
-					),
-				)
-				.children(mine)
-			})
-			.when(!rest.is_empty(), |s| {
-				s.child(heading(if context.is_empty() { "Next up".to_owned() } else { format!("Next from: {context}") })).children(rest)
-			})
+			.children(sections)
 			.into_any_element()
 	}
 

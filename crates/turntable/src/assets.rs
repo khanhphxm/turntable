@@ -1,87 +1,106 @@
-//! Bundled assets: turntable's own icons (`assets/icons/<name>.svg`, one 24 px grid, 2 px round
-//! strokes in `currentColor`), with GPUI Kit's icon set behind them for the components that ask
-//! for theirs.
+//! Bundled assets: Lucide icons (only those named below are embedded), the app icon and a few
+//! filled glyphs of turntable's own, with GPUI Kit's component icons behind them.
 
 use std::borrow::Cow;
 
 use gpui_kit::{AssetSource, Result, SharedString};
 
-/// One list names every icon: the enum, its asset path and the embedded bytes stay in step.
+/// One list names every icon: Lucide's (from GPUI Kit's bundled set, only these embedded) and the
+/// few turntable draws itself, filled as Spotify's transport and heart are.
 macro_rules! icons {
-	($($variant:ident => $file:literal),* $(,)?) => {
+	(lucide { $($lv:ident => $lucide:ident),* $(,)? } own { $($ov:ident => $file:literal),* $(,)? }) => {
 		/// The bundled icons.
 		#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-		#[expect(dead_code, reason = "used by upcoming views")]
-		pub enum Icon { $($variant),* }
+		pub enum Icon { $($lv,)* $($ov,)* }
 
 		impl Icon {
-			pub const fn path(self) -> &'static str {
-				match self { $(Self::$variant => concat!("icons/", $file, ".svg")),* }
+			pub fn path(self) -> SharedString {
+				match self {
+					$(Self::$lv => gpui_kit::assets::IconName::$lucide.path(),)*
+					$(Self::$ov => SharedString::new_static(concat!("icons/", $file, ".svg")),)*
+				}
 			}
 		}
 
-		const OWN: &[(&str, &[u8])] = &[$((concat!("icons/", $file, ".svg"), include_bytes!(concat!("../assets/icons/", $file, ".svg")))),*];
+		gpui_kit::assets::icon_assets!(Lucide, [$($lucide),*]);
+
+		const OWN: &[(&str, &[u8])] = &[
+			("icons/app.svg", include_bytes!("../assets/icons/app.svg")),
+			$((concat!("icons/", $file, ".svg"), include_bytes!(concat!("../assets/icons/", $file, ".svg")))),*
+		];
 	};
 }
 
 icons! {
-	App => "app",
-	Back => "back",
-	Bell => "bell",
-	Check => "check",
-	Clock => "clock",
-	Close => "close",
-	Collapse => "collapse",
-	Computer => "computer",
-	Device => "device",
-	Disc => "disc",
-	Down => "down",
-	Ellipsis => "ellipsis",
-	Expand => "expand",
-	External => "external",
-	Folder => "folder",
-	Forward => "forward",
-	Fullscreen => "fullscreen",
-	Gear => "gear",
-	Globe => "globe",
-	Heart => "heart",
-	Home => "home",
-	Library => "library",
-	Lock => "lock",
-	Mic => "mic",
-	Miniplayer => "miniplayer",
-	Moon => "moon",
-	Music => "music",
-	Mute => "mute",
-	Next => "next",
-	Offline => "offline",
-	NowPlaying => "now-playing",
-	PanelClose => "panel-close",
-	Pause => "pause",
-	Pencil => "pencil",
-	Phone => "phone",
-	Pin => "pin",
-	Play => "play",
-	Plus => "plus",
-	Prev => "prev",
-	Queue => "queue",
-	Repeat => "repeat",
-	RepeatOne => "repeat-one",
-	Save => "save",
-	Search => "search",
-	Share => "share",
-	Shuffle => "shuffle",
-	SidebarClose => "sidebar-close",
-	SidebarOpen => "sidebar-open",
-	Sliders => "sliders",
-	Speaker => "speaker",
-	Tv => "tv",
-	User => "user",
-	ViewCompact => "view-compact",
-	ViewGrid => "view-grid",
-	ViewLarge => "view-large",
-	ViewList => "view-list",
-	Volume => "volume",
+	lucide {
+		Back => ChevronLeft,
+		Check => Check,
+		Clock => Clock3,
+		Close => X,
+		Collapse => Minimize2,
+		Computer => Laptop,
+		Device => MonitorSpeaker,
+		Disc => Disc3,
+		Ellipsis => Ellipsis,
+		Expand => Maximize2,
+		Folder => Folder,
+		Forward => ChevronRight,
+		Fullscreen => Maximize,
+		Gear => Settings,
+		Home => House,
+		MenuAddTo => ListPlus,
+		MenuAlbum => Disc3,
+		MenuArtist => UserRound,
+		MenuChevron => ChevronRight,
+		MenuCollab => UsersRound,
+		MenuDelete => CircleMinus,
+		MenuEdit => Pencil,
+		MenuExclude => CircleX,
+		MenuFolder => Folder,
+		MenuLink => Link,
+		MenuNext => ListStart,
+		MenuNewPlaylist => ListMusic,
+		MenuPin => Pin,
+		MenuPlus => Plus,
+		MenuPublic => Globe,
+		MenuQueue => ListEnd,
+		MenuRemove => CircleCheck,
+		MenuShare => Share,
+		Mic => Mic,
+		Miniplayer => PictureInPicture2,
+		Music => Music,
+		Mute => VolumeX,
+		Offline => WifiOff,
+		PanelClose => PanelRightClose,
+		Pencil => Pencil,
+		Phone => Smartphone,
+		Pin => Pin,
+		Plus => Plus,
+		Queue => ListMusic,
+		Repeat => Repeat,
+		RepeatOne => Repeat1,
+		Save => CirclePlus,
+		Search => Search,
+		Share => Share,
+		Shuffle => Shuffle,
+		SidebarClose => PanelLeftClose,
+		SidebarOpen => PanelLeftOpen,
+		Sliders => SlidersHorizontal,
+		Speaker => Speaker,
+		Tv => Tv,
+		ViewCompact => Rows3,
+		ViewGrid => LayoutGrid,
+		ViewLarge => LayoutList,
+		ViewList => List,
+		Volume => Volume2,
+	}
+	own {
+		Heart => "heart",
+		Next => "next",
+		Pause => "pause",
+		Play => "play",
+		Prev => "prev",
+	}
 }
 
 pub struct Assets;
@@ -91,12 +110,18 @@ impl AssetSource for Assets {
 		if let Some((_, bytes)) = OWN.iter().find(|(p, _)| *p == path) {
 			return Ok(Some(Cow::Borrowed(bytes)));
 		}
+		if let Some(bytes) = Lucide.load(path)? {
+			return Ok(Some(bytes));
+		}
 		gpui_kit::assets::Assets.load(path)
 	}
 
 	fn list(&self, path: &str) -> Result<Vec<SharedString>> {
 		let mut all: Vec<SharedString> = OWN.iter().filter(|(p, _)| p.starts_with(path)).map(|(p, _)| (*p).into()).collect();
+		all.extend(Lucide.list(path)?);
 		all.extend(gpui_kit::assets::Assets.list(path)?);
+		all.sort();
+		all.dedup();
 		Ok(all)
 	}
 }

@@ -50,13 +50,13 @@ fn edit_playlist_loads_missing_details_and_ignores_a_closed_dialog() {
 	assert!(matches!(state.update(Msg::EditPlaylist("own".into())).as_slice(),
 		[Effect::Library(library::Request::PlaylistDetails(id))] if id == "own"));
 	let mut response = Response::PlaylistDetails(playlist("own", "me"));
-	state.apply_library_dialog(&mut response);
+	assert!(state.apply_library_dialog(&mut response).is_none());
 	assert_eq!(state.name_input, "Playlist own");
 	assert_eq!(state.public_input, Some(false));
 	assert_eq!(state.library.route, Route::Album("current".into()));
 	state.update(Msg::EditPlaylist("missing".into()));
 	state.update(Msg::CloseDialog);
-	state.apply_library_dialog(&mut Response::PlaylistDetails(playlist("missing", "me")));
+	assert!(state.apply_library_dialog(&mut Response::PlaylistDetails(playlist("missing", "me"))).is_none());
 	assert!(state.dialog.is_none());
 }
 
@@ -149,18 +149,24 @@ fn add_context_to_playlist_opens_only_its_own_completed_response() {
 	assert!(matches!(state.update(Msg::AddContextToPlaylist(route.clone())).as_slice(),
 		[Effect::Library(library::Request::AddContextToPlaylist(target))] if target == &route));
 	assert!(state.dialog.is_none());
-	state.apply_library_dialog(&mut Response::ContextToPlaylist(Route::Album("stale".into()), Vec::new(), "Stale".into()));
+	assert!(
+		state.apply_library_dialog(&mut Response::ContextToPlaylist(Route::Album("stale".into()), Vec::new(), "Stale".into())).is_none()
+	);
 	assert!(state.dialog.is_none());
-	state.apply_library_dialog(&mut Response::ContextToPlaylist(
-		route.clone(),
-		vec!["spotify:track:a".into(), "spotify:track:a".into()],
-		"Source".into(),
-	));
+	assert!(
+		state
+			.apply_library_dialog(&mut Response::ContextToPlaylist(
+				route.clone(),
+				vec!["spotify:track:a".into(), "spotify:track:a".into()],
+				"Source".into(),
+			))
+			.is_none()
+	);
 	assert!(matches!(state.dialog, Some(Dialog::AddToPlaylist { ref uris, ref label }) if uris.len() == 2 && label == "Source"));
 	assert_eq!(state.library.route, Route::Album("current".into()));
 	state.update(Msg::AddContextToPlaylist(route.clone()));
 	state.update(Msg::CloseDialog);
-	state.apply_library_dialog(&mut Response::ContextToPlaylist(route, Vec::new(), "Late".into()));
+	assert!(state.apply_library_dialog(&mut Response::ContextToPlaylist(route, Vec::new(), "Late".into())).is_none());
 	assert!(state.dialog.is_none());
 }
 
@@ -173,61 +179,6 @@ fn collaborative_toggle_is_item_specific_and_owner_only() {
 	assert!(state.update(Msg::SetCollaborative("other".into(), true)).is_empty());
 	assert!(!state.library.playlists[1].collaborative);
 	assert_eq!(state.library.route, Route::Album("current".into()));
-}
-
-#[test]
-fn folder_creation_and_existing_inline_rename_submit_and_cancel_without_navigation() {
-	let mut state = state();
-	assert!(matches!(state.update(Msg::CreateFolder).as_slice(), [Effect::Library(library::Request::CreateFolder)]));
-	state.library.rootlist = vec![library::RootEntry::Folder(library::Folder {
-		id:       "folder".into(),
-		name:     "New Folder".into(),
-		count:    0,
-		children: Vec::new(),
-	})];
-	state.apply_library_dialog(&mut Response::FolderCreated { id: "folder".into(), name: "New Folder".into() });
-	assert!(matches!(state.dialog, Some(Dialog::RenameFolder { ref id, ref name }) if id == "folder" && name == "New Folder"));
-	assert!(state.field_visible(Field::PlaylistName));
-	assert!(!state.field_visible(Field::PlaylistDescription));
-	state.name_input = "  Renamed Folder  ".into();
-	assert!(
-		matches!(state.update(Msg::Submit).as_slice(), [Effect::Library(library::Request::RenameFolder(id, name))] if id == "folder" && name == "Renamed Folder")
-	);
-	assert!(state.dialog.is_none());
-	assert!(state.update(Msg::StartRenameFolder("folder".into())).is_empty());
-	assert_eq!(state.name_input, "New Folder");
-	assert_eq!(state.focus, Some(Field::PlaylistName));
-	state.name_input = "Saved inline".into();
-	assert!(
-		matches!(state.update(Msg::SaveRename).as_slice(), [Effect::Library(library::Request::RenameFolder(id, name))] if id == "folder" && name == "Saved inline")
-	);
-	state.update(Msg::StartRenameFolder("folder".into()));
-	assert!(state.update(Msg::CloseDialog).is_empty());
-	assert!(state.dialog.is_none());
-	assert_eq!(state.focus, None);
-	assert_eq!(state.library.route, Route::Album("current".into()), "inline rename does not navigate");
-}
-
-#[test]
-fn folder_expansion_move_and_delete_emit_item_specific_requests_without_navigation() {
-	let mut state = state();
-	state.library.rootlist = vec![library::RootEntry::Folder(library::Folder {
-		id:       "folder".into(),
-		name:     "Folder".into(),
-		count:    0,
-		children: Vec::new(),
-	})];
-	assert!(matches!(state.update(Msg::ToggleFolder("folder".into())).as_slice(), [Effect::Library(
-		library::Request::SetFolderExpanded { expanded: true, .. }
-	)]));
-	assert!(state.library.folder_expanded("folder"));
-	assert!(matches!(state.update(Msg::MoveToFolder { uri: "spotify:playlist:own".into(), folder: Some("folder".into()) }).as_slice(), [
-		Effect::Library(library::Request::MoveToFolder { .. })
-	]));
-	assert!(
-		matches!(state.update(Msg::DeleteFolder("folder".into())).as_slice(), [Effect::Library(library::Request::DeleteFolder(id))] if id == "folder")
-	);
-	assert_eq!(state.library.route, Route::Album("current".into()), "folder menu actions do not navigate");
 }
 
 #[test]
@@ -262,8 +213,28 @@ fn an_older_request_error_cannot_cancel_the_new_context_dialog() {
 	state.update(Msg::AddContextToPlaylist(Route::Album("old".into())));
 	let current = Route::Playlist("own".into());
 	state.update(Msg::AddContextToPlaylist(current.clone()));
-	state.apply_library_dialog(&mut Response::Error { route: None, message: "Older album failed".into() });
+	assert!(state.apply_library_dialog(&mut Response::Error { route: None, message: "Older album failed".into() }).is_none());
 	let mut response = Response::ContextToPlaylist(current, vec!["spotify:track:current".into()], "Current".into());
-	state.apply_library_dialog(&mut response);
+	assert!(state.apply_library_dialog(&mut response).is_none());
 	assert!(matches!(state.dialog, Some(Dialog::AddToPlaylist { ref label, .. }) if label == "Current"));
+}
+
+#[test]
+fn chosen_context_target_is_retained_until_uris_resolve_without_opening_picker() {
+	for target in [Some("own".to_owned()), None] {
+		let mut state = state();
+		let route = Route::Album("source".into());
+		state.update(Msg::AddContextToPlaylist(route.clone()));
+		assert!(state.update(Msg::AddToPlaylist(target.clone())).is_empty());
+		let request =
+			state.apply_library_dialog(&mut Response::ContextToPlaylist(route, vec!["track".into(), "track".into()], "Source".into()));
+		match target {
+			Some(_) => {
+				assert!(matches!(request, Some(library::Request::AddToPlaylist(id, _, uris)) if id == "own" && uris == ["track", "track"]));
+			},
+			None => assert!(matches!(request, Some(library::Request::CreatePlaylist(_, uris)) if uris == ["track", "track"])),
+		}
+		assert!(state.dialog.is_none());
+		assert!(state.pending_library_dialog.is_none());
+	}
 }

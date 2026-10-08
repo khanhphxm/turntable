@@ -325,7 +325,7 @@ fn an_album_carries_its_first_page_of_tracks() {
 fn a_conditional_get_sends_if_none_match_and_reads_a_304() {
 	let (base, seen, handle) = mock(vec![reply("304 Not Modified", "ETag: \"abc\"\r\n", "")]);
 	let url = format!("{base}/x");
-	let req = Req { method: Method::Get, url: &url, query: &[], bearer: None, form: None, json: None, limit: 1024 };
+	let req = Req { method: Method::Get, url: &url, query: &[], bearer: None, json: None, limit: 1024 };
 	let got = Http::new().send_conditional(&req, Some("\"abc\"")).unwrap();
 	handle.join().unwrap();
 	assert!(got.not_modified && got.body.is_empty());

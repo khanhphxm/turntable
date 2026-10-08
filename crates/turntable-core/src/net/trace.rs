@@ -13,6 +13,12 @@
 //!   The worker's `served` mark closes the complete request including optional enrichment.
 //!   The read-only `route-load` example adds `bench`, `first-content`, `full-content` and
 //!   `first-decoded-cover` marks; its content times measure core delivery, not UI painting.
+//! - `k:"playback"`: `stage` distinguishes `msg`, `command`, `engine-command`, `player-event`
+//!   (the decoder's independent trace tap), `forward-event`, `ui-wake`, `optimistic-state`,
+//!   `state` and `rollback-state`. `connect-event`/`connect-state` measure Dealer pushes from
+//!   other devices. `position_ms` anchors the same timeline; details never contain track URIs.
+//!   Subtract timestamps within one process to locate command, metadata or host wake delays.
+//!   A host may add `ui-pump`/paint marks; a wake is scheduling, not proof of rendered pixels.
 //!
 //! `t` is milliseconds since the process started and `th` the thread.
 
@@ -133,6 +139,15 @@ pub fn hit(what: &str, key: &str, via: &str) {
 pub fn mark(name: &str, detail: &str) {
 	if let Some(sink) = SINK.as_ref() {
 		sink.line(&format!(r#""k":"mark","n":{},"d":{}"#, json(name), json(detail)));
+	}
+}
+
+/// Playback boundaries: message, engine command, decoder event, state and host wake.
+/// Details are fixed labels, never track URIs or account/device identifiers.
+pub fn playback(stage: &str, detail: &str, position_ms: Option<f64>) {
+	if let Some(sink) = SINK.as_ref() {
+		let position = position_ms.map_or_else(|| "null".to_owned(), |ms| format!("{ms:.1}"));
+		sink.line(&format!(r#""k":"playback","stage":{},"d":{},"position_ms":{position}"#, json(stage), json(detail)));
 	}
 }
 

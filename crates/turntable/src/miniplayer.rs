@@ -9,6 +9,7 @@ use gpui_kit::{
 };
 use turntable_core::{
 	Msg,
+	app::clock,
 	engine::{CoverSize, Repeat},
 };
 
@@ -252,11 +253,6 @@ impl Render for MiniPlayer {
 					}),
 			)
 	}
-}
-
-fn clock(ms: u64) -> String {
-	let s = ms / 1000;
-	format!("{}:{:02}", s / 60, s % 60)
 }
 
 /// The handle the shell keeps to close it again.

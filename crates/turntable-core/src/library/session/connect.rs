@@ -1,12 +1,12 @@
 //! Worker Connect requests use the player's pushed cluster and native commands.
 //! Missing/stopped session state is an error, never a reason to spend Web API quota.
 
-use super::{Reader, network, tracks};
+use super::{Reader, tracks};
 use crate::spotify::{self, Device, PlayContext, Playback, PlayerCommand, RepeatMode};
 
 impl Reader {
 	pub(in crate::library) fn devices(&self) -> spotify::Result<Vec<Device>> {
-		self.shared.devices().map_err(network)
+		self.shared.devices().map_err(spotify::Error::from)
 	}
 
 	pub(in crate::library) fn playback(&self) -> spotify::Result<Option<Playback>> {
@@ -16,7 +16,11 @@ impl Reader {
 		};
 		let Some(player) = cluster.player_state.as_ref() else { return Ok(None) };
 		let item = if let Some(track) = player.track.as_ref().filter(|track| !track.uri.is_empty()) {
-			self.shared.block_on(tracks(self.shared.session(), std::slice::from_ref(&track.uri), None)).map_err(network)?.into_iter().next()
+			self.shared
+				.block_on(tracks(self.shared.session(), std::slice::from_ref(&track.uri), None))
+				.map_err(spotify::Error::from)?
+				.into_iter()
+				.next()
 		} else {
 			None
 		};
@@ -48,10 +52,10 @@ impl Reader {
 	}
 
 	pub(in crate::library) fn transfer(&self, device: &str, play: bool) -> spotify::Result<()> {
-		self.shared.transfer(device, play).map_err(network)
+		self.shared.transfer(device, play).map_err(spotify::Error::from)
 	}
 
 	pub(in crate::library) fn control(&self, device: &str, command: PlayerCommand) -> spotify::Result<()> {
-		self.shared.control(device, command).map_err(network)
+		self.shared.control(device, command).map_err(spotify::Error::from)
 	}
 }

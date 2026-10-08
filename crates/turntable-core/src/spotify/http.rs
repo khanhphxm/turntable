@@ -55,7 +55,6 @@ pub struct Req<'a> {
 	pub url:    &'a str,
 	pub query:  &'a [(&'a str, &'a str)],
 	pub bearer: Option<&'a str>,
-	pub form:   Option<&'a [(&'a str, &'a str)]>,
 	/// JSON request body (PUT/POST only).
 	pub json:   Option<&'a str>,
 	/// Maximum response body size in bytes.
@@ -205,15 +204,8 @@ impl Http {
 		Self::default()
 	}
 
-	/// Sends `req` and returns the body of a 2xx response. A plain 429 on a GET is retried once
-	/// after the advertised `Retry-After` (capped at [`MAX_RETRY_WAIT`]); everything else is
-	/// classified into an [`Error`].
-	pub fn send(&self, req: &Req<'_>) -> Result<Vec<u8>> {
-		self.send_conditional(req, None).map(|fetched| fetched.body)
-	}
-
-	/// [`Self::send`] for a copy the caller holds under `etag`: an answer with `not_modified`
-	/// says it is current.
+	/// Sends a conditional request. A plain 429 GET is retried once within `MAX_RETRY_WAIT`;
+	/// `not_modified` means the caller's cached `etag` remains current.
 	pub fn send_conditional(&self, req: &Req<'_>, etag: Option<&str>) -> Result<Fetched> {
 		let mut retried = false;
 		loop {
@@ -289,10 +281,9 @@ impl Http {
 				if let Some(token) = req.bearer {
 					b = b.header("Authorization", format!("Bearer {token}"));
 				}
-				match (req.form, req.json) {
-					(Some(form), _) => b.send_form(form.iter().copied()),
-					(None, Some(json)) => b.header("Content-Type", "application/json").send(json),
-					(None, None) => b.send_empty(),
+				match req.json {
+					Some(json) => b.header("Content-Type", "application/json").send(json),
+					None => b.send_empty(),
 				}
 				.map_err(transport)?
 			},
@@ -309,6 +300,32 @@ impl Http {
 			Err(classify(status, retry_after.as_deref(), &body))
 		}
 	}
+}
+/// Decodes `%XX` escapes and `+` as space (query strings). Invalid escapes pass through.
+pub fn urldecode(s: &str) -> String {
+	let mut bytes = s.bytes();
+	let mut out = Vec::with_capacity(s.len());
+	while let Some(b) = bytes.next() {
+		match b {
+			b'+' => out.push(b' '),
+			b'%' => {
+				// Look two bytes ahead without consuming them: an invalid escape passes through as it is.
+				let mut ahead = bytes.clone();
+				if let (Some(hi), Some(lo)) = (ahead.next().and_then(hex), ahead.next().and_then(hex)) {
+					out.push(hi << 4 | lo);
+					bytes = ahead;
+				} else {
+					out.push(b'%');
+				}
+			},
+			b => out.push(b),
+		}
+	}
+	String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex(b: u8) -> Option<u8> {
+	char::from(b).to_digit(16).and_then(|d| u8::try_from(d).ok())
 }
 
 #[derive(Deserialize, Default)]

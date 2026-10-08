@@ -6,12 +6,12 @@ use gpui_kit::{
 };
 use turntable_core::{
 	Msg, Panel, Route,
+	app::clock,
 	engine::{CoverSize, Repeat},
 	spotify::id_of,
 };
 
 use crate::{
-	components::clock,
 	shell::{Shell, Side},
 	theme,
 	widgets::{Icon, added_badge, cover, icon, icon_button},

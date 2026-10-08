@@ -26,7 +26,19 @@ fn premium_signout_detaches_library_session_and_removes_account_caches_without_a
 	std::fs::write(library_cache.join("alice.json"), b"private account cache").unwrap();
 	let mut refresh_added = true;
 	stop.send_replace(true);
-	serve(directory.path(), &snapshots, &mut session, &mut player, &mut added, &mut refresh_added, false, Request::ForgetSnapshot, &|_| {});
+	serve(
+		RequestContext {
+			config:        directory.path(),
+			snapshots:     &snapshots,
+			session:       &mut session,
+			player:        &mut player,
+			added:         &mut added,
+			refresh_added: &mut refresh_added,
+			web_api:       false,
+			deliver:       &|_| {},
+		},
+		Request::ForgetSnapshot,
+	);
 	assert!(session.is_none());
 	assert!(player.is_none());
 	assert!(!refresh_added);

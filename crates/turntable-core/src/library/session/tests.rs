@@ -144,12 +144,6 @@ fn rootlist_keeps_followed_and_owned_playlists_but_not_folders_or_errors() {
 }
 
 #[test]
-fn rootlist_does_not_infer_privacy_from_profile_publication() {
-	let meta = MetaItem::default();
-	assert_eq!(root_playlist("spotify:playlist:0000000000000000000001", &meta).unwrap().public, None);
-}
-
-#[test]
 fn page_offsets_count_raw_entries_not_resolved_metadata_rows() {
 	let raw: Vec<_> = (0..121).collect();
 	assert_eq!(window(&raw, 100, 50).len(), 21);
@@ -298,6 +292,7 @@ fn playlist_added_attributes_survive_metadata_deduplication_and_unavailable_rows
 	let mut listing = crate::library::Listing::default();
 	super::super::pages::take_session_page(&mut listing, rows);
 	assert_eq!(listing.tracks.iter().map(|row| row.uri.as_str()).collect::<Vec<_>>(), [a, a, b]);
+	assert_eq!(listing.positions, [0, 2, 3]);
 	assert_eq!(listing.added_at, [Some(1_781_001_234), Some(1_781_001_235), None]);
 	assert_eq!(listing.added_by(0).as_deref(), Some("alex"));
 	assert_eq!(listing.added_by(1).as_deref(), Some("bo"));
@@ -318,5 +313,6 @@ fn liked_added_attributes_keep_collection_seconds_and_skip_missing_metadata() ->
 	let rows = super::added_page(rows, items.iter().map(|item| (item.uri.as_str(), Some(item.added_at), None)), 0, 2);
 	assert_eq!(rows.added_at, [Some(456)]);
 	assert_eq!(rows.added_by, [None]);
+	assert_eq!(rows.positions, [1]);
 	Ok(())
 }

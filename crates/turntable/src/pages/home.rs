@@ -4,7 +4,7 @@ use gpui_kit::{
 	AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _,
 	Styled as _, div, linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px, rgb,
 };
-use turntable_core::{Msg, library::Tile};
+use turntable_core::library::Tile;
 
 use crate::{
 	shell::Shell,
@@ -31,11 +31,7 @@ impl Shell {
 		let hovered = t.route.clone();
 		div()
 			.id(("pick", i))
-			.on_hover(cx.listener(move |this, over: &bool, _, cx| {
-				if *over {
-					this.send(Msg::Prefetch(hovered.clone()), cx);
-				}
-			}))
+			.on_hover(cx.listener(move |this, over: &bool, _, cx| this.prefetch_on_hover(&hovered, *over, cx)))
 			.group("pick")
 			.h(px(64.))
 			.min_w_0()
@@ -77,7 +73,7 @@ impl Shell {
 									.items_center()
 									.justify_center()
 									.group_hover("pick", |s| s.invisible())
-									.child(eq_bars(("pick-bars", i), px(16.))),
+									.child(eq_bars("pick-bars", px(16.))),
 							)
 						})
 						.child(div().absolute().inset_0().invisible().group_hover("pick", |s| s.visible()).child(play_disc(
@@ -106,18 +102,18 @@ impl Shell {
 				quick.push(t);
 			}
 		}
-		let recents = h.recents.clone();
-		let followed = h.followed.clone().unwrap_or_default();
-		let albums = h.albums.clone();
-		let playlists: Vec<Tile> = lib.playlists.iter().map(Tile::playlist).collect();
+		let recents = h.recents.as_slice();
+		let followed = h.followed.as_deref().unwrap_or_default();
+		let albums = h.albums.as_slice();
+		let playlists: Vec<Tile> = lib.playlists.iter().take(self.card_columns()).map(Tile::playlist).collect();
 		let loaded = h.loaded;
 		let picks: Vec<AnyElement> = quick.iter().enumerate().map(|(i, t)| self.quick_pick(i, t, cx)).collect();
 		let tint = self.st().library.listing.as_ref().and_then(|l| l.accent.as_deref()).and_then(theme::parse_hex).unwrap_or(0x0040_4040);
 		let mut shelves: Vec<Div> = Vec::new();
 		for (key, title, tiles) in [
-			("recents", "Recents", &recents),
-			("followed", "Artists you follow", &followed),
-			("albums", "Your albums", &albums),
+			("recents", "Recents", recents),
+			("followed", "Artists you follow", followed),
+			("albums", "Your albums", albums),
 			("playlists", "Your playlists", &playlists),
 		] {
 			if !tiles.is_empty() {

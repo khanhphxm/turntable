@@ -7,7 +7,7 @@ use gpui_kit::{
 };
 use turntable_core::{
 	Msg, Route,
-	library::Tile,
+	library::{RowTarget, Tile},
 	spotify::{SearchResults, Track, id_of, pick_image},
 };
 
@@ -41,10 +41,10 @@ const SUGGESTIONS: usize = 6;
 /// Rows of the "All" list under the top result.
 const MIXED: usize = 12;
 
-/// One match in a mixed list: a song (its row in the results) or a page.
+/// One match in a mixed list: a song addressed by URI or a page.
 #[derive(Clone)]
 enum Hit {
-	Song(usize, Track),
+	Song(Track),
 	Page(Tile),
 }
 
@@ -67,7 +67,7 @@ fn mixed(results: &SearchResults, query: &str, limit: usize) -> Vec<Hit> {
 	let q = query.trim().to_lowercase();
 	let mut out = Vec::new();
 	let exact_artist = results.artists.items.first().is_some_and(|a| a.name.to_lowercase() == q);
-	let mut s = results.tracks.items.iter().enumerate().map(|(i, t)| Hit::Song(i, t.clone()));
+	let mut s = results.tracks.items.iter().cloned().map(Hit::Song);
 	let mut a = results.artists.items.iter().map(|a| Hit::Page(Tile::artist(a)));
 	let mut al = results.albums.items.iter().map(|a| Hit::Page(Tile::album(a)));
 	let mut p = results.playlists.items.iter().map(|p| Hit::Page(Tile::playlist(p)));
@@ -106,7 +106,7 @@ impl Shell {
 	/// What a row's artwork is: an album's cover for songs, the page's own otherwise.
 	fn hit_art(&self, hit: &Hit, size: u32, cx: &mut Context<'_, Self>) -> Div {
 		match hit {
-			Hit::Song(_, t) => {
+			Hit::Song(t) => {
 				let url = t.album.as_ref().and_then(|a| pick_image(&a.images, 64)).map(|i| i.url.clone());
 				crate::widgets::cover(self.image(url.as_deref(), size, cx), theme::RAISED, px(size as f32), px(4.))
 			},
@@ -116,7 +116,7 @@ impl Shell {
 
 	fn hit_text(hit: &Hit) -> (String, String) {
 		match hit {
-			Hit::Song(_, t) => (t.name.clone(), artists(t)),
+			Hit::Song(t) => (t.name.clone(), artists(t)),
 			Hit::Page(t) => (t.title.clone(), if matches!(t.route, Route::Artist(_)) { String::new() } else { t.sub.clone() }),
 		}
 	}
@@ -125,14 +125,14 @@ impl Shell {
 	fn open_hit(&mut self, hit: &Hit, cx: &mut Context<'_, Self>) {
 		let tile = match hit {
 			Hit::Page(t) => Some(t.clone()),
-			Hit::Song(_, t) => Tile::track(t),
+			Hit::Song(t) => Tile::track(t),
 		};
 		if let Some(tile) = tile {
 			self.send(Msg::RememberSearch(tile), cx);
 		}
 		match hit {
 			Hit::Page(t) => self.go(t.route.clone(), cx),
-			Hit::Song(_, t) => {
+			Hit::Song(t) => {
 				if let Some(album) = &t.album {
 					self.send(Msg::OpenTrack { album: id_of(&album.uri).to_owned(), uri: t.uri.clone() }, cx);
 					self.go(Route::Album(id_of(&album.uri).to_owned()), cx);
@@ -343,7 +343,7 @@ impl Shell {
 		}));
 		let page = div().id("search-page").size_full().overflow_y_scroll().px_6().pt_4().pb_8().flex().flex_col().gap_6();
 		let query = self.st().library.query.trim().to_owned();
-		let Some(results) = self.st().library.search.clone().filter(|_| !query.is_empty()) else {
+		let Some(results) = self.st().library.search.as_ref().filter(|_| !query.is_empty()) else {
 			return page.child(
 				div()
 					.pt_16()
@@ -385,7 +385,7 @@ impl Shell {
 		let page = page.child(chips);
 		match filter {
 			Filter::All => {
-				let mut hits = mixed(&results, &query, MIXED + 1).into_iter();
+				let mut hits = mixed(results, &query, MIXED + 1).into_iter();
 				let top = hits.next();
 				let rows: Vec<AnyElement> = hits.enumerate().map(|(i, h)| self.hit_row(i, &h, cx)).collect();
 				page.when_some(top, |s, t| s.child(self.top_banner(&t, cx))).child(div().flex().flex_col().children(rows))
@@ -408,16 +408,19 @@ impl Shell {
 	}
 
 	/// The top result: a wide banner with its art, name and kind, ✓/⊕ for songs and a play disc.
-	fn top_banner(&mut self, hit: &Hit, cx: &mut Context<'_, Self>) -> AnyElement {
+	fn top_banner(&self, hit: &Hit, cx: &mut Context<'_, Self>) -> AnyElement {
 		let (title, sub) = Self::hit_text(hit);
 		let sub = if sub.is_empty() { hit.kind().to_owned() } else { format!("{} • {sub}", hit.kind()) };
 		let round = matches!(hit, Hit::Page(t) if matches!(t.route, Route::Artist(_)));
 		let (playing, play): (bool, Msg) = match hit {
-			Hit::Song(i, t) => (self.st().playing() && self.st().item.uri == t.uri, Msg::PlayRow(*i)),
+			Hit::Song(t) => (
+				self.st().playing() && self.st().item.uri == t.uri,
+				Msg::PlayRow(RowTarget { route: Route::Search, uri: t.uri.clone(), occurrence: None }),
+			),
 			Hit::Page(t) => (self.playing_context(t.play.as_deref()), Msg::PlayContext(t.play.clone().unwrap_or_default())),
 		};
 		let added = match hit {
-			Hit::Song(_, t) => Some((self.st().added(&t.uri), t.uri.clone())),
+			Hit::Song(t) => Some((self.st().added(&t.uri), t.uri.clone())),
 			Hit::Page(_) => None,
 		};
 		let target = hit.clone();
@@ -471,11 +474,11 @@ impl Shell {
 	}
 
 	/// A row of the "All" list: art, name and artists, what it is, and its action.
-	fn hit_row(&mut self, i: usize, hit: &Hit, cx: &mut Context<'_, Self>) -> AnyElement {
+	fn hit_row(&self, i: usize, hit: &Hit, cx: &mut Context<'_, Self>) -> AnyElement {
 		let (title, sub) = Self::hit_text(hit);
 		let round = matches!(hit, Hit::Page(t) if matches!(t.route, Route::Artist(_)));
 		let action: AnyElement = match hit {
-			Hit::Song(_, t) => {
+			Hit::Song(t) => {
 				let (added, uri) = (self.st().added(&t.uri), t.uri.clone());
 				div()
 					.id(("hit-add", i))
@@ -519,8 +522,10 @@ impl Shell {
 			.cursor_pointer()
 			.on_click(cx.listener(move |this, e: &gpui_kit::ClickEvent, _, cx| match &target {
 				// A song plays on double-click, as in every track list; pages open on click.
-				Hit::Song(row, _) if e.click_count() >= 2 => this.send(Msg::PlayRow(*row), cx),
-				Hit::Song(row, _) => this.send(Msg::Select(*row), cx),
+				Hit::Song(track) => {
+					let row = RowTarget { route: Route::Search, uri: track.uri.clone(), occurrence: None };
+					this.send(if e.click_count() >= 2 { Msg::PlayRow(row) } else { Msg::Select(row) }, cx);
+				},
 				Hit::Page(_) => this.open_hit(&target, cx),
 			}))
 			.child(self.hit_art(hit, 48, cx).when(round, |s| s.rounded_full()))

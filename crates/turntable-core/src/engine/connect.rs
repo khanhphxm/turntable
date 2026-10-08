@@ -13,19 +13,26 @@ use crate::{
 };
 
 impl Forward {
-	pub(super) async fn cluster(&mut self, cluster: &Cluster, initial: bool) {
+	pub(super) fn cluster(&mut self, cluster: &Cluster, initial: bool) {
 		let devices = devices_of(cluster);
 		let local_active = cluster.active_device_id == self.session.device_id() && self.state.active;
 		let playback = if !local_active {
 			if let Some(player) = cluster.player_state.as_ref()
 				&& let Some(track) = player.track.as_ref().filter(|track| !track.uri.is_empty())
 			{
-				let mut item = self.track(&track.uri).await;
-				if item.duration_ms() == 0 {
-					item.decorations.playback.duration_ms = u64::try_from(player.duration).unwrap_or_default();
-				}
+				let mut item = super::named(track.uri.clone(), String::new());
+				item.decorations.playback.duration_ms = u64::try_from(player.duration).unwrap_or_default();
 				// Explicit track lists use "-" rather than a playable context URI.
-				let context = self.context(if player.context_uri == "-" { "" } else { &player.context_uri }).await;
+				let uri = if player.context_uri == "-" { "" } else { &player.context_uri };
+				let context = super::named(uri.to_owned(), String::new());
+				if self.state.track != track.uri {
+					self.state.track.clone_from(&track.uri);
+					let _ = self.metadata.send(super::metadata::Request::Track(track.uri.clone()));
+				}
+				if self.state.context != uri {
+					uri.clone_into(&mut self.state.context);
+					let _ = self.metadata.send(super::metadata::Request::Context(uri.to_owned()));
+				}
 				let device = devices.iter().find(|device| device.is_active && device.id != self.session.device_id()).cloned();
 				let status = if device.is_some() && player.is_playing && !player.is_paused { Status::Playing } else { Status::Paused };
 				let position_ms = u64::try_from(player.position_as_of_timestamp).unwrap_or_default();
@@ -57,13 +64,22 @@ impl Forward {
 		} else {
 			None
 		};
+		if let Some(player) = &playback {
+			trace::playback("connect-event", player.status.name(), Some(player.position.position_ms));
+		} else {
+			trace::playback("connect-event", "inactive", None);
+		}
 		(self.deliver)(Incoming::ConnectState(ConnectState { account: self.session.username(), devices, playback, local_active, initial }));
 	}
 
-	pub(super) async fn transfer_device(&mut self, device: &str, play: bool) {
-		if let Err(error) = super::network_timeout(super::NETWORK_TIMEOUT, transfer(&self.session, device, play)).await {
-			(self.deliver)(Incoming::CommandFailed(format!("Couldn't transfer playback: {error}")));
-		}
+	pub(super) fn transfer_device(&self, device: String, play: bool, id: u64) {
+		let session = self.session.clone();
+		let requests = self.requests.clone();
+		tokio::spawn(async move {
+			if let Err(error) = super::network_timeout(super::NETWORK_TIMEOUT, transfer(&session, &device, play)).await {
+				let _ = requests.send(super::Request::Failed { id, message: format!("Couldn't transfer playback: {error}") });
+			}
+		});
 	}
 }
 

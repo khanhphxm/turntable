@@ -8,6 +8,7 @@ Session changes in `src/session.rs` let turntable own the Premium requirement:
 - Add `Session::has_product_info()`, backed by an atomic flag set only after a complete ProductInfo packet's attributes are stored. A missing/unrecognised plan is not evidence of a Free account and never triggers credential deletion.
 - Re-export the existing `AuthenticationError` from `src/lib.rs`, so the application can match Spotify's `PremiumAccountRequired` response without string matching.
 - Remove the now-unfulfilled `#[expect(deprecated)]` on `Credentials::with_blob` in `src/authentication.rs`; no authentication behavior changes.
+- Add an optional `Cache::set_credentials_writer` host hook. turntable serializes atomic/private credential saves with a cancellable account-start authorization; sign-out cancels it before removing credentials, so unfinished OAuth/Spirc authentication cannot recreate the sign-in or overwrite a newer account.
 
 The workspace patches crates.io to this copy. turntable's `engine::SignInError` and application lifecycle enforce the gate; this patch itself neither authorizes playback nor starts it.
 
@@ -15,3 +16,5 @@ The engine gates both browser sign-in and saved-credential startup before publis
 Enable `TURNTABLE_TRACE=/path/to/trace.jsonl` to record the `subscription` mark, including raw `type`/`product`, `has_product_info`, and the acceptance outcome. Timeout/disconnected acceptance is marked `unconfirmed=true`. No account name or credential is logged by this mark.
 
 The controller handles a refusal as sign-out: stop Spirc/audio and cancel session reads, detach the library session, remove saved credentials and account-scoped library snapshot/playlist-index caches, and return to welcome. `State::notice` contains the explanation, while `State::sign_in_error: Option<engine::SignInError>` persists independently of unrelated queued events. Render `error.message()` and offer an Upgrade action via `Msg::OpenUrl(error.upgrade_url().into())`; the URL is `https://www.spotify.com/premium/`. A new sign-in clears the error. Display name, session account ID or saved credential username is included when available.
+
+Sign-out and Premium rejection share one account teardown. All account-scoped state is reset immediately while device preferences remain. Library requests, startup/player events and lyrics carry an account generation; stale queued/in-flight work cannot restore UI data or re-enable snapshot persistence. Startup authorization cancellation also guards the native credential cache write itself, rather than merely discarding the eventual engine response.

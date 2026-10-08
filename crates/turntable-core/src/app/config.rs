@@ -1,20 +1,16 @@
 //! Application filesystem locations and user-provided secrets.
 //!
 //! - config/state: Windows `%APPDATA%\turntable`; elsewhere `$XDG_CONFIG_HOME/turntable`
-//!   or `~/.config/turntable` (saved player sign-in, Connect device id, `client_id`,
-//!   `settings.json`, account-scoped last positions in `playback/<sha256(account)>.json`,
-//!   account-scoped recent search selections in `recent-searches/<sha256(account)>.json`,
-//!   and the Web API's `token.json` where no OS credential store is used;
-//!   see `crate::spotify::token_store`).
+//!   or `~/.config/turntable` (saved player sign-in, Connect device id,
+//!   `settings.json`, account-scoped last positions in `playback/<sha256(account)>.json`
+//!   and recent search selections in `recent-searches/<sha256(account)>.json`).
 //! - cache: covers and the player's audio files under `player/files`.
 //!   Windows `%LOCALAPPDATA%\turntable`, macOS `~/Library/Caches/turntable`,
 //!   elsewhere `$XDG_CACHE_HOME/turntable` or `~/.cache/turntable`.
 //!
 //! `TURNTABLE_HOME=<dir>` overrides both, on every platform: config is
 //! `<dir>/config`, cache `<dir>/cache`. Isolated test runs point it at a scratch
-//! directory so they never read or write the user's real settings or tokens.
-//! The Spotify Web API token then stays in a file under `<dir>/config`, never
-//! the OS credential store.
+//! directory so they never read or write the user's real settings or credentials.
 
 #[cfg_attr(unix, path = "config/unix.rs")]
 #[cfg_attr(windows, path = "config/windows.rs")]
@@ -71,18 +67,18 @@ impl Paths {
 	}
 }
 
-/// Reads a one-line secret file, trimming surrounding whitespace.
-pub fn read_secret(path: &Path) -> io::Result<String> {
-	let text = fs::read_to_string(path)?;
-	let value = text.trim();
-	if value.is_empty() {
-		return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{} is empty", path.display())));
-	}
-	Ok(value.to_owned())
-}
-
 /// Writes a file readable only by the current user.
 pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+	let tmp = stage_private(path, bytes, true)?;
+	fs::rename(tmp, path)
+}
+
+/// Stages a disposable cache file without a durability flush. The owner commits by rename.
+pub(crate) fn stage_cache(path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+	stage_private(path, bytes, false)
+}
+
+fn stage_private(path: &Path, bytes: &[u8], durable: bool) -> io::Result<PathBuf> {
 	use std::io::Write;
 	let tmp = path.with_extension("tmp");
 	let mut opts = fs::OpenOptions::new();
@@ -90,8 +86,10 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 	platform::private_permissions(&mut opts);
 	let mut file = opts.open(&tmp)?;
 	file.write_all(bytes)?;
-	file.sync_all()?;
-	fs::rename(tmp, path)
+	if durable {
+		file.sync_all()?;
+	}
+	Ok(tmp)
 }
 
 #[cfg(test)]

@@ -1,143 +1,179 @@
 [workspace]
+members = ["crates/turntable", "crates/turntable-core"]
 resolver = "3"
-members = ["crates/turntable-core", "crates/turntable"]
 
 [workspace.package]
 edition = "2024"
-version = "0.1.0"
-rust-version = "1.90"
 license = "MIT"
 repository = "https://github.com/khanhphxm/turntable"
+rust-version = "1.90"
+version = "0.1.0"
 
-# Lints for every crate (`[lints] workspace = true` in each manifest). `scripts/lint.sh` runs clippy
-# with `-D warnings`, so "warn" here means "fails the check" there, while an editor shows a squiggle.
-# To silence a lint at one site use `#[expect(lint, reason = "...")]`, never `#[allow]`: the
-# expectation fails when the lint stops firing, so suppressions cannot outlive their reason.
-# What is deliberately OFF, and why: arithmetic_side_effects, float_arithmetic, as_conversions and
-# default_numeric_fallback (DSP and layout maths would drown in them), cast_precision_loss (usize
-# to f32 for display), unreachable_pub (the library intentionally exposes host-facing APIs),
-# let_underscore_must_use (best-effort cleanup is common; `.ok();` and
-# `map_err(|_|` are denied instead), missing_docs_in_private_items, min_ident_chars,
-# question_mark_used, implicit_return, single_call_fn, shadow_* and the other style-only lints.
+[workspace.dependencies]
+block2 = { version = "0.6" }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Bundle libdbus instead of requiring Linux development headers.
+dbus = { version = "0.9", features = ["vendored"] }
+dbus-crossroads = { version = "0.5" }
+embed-resource = { version = "3.0" }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+gpui-kit = { version = "0.7.3" }
+gpui-test = { package = "gpui-pre", version = "=0.3.9", default-features = false, features = ["test-support"] }
+http = { version = "1" }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+jpeg-decoder = { version = "0.3.2", default-features = false }
+libc = { version = "0.2" }
+librespot-connect = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-core = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-metadata = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-playback = { version = "0.8", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-protocol = { version = "0.8", default-features = false }
+oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
+objc2 = { version = "0.6" }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSImage", "std"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSData", "NSDictionary", "NSString", "NSValue", "block2", "std"] }
+objc2-media-player = { version = "0.3", default-features = false, features = [
+	"MPMediaItem",
+	"MPNowPlayingInfoCenter",
+	"MPRemoteCommand",
+	"MPRemoteCommandCenter",
+	"MPRemoteCommandEvent",
+	"block2",
+	"objc2-app-kit",
+	"objc2-core-foundation",
+	"std",
+] }
+parking_lot = { version = "0.12" }
+protobuf = { version = "3.7" }
+rand = { version = "0.9" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+sha2 = { version = "0.10", default-features = false }
+smallvec = { version = "1" }
+smol = { version = "2" }
+tempfile = { version = "3" }
+thiserror = { version = "2" }
+tikv-jemallocator = { version = "0.7" }
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
+turntable-core = { path = "crates/turntable-core" }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+windows = { version = "0.61", default-features = false, features = ["std"] }
+
+# Curated additions to Clippy defaults: pedantic conflicts with exact DSP comparisons and intentional precision changes.
+# Document genuine exceptions with local #[expect(..., reason = "...")]; never use blanket allows.
 
 [workspace.lints.rust]
-unsafe_op_in_unsafe_fn = "warn"
-unused_crate_dependencies = "warn"
-unused_qualifications = "warn"
-unused_lifetimes = "warn"
-redundant_lifetimes = "warn"
-unused_macro_rules = "warn"
-unused_import_braces = "warn"
+elided_lifetimes_in_paths = "warn"
 redundant_imports = "warn"
-unit_bindings = "warn"
+redundant_lifetimes = "warn"
 trivial_casts = "warn"
 trivial_numeric_casts = "warn"
-elided_lifetimes_in_paths = "warn"
+unit_bindings = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unused_crate_dependencies = "warn"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
+unused_qualifications = "warn"
 
 [workspace.lints.clippy]
-# Nothing in the player aborts on a surprising value: handle it or pass it up.
-unwrap_used = "deny"
+# Failures must be handled, not abort the player or disappear.
+exit = "deny"
 expect_used = "deny"
+indexing_slicing = "warn"
+let_underscore_future = "deny"
+let_underscore_lock = "deny"
+map_err_ignore = "deny"
+mem_forget = "deny"
 panic = "deny"
+string_slice = "deny"
 todo = "deny"
 unimplemented = "deny"
 unreachable = "deny"
-exit = "deny"
-indexing_slicing = "warn"
-string_slice = "deny"
-
-# Errors are handled or passed up, never dropped on the floor.
 unused_result_ok = "deny"
-map_err_ignore = "deny"
-let_underscore_future = "deny"
-let_underscore_lock = "deny"
-mem_forget = "deny"
+unwrap_used = "deny"
 
-# Leftovers: libraries must not write to stdout/stderr; only CLI entry points and
-# explicit log sinks may print.
-dbg_macro = "deny"
-print_stdout = "deny"
-print_stderr = "deny"
-
-# A suppression says why, and goes away when it stops being needed (`#[expect]`, not `#[allow]`).
+# Diagnostics and exemptions belong at explicit, documented sites.
 allow_attributes = "deny"
 allow_attributes_without_reason = "deny"
+dbg_macro = "deny"
+print_stderr = "deny"
+print_stdout = "deny"
+tests_outside_test_module = "deny"
 
-# `unsafe` is explained where it is used.
+# Unsafe operations require safety contracts and explicit pointer conversions.
+borrow_as_ptr = "warn"
+missing_safety_doc = "deny"
+ptr_as_ptr = "warn"
+ref_as_ptr = "warn"
 undocumented_unsafe_blocks = "deny"
 unnecessary_safety_comment = "deny"
 unnecessary_safety_doc = "deny"
-missing_safety_doc = "deny"
-borrow_as_ptr = "warn"
-ptr_as_ptr = "warn"
-ref_as_ptr = "warn"
 
-tests_outside_test_module = "deny"
-
-# `as` that can change a value: use From/TryFrom/clamp, or `#[expect(..., reason = "...")]`.
-cast_possible_truncation = "warn"
-cast_sign_loss = "warn"
-cast_possible_wrap = "warn"
+# Numeric conversions must preserve the intended range and rounding.
 cast_lossless = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_sign_loss = "warn"
 manual_midpoint = "warn"
 
-# Sloppy structure.
-too_many_lines = "warn"
+# Keep control flow, ownership and interfaces easy to follow.
 cognitive_complexity = "warn"
+enum_glob_use = "warn"
 fn_params_excessive_bools = "warn"
-needless_pass_by_value = "warn"
-trivially_copy_pass_by_ref = "warn"
-unnecessary_wraps = "warn"
-unused_self = "warn"
+ignored_unit_patterns = "warn"
 items_after_statements = "warn"
-semicolon_if_nothing_returned = "warn"
+manual_assert = "warn"
 manual_let_else = "warn"
 match_same_arms = "warn"
 match_wildcard_for_single_variants = "warn"
+mut_mut = "warn"
 needless_continue = "warn"
+needless_pass_by_value = "warn"
 redundant_else = "warn"
 ref_option = "warn"
+semicolon_if_nothing_returned = "warn"
+too_many_lines = "warn"
+trivially_copy_pass_by_ref = "warn"
+unnecessary_wraps = "warn"
 unnested_or_patterns = "warn"
-manual_assert = "warn"
-ignored_unit_patterns = "warn"
+unused_self = "warn"
 wildcard_imports = "warn"
-enum_glob_use = "warn"
-mut_mut = "warn"
 
-# Waste.
-redundant_clone = "warn"
-needless_collect = "warn"
+# Avoid redundant allocation, copying and iteration.
+cloned_instead_of_copied = "warn"
 collection_is_never_read = "warn"
+explicit_into_iter_loop = "warn"
+explicit_iter_loop = "warn"
+flat_map_option = "warn"
 implicit_clone = "warn"
 inefficient_to_string = "warn"
-map_unwrap_or = "warn"
-needless_for_each = "warn"
-explicit_iter_loop = "warn"
-explicit_into_iter_loop = "warn"
-cloned_instead_of_copied = "warn"
-flat_map_option = "warn"
-stable_sort_primitive = "warn"
 large_types_passed_by_value = "warn"
-unnecessary_box_returns = "warn"
+map_unwrap_or = "warn"
+needless_collect = "warn"
+needless_for_each = "warn"
 range_plus_one = "warn"
-unreadable_literal = "warn"
+redundant_clone = "warn"
+stable_sort_primitive = "warn"
 uninlined_format_args = "warn"
+unnecessary_box_returns = "warn"
+unreadable_literal = "warn"
 
 # Optimize dependencies so debug desktop builds remain responsive.
 [profile.dev.package."*"]
 opt-level = 2
 
 [profile.release]
-opt-level = 3
-lto = "fat"
 codegen-units = 1
+lto = "fat"
+opt-level = 3
 panic = "abort"
 strip = true
 
 [patch.crates-io]
-# Session attributes must reach the application instead of exiting on non-Premium accounts.
-librespot-core = { path = "vendor/librespot-core" }
-# Spirc with queue access (add to queue, upcoming tracks, context) for the in-process player.
+# Expose Spirc queue state and mutations to the in-process player.
 librespot-connect = { path = "vendor/librespot-connect" }
-# One-worker runtime for the decoder thread (upstream starts one worker per core).
+# Report session attributes instead of exiting on non-Premium accounts.
+librespot-core = { path = "vendor/librespot-core" }
+# Use one decoder runtime worker rather than one per core.
 librespot-playback = { path = "vendor/librespot-playback" }

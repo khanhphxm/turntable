@@ -14,11 +14,12 @@ fn worker(cache: &Path) -> (Worker, mpsc::Receiver<Inbox>, mpsc::Receiver<Respon
 		Worker {
 			tx,
 			snapshots: Arc::new(Mutex::new(store)),
-			deliver: Arc::new(move |response| {
+			deliver: Arc::new(move |_, response| {
 				let _ = answers.send(response);
 			}),
 			prefetches: Mutex::new(Cache::new(snapshot::LISTINGS_KEPT, PAGES_TTL)),
 			urgent: tokio::sync::watch::channel(()).0,
+			generation: Arc::new(AtomicU64::new(0)),
 		},
 		inbox,
 		responses,
@@ -40,7 +41,7 @@ fn saved_authorization_preloads_disk_listing_before_any_session_arrives() {
 	});
 	store.save().unwrap();
 	let (tx, rx) = mpsc::channel();
-	let worker = Worker::spawn(config, directory.path(), false, move |response| {
+	let worker = Worker::spawn(config, directory.path(), false, move |_, response| {
 		let _ = tx.send(response);
 	});
 	assert!(matches!(rx.try_recv(), Ok(Response::Connected { .. })));
@@ -59,24 +60,20 @@ fn duplicate_prefetches_are_bounded_and_expire_without_navigation() {
 	for _ in 0..30 {
 		worker.send(Request::Prefetch(route.clone()));
 	}
-	assert!(matches!(inbox.try_recv(), Ok(Inbox::Request(Request::Prefetch(known))) if known == route));
+	assert!(matches!(inbox.try_recv(), Ok(Inbox::Request(0, Request::Prefetch(known))) if known == route));
 	assert!(inbox.try_recv().is_err());
 	assert!(responses.try_recv().is_err());
 	worker.send(Request::Prefetch(Route::Search));
 	worker.send(Request::Prefetch(Route::Library));
 	worker.send(Request::Prefetch(Route::Folder("folder".into())));
 	assert!(inbox.try_recv().is_err());
-	worker.prefetches.lock().unwrap_or_else(PoisonError::into_inner).insert_at(
-		route.clone(),
-		(),
-		Instant::now().checked_sub(PAGES_TTL).unwrap(),
-	);
+	worker.prefetches.lock().insert_at(route.clone(), (), Instant::now().checked_sub(PAGES_TTL).unwrap());
 	worker.send(Request::Prefetch(route));
-	assert!(matches!(inbox.try_recv(), Ok(Inbox::Request(Request::Prefetch(_)))));
+	assert!(matches!(inbox.try_recv(), Ok(Inbox::Request(0, Request::Prefetch(_)))));
 	for index in 0..100 {
 		worker.send(Request::Prefetch(Route::Playlist(index.to_string())));
 	}
-	assert_eq!(worker.prefetches.lock().unwrap_or_else(PoisonError::into_inner).get_ref(&Route::Playlist("0".into())), None);
+	assert_eq!(worker.prefetches.lock().get_ref(&Route::Playlist("0".into())), None);
 }
 
 #[test]
@@ -102,7 +99,7 @@ fn artist_and_search_snapshots_deliver_before_the_worker_can_read_its_inbox() {
 		..SearchResults::default()
 	};
 	{
-		let mut store = worker.snapshots.lock().unwrap_or_else(PoisonError::into_inner);
+		let mut store = worker.snapshots.lock();
 		store.record(&Response::Listing { route: route.clone(), offset: 0, listing });
 		store.record(&Response::Search { query: "query".into(), results: results.clone() });
 		store.save().unwrap();
@@ -117,9 +114,9 @@ fn artist_and_search_snapshots_deliver_before_the_worker_can_read_its_inbox() {
 	assert_eq!(listing.overview.as_ref().unwrap().biography.as_deref(), Some("Biography"));
 	worker.send(Request::Search(" query ".into()));
 	assert!(matches!(responses.try_recv().unwrap(), Response::Search { query, results: known } if query == "query" && known == results));
-	assert!(matches!(inbox.try_recv(), Ok(Inbox::Request(Request::Open(_, 0)))));
-	assert!(matches!(inbox.try_recv(), Ok(Inbox::Request(Request::Search(_)))));
-	worker.snapshots.lock().unwrap_or_else(PoisonError::into_inner).load(Some("other-account"));
+	assert!(matches!(inbox.try_recv(), Ok(Inbox::Request(0, Request::Open(_, 0)))));
+	assert!(matches!(inbox.try_recv(), Ok(Inbox::Request(0, Request::Search(_)))));
+	worker.snapshots.lock().load(Some("other-account"));
 	worker.send(Request::Search("query".into()));
 	assert!(responses.try_recv().is_err(), "search results must never cross accounts");
 }

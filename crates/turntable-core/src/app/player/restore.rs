@@ -208,20 +208,23 @@ mod tests {
 			let route = library::Route::Album("missing".into());
 			controller.state.update(Msg::Navigate(route.clone()));
 			let failed_page = || {
-				super::super::AppEvent::Library(Box::new(library::Response::Error {
-					route:   Some(route.clone()),
-					message: "Can't reach Spotify. Check your connection.".into(),
-				}))
+				super::super::AppEvent::Library(
+					0,
+					Box::new(library::Response::Error {
+						route:   Some(route.clone()),
+						message: "Can't reach Spotify. Check your connection.".into(),
+					}),
+				)
 			};
 			if error_first {
 				controller.on_event(failed_page());
 			}
-			controller.on_event(super::super::AppEvent::Library(Box::new(library::Response::LastPlayback {
-				account:  "alex".into(),
-				playback: Some(playback()),
-			})));
+			controller.on_event(super::super::AppEvent::Library(
+				0,
+				Box::new(library::Response::LastPlayback { account: "alex".into(), playback: Some(playback()) }),
+			));
 			let anchor_at = controller.state.anchor.at;
-			controller.on_event(super::super::AppEvent::Library(Box::new(library::Response::Offline(true))));
+			controller.on_event(super::super::AppEvent::Library(0, Box::new(library::Response::Offline(true))));
 			controller.on_event(failed_page());
 			assert_eq!(controller.state.item.uri, "spotify:track:last");
 			assert_eq!(controller.state.context.uri, "spotify:playlist:context");

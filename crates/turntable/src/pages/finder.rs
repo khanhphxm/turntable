@@ -41,11 +41,9 @@ impl Shell {
 				let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search for songs"));
 				cx.subscribe(&input, |this, input, e: &InputEvent, cx| {
 					if matches!(e, InputEvent::Change) {
-						// The core runs the search (debounced) for whichever field is focused.
+						// The host field updates the shared debounced query independently of focus/route.
 						let text = input.read(cx).value().to_string();
-						this.send(Msg::Focus(Some(Field::Search)), cx);
-						let old = this.st().library.query.encode_utf16().count();
-						this.send(Msg::Edit { from: 0, to: old, text }, cx);
+						this.send(Msg::SetText(Field::Search, text), cx);
 					}
 				})
 				.detach();
@@ -74,6 +72,7 @@ impl Shell {
 							if let Some(f) = this.finder.as_mut() {
 								f.open = true;
 							}
+							this.invalidate_listing_chrome();
 							cx.notify();
 						}))
 						.child("Find more"),
@@ -82,15 +81,14 @@ impl Shell {
 		}
 		let input = finder.input.clone();
 		let typed = input.read(cx).value().trim().to_owned();
-		let results: Vec<_> = self
+		let results = self
 			.st()
 			.library
 			.search
 			.as_ref()
 			.filter(|_| !typed.is_empty() && self.st().library.query.trim() == typed)
-			.map(|r| r.tracks.items.iter().take(RESULTS).cloned().collect())
-			.unwrap_or_default();
-		let rows: Vec<AnyElement> = results.iter().enumerate().map(|(i, t)| self.finder_row(i, t, playlist, cx)).collect();
+			.map_or(&[][..], |r| r.tracks.items.as_slice());
+		let rows: Vec<AnyElement> = results.iter().take(RESULTS).enumerate().map(|(i, t)| self.finder_row(i, t, playlist, cx)).collect();
 		div()
 			.flex()
 			.flex_col()
@@ -126,6 +124,7 @@ impl Shell {
 							if let Some(f) = this.finder.as_mut() {
 								f.open = false;
 							}
+							this.invalidate_listing_chrome();
 							cx.notify();
 						}),
 					)),

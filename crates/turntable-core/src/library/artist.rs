@@ -25,7 +25,7 @@ pub(super) fn artist_header(s: &mut Session, id: &str, partial: &dyn Fn(Listing)
 		return Ok(listing);
 	}
 	let uri = format!("spotify:artist:{id}");
-	let known = s.artists.get(id).cloned();
+	let known = s.artists.get(id);
 	let client = &s.client;
 	let kinds = vec![("Albums", "album"), ("Singles and EPs", "single"), ("Compilations", "compilation")];
 	// The artist, each group of releases and whether it is followed don't depend on each other: asked
@@ -122,7 +122,7 @@ pub(super) fn popularity(s: &mut Session, id: &str) -> spotify::Result<Popularit
 /// An artist, from the session's cache when it was fetched before.
 pub(super) fn artist(s: &mut Session, id: &str) -> spotify::Result<Artist> {
 	if let Some(a) = s.artists.get(id) {
-		return Ok(a.clone());
+		return Ok(a);
 	}
 	let a = match &mut s.player {
 		Some(player) => player.artist(id)?,

@@ -20,7 +20,7 @@ impl Shell {
 	#[expect(clippy::too_many_lines, reason = "keep the declarative artist page sections together")]
 	pub fn artist_page(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
 		let page = div().id("artist").size_full().overflow_y_scroll();
-		let Some(l) = self.st().library.listing.clone() else {
+		let Some(l) = self.st().library.listing.as_ref() else {
 			return page;
 		};
 		let route = self.st().library.route.clone();
@@ -72,6 +72,7 @@ impl Shell {
 			let fans: Vec<Tile> = o
 				.related
 				.iter()
+				.take(self.card_columns())
 				.map(|r| Tile {
 					route: Route::Artist(r.id.clone()),
 					play:  Some(format!("spotify:artist:{}", r.id)),
@@ -87,6 +88,7 @@ impl Shell {
 			let found: Vec<Tile> = o
 				.discovered_on
 				.iter()
+				.take(self.card_columns())
 				.map(|p| Tile {
 					route: Route::Playlist(p.id.clone()),
 					play:  Some(format!("spotify:playlist:{}", p.id)),
@@ -107,7 +109,7 @@ impl Shell {
 		let cities: Vec<(String, u64)> =
 			o.map(|o| o.cities.iter().take(5).map(|c| (format!("{}, {}", c.name, c.country), c.listeners)).collect()).unwrap_or_default();
 		// Spotify's "Latest release" sits beside Popular: the newest release as a card.
-		let latest = o.and_then(|o| o.latest_release.as_ref()).map(Tile::album);
+		let latest = o.and_then(|o| o.latest_release.as_ref()).filter(|_| self.main_w >= 900.).map(Tile::album);
 		// The name, from whichever source answered first (the listing's, the artist's, the overview's).
 		let name = Some(l.title.clone())
 			.filter(|t| !t.is_empty())
@@ -174,6 +176,8 @@ impl Shell {
 		.child(div().px_3().pt_8().flex().flex_col().gap_8().children(shelves))
 		.when_some(about, |s, text| {
 			let img = header_img.as_deref().and_then(|u| self.image(Some(u), 672, cx));
+			// Reserve the photo's final height before decoding completes, so the page cannot jump.
+			let art_height = if header_img.is_some() { px(320.) } else { px(120.) };
 			s.child(
 				div().px_6().pt_8().pb_10().flex().flex_col().gap_4().child(section_title("About")).child(
 					div()
@@ -183,9 +187,9 @@ impl Shell {
 						.bg(theme::raised())
 						.child(match img {
 							Some(src) => div()
-								.h(px(320.))
+								.h(art_height)
 								.child(gpui_kit::img(src).size_full().object_fit(gpui_kit::ObjectFit::Cover).rounded_t(px(8.))),
-							None => div().h(px(120.)).bg(linear_gradient(
+							None => div().h(art_height).bg(linear_gradient(
 								180.,
 								linear_color_stop(theme::alpha(rgb(tint), 0.6), 0.),
 								linear_color_stop(theme::raised(), 1.),
@@ -233,13 +237,18 @@ impl Shell {
 	/// Cards for `tiles`, ids prefixed with `key`: only as many as fit one row of the main view
 	/// (shelves don't scroll sideways, so the rest would be built and laid out for nothing).
 	pub fn cards(&self, key: &'static str, tiles: &[Tile], cx: &mut Context<'_, Self>) -> Vec<gpui_kit::Stateful<Div>> {
-		#[expect(
-			clippy::cast_possible_truncation,
-			clippy::cast_sign_loss,
-			reason = "a small positive card count (max(1.) floors it at one)"
-		)]
-		let fit = ((self.main_w - 24.) / theme::CARD_W).floor().max(1.) as usize;
-		tiles.iter().take(fit).enumerate().map(|(i, t)| self.card(gpui_kit::ElementId::NamedInteger(key.into(), i as u64), t, cx)).collect()
+		tiles
+			.iter()
+			.take(self.card_columns())
+			.enumerate()
+			.map(|(i, t)| self.card(gpui_kit::ElementId::NamedInteger(key.into(), i as u64), t, cx))
+			.collect()
+	}
+
+	/// The shared shelf limit also bounds converting library/overview entries into owned tiles.
+	#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a small positive card count, floored at one")]
+	pub fn card_columns(&self) -> usize {
+		((self.main_w - 24.) / theme::CARD_W).floor().max(1.) as usize
 	}
 }
 

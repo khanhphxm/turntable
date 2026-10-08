@@ -305,89 +305,96 @@ pub fn corner_mask() -> Div {
 	div().absolute().top(-w).left(-w).right(-w).bottom(-w).rounded(theme::RADIUS + w).border(w).border_color(theme::base())
 }
 
-/// Any element as a dropdown-menu trigger (`DropdownMenu` wants `Selectable`): a bare icon
-/// button opens a menu exactly like a gpui-kit `Button` would, without the button's chrome.
-#[derive(IntoElement)]
-pub struct MenuTrigger {
-	inner:    Stateful<Div>,
-	selected: bool,
-}
-
-impl MenuTrigger {
-	pub fn new(inner: Stateful<Div>) -> Self {
-		Self { inner, selected: false }
-	}
-}
-
-impl gpui_kit::Styled for MenuTrigger {
-	fn style(&mut self) -> &mut gpui_kit::StyleRefinement {
-		gpui_kit::Styled::style(&mut self.inner)
-	}
-}
-
-impl InteractiveElement for MenuTrigger {
-	fn interactivity(&mut self) -> &mut gpui_kit::Interactivity {
-		self.inner.interactivity()
-	}
-}
-
-impl gpui_kit::component::Selectable for MenuTrigger {
-	fn selected(mut self, selected: bool) -> Self {
-		self.selected = selected;
-		self
-	}
-
-	fn is_selected(&self) -> bool {
-		self.selected
-	}
-}
-
-impl gpui_kit::component::menu::DropdownMenu for MenuTrigger {}
-
-impl gpui_kit::RenderOnce for MenuTrigger {
-	fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-		self.inner
-	}
-}
-
 /// A bare icon that opens a menu (the "…" of pages, rows and the sort control).
-pub fn menu_icon(id: impl Into<ElementId>, glyph: Icon, size: Pixels) -> MenuTrigger {
-	MenuTrigger::new(
-		div()
-			.id(id)
-			.group("menu-icon")
-			.size(size + px(16.))
-			.flex()
-			.flex_none()
-			.items_center()
-			.justify_center()
-			.cursor_pointer()
-			.child(icon(glyph, size * OPTICAL, theme::subdued()).group_hover("menu-icon", |s| s.text_color(theme::text()))),
-	)
+pub fn menu_icon(id: impl Into<ElementId>, glyph: Icon, size: Pixels) -> Stateful<Div> {
+	div()
+		.id(id)
+		.group("menu-icon")
+		.size(size + px(16.))
+		.flex()
+		.flex_none()
+		.items_center()
+		.justify_center()
+		.cursor_pointer()
+		.child(icon(glyph, size * OPTICAL, theme::subdued()).group_hover("menu-icon", |s| s.text_color(theme::text())))
 }
 
 /// Spotify's playing indicator: four green bars bouncing out of step (not synced to the audio).
-pub fn eq_bars(id: impl Into<ElementId>, size: Pixels) -> impl IntoElement {
+/// The bars share one phase-locked clock and redraw at most 15 times a second, so a visible
+/// indicator costs little.
+pub fn eq_bars(id: &'static str, size: Pixels) -> impl IntoElement {
 	use std::time::Duration;
 
 	use gpui_kit::{Animation, AnimationExt as _};
-	// Each bar's period and phase, so they never line up.
-	const BARS: [(u64, f32); 4] = [(900, 0.0), (700, 0.45), (1100, 0.2), (800, 0.7)];
-	let id: ElementId = id.into();
+	/// Each bar's period and phase, so they never line up.
+	const BARS: [(u64, f32); 4] = [(900, 0.), (700, 0.45), (1100, 0.2), (800, 0.7)];
 	let bar_w = size * 0.16;
 	div().size(size).flex_none().flex().items_end().justify_center().gap(size * 0.08).children(BARS.iter().enumerate().map(
 		move |(i, (ms, phase))| {
 			let phase = *phase;
-			div().w(bar_w).h(size).flex().items_end().child(div().w_full().h(size * 0.3).bg(theme::accent()).with_animation(
-				ElementId::NamedInteger(format!("{id:?}-{i}").into(), 0),
-				Animation::new(Duration::from_millis(*ms)).repeat(),
+			div().w(bar_w).h(size * 0.3).bg(theme::accent()).with_animation(
+				(id, i),
+				Animation::new(Duration::from_millis(*ms)).repeat_synced().with_max_fps(15.),
 				move |el, t| {
 					let x = (t + phase).fract();
 					// Up and back down, never quite flat.
-					let level = 0.25 + 0.75 * (1. - (2. * x - 1.).abs());
-					el.h(size * level)
+					el.h(size * (0.25 + 0.75 * (1. - (2. * x - 1.).abs())))
 				},
-			))
+			)
 		},
 	))
+}
+
+/// Hover state for a header that reveals an icon beside its title (Your Library, the right
+/// panel). `generation` restarts the slide each time the pointer enters or leaves.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Reveal {
+	pub on:         bool,
+	pub generation: usize,
+}
+
+impl Reveal {
+	/// Records the pointer entering or leaving; true when that changed anything.
+	pub fn set(&mut self, on: bool) -> bool {
+		if self.on == on {
+			return false;
+		}
+		self.on = on;
+		self.generation += 1;
+		true
+	}
+}
+
+/// Spotify's header reveal: at rest the row sits shifted left so the icon is out of sight; on
+/// hover it slides right (100 ms) and then the icon fades in (100 ms); leaving reverses that. Only
+/// positions and opacity animate, so the layout never changes with the pointer.
+pub fn reveal_row(id: &'static str, state: Reveal, icon: impl IntoElement, title: impl IntoElement) -> impl IntoElement {
+	use std::time::Duration;
+
+	use gpui_kit::{Animation, AnimationExt as _, ease_out_quint};
+	/// The icon (24 px) and the gap after it.
+	const SHIFT: f32 = 32.;
+	let (on, generation) = (state.on, state.generation);
+	// Halves of the 200 ms: the slide, then the fade (reversed on the way out).
+	let staged = move |d: f32| -> (f32, f32) {
+		let (first, second) = ((d * 2.).min(1.), (d * 2. - 1.).max(0.));
+		if on { (first, second) } else { (1. - second, 1. - first) }
+	};
+	let place = move |el: Div, slide: f32| el.left(px(-SHIFT * (1. - slide)));
+	let fade = move |el: Div, shown: f32| el.opacity(shown);
+	let row = div().relative().flex().items_center().gap_2().min_w_0();
+	let icon = div().size(px(24.)).flex_none().flex().items_center().justify_center().child(icon);
+	if generation == 0 {
+		// Never hovered yet: draw the resting state without an animation.
+		return place(row, 0.).child(fade(icon, 0.)).child(title).into_any_element();
+	}
+	let duration = Duration::from_millis(200);
+	row.child(
+		icon.with_animation((id, generation * 2), Animation::new(duration).with_easing(ease_out_quint()), move |el, d| {
+			fade(el, staged(d).1)
+		}),
+	)
+	.child(title)
+	.with_animation((id, generation * 2 + 1), Animation::new(duration).with_easing(ease_out_quint()), move |el, d| place(el, staged(d).0))
+	.into_any_element()
 }

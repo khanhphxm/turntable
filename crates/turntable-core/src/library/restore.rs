@@ -6,9 +6,9 @@
 use std::{
 	fs, io,
 	path::{Path, PathBuf},
-	sync::{Mutex, PoisonError},
 };
 
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -66,13 +66,10 @@ pub(super) fn recent(
 	}
 	.map(|recent| recent.first().map(|(track, context)| from_recent(track, context.as_ref(), playlists, saved.as_ref())));
 	match recent {
-		Err(error @ (spotify::Error::AuthRequired | spotify::Error::AuthExpired)) => Err(error),
+		Err(error @ (spotify::Error::AuthRequired | spotify::Error::AuthExpired | spotify::Error::NativeAuthRequired)) => Err(error),
 		Ok(Some(playback)) => Ok(Some(playback)),
 		result => {
-			let cached = snapshots
-				.lock()
-				.unwrap_or_else(PoisonError::into_inner)
-				.recent_track(account, saved.as_ref().map(|saved| saved.uri.as_str()));
+			let cached = snapshots.lock().recent_track(account, saved.as_ref().map(|saved| saved.uri.as_str()));
 			if let Some(track) = cached { Ok(Some(from_recent(&track, None, playlists, saved.as_ref()))) } else { result.map(|_| None) }
 		},
 	}

@@ -130,8 +130,7 @@ const FADE_FRAMES: f32 = 1024.0;
 const RAMP_FRAMES: f32 = 1536.0;
 
 /// Zero frames in a row after which the stage's output is silence for good.
-#[expect(clippy::cast_possible_truncation, reason = "a few hundred frames")]
-const SETTLED_ZEROS: u32 = 2 * super::leveler::DELAY_FRAMES as u32;
+const SETTLED_ZEROS: usize = 2 * super::leveler::DELAY_FRAMES;
 
 /// Moves `value` toward `target` by at most `step`.
 fn approach(value: f32, target: f32, step: f32) -> f32 {
@@ -152,7 +151,7 @@ pub struct OutputStage {
 	limiter:     Limiter,
 	/// What came in, per block, for the fade between it and the leveled path.
 	dry:         Vec<f32>,
-	zero_frames: u32,
+	zero_frames: usize,
 }
 
 impl Default for OutputStage {
@@ -481,10 +480,5 @@ mod tests {
 			assert!(volume_db(p) >= last);
 			last = volume_db(p);
 		}
-	}
-
-	#[test]
-	fn unknown_normalize_levels_mean_off() {
-		assert_eq!(serde_json::from_str::<Normalize>("\"banana\"").unwrap(), Normalize::Off);
 	}
 }

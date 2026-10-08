@@ -144,8 +144,6 @@ fn worker(shared: &Arc<Shared>, event: &Event, ready: &mpsc::Sender<io::Result<(
 			return;
 		},
 	};
-	// Do not retain a failed starter's thread in Shared: its feed may be tried again.
-	shared.control.get_or_init(thread::current);
 	shared.running.store(true, Ordering::Release);
 	let _ = ready.send(Ok(()));
 	run(shared, event, &mut render, stream);
@@ -154,7 +152,9 @@ fn worker(shared: &Arc<Shared>, event: &Event, ready: &mpsc::Sender<io::Result<(
 
 fn run(shared: &Shared, event: &Event, render: &mut Render, stream: Stream) {
 	let mut stream = Some(stream);
+	let waker = super::control_waker();
 	while !shared.stop.load(Ordering::Acquire) {
+		shared.control.register(&waker);
 		// Stop only if still idle; PCM may have arrived since Render asked.
 		if shared.want_stop.swap(false, Ordering::AcqRel) && shared.ring.len() == 0 {
 			shared.running.store(false, Ordering::Release);
@@ -273,5 +273,43 @@ impl Drop for Stream {
 	fn drop(&mut self) {
 		// SAFETY: the client stays on its MTA thread; stopping precedes releasing its interfaces.
 		let _ = unsafe { self.client.Stop() };
+	}
+}
+
+#[cfg(test)]
+mod tests {
+
+	use windows::Win32::Foundation::WAIT_TIMEOUT;
+
+	use super::*;
+	use crate::audio::{Player, channel};
+
+	#[test]
+	fn event_is_auto_reset_and_can_wake_a_different_thread() {
+		let event = Arc::new(Event::new().unwrap());
+		let signal = event.clone();
+		let worker = thread::spawn(move || {
+			// SAFETY: both threads retain the event, and signaling needs no COM apartment.
+			unsafe {
+				SetEvent(signal.0).unwrap();
+			}
+		});
+		// SAFETY: this live event is owned until after the wait and join.
+		assert_eq!(unsafe { WaitForSingleObject(event.0, 3000) }, WAIT_OBJECT_0);
+		worker.join().unwrap();
+		// SAFETY: a zero-duration second wait observes the auto-reset state without blocking.
+		assert_eq!(unsafe { WaitForSingleObject(event.0, 0) }, WAIT_TIMEOUT);
+	}
+
+	#[test]
+	fn an_unavailable_endpoint_returns_a_retryable_feed_without_a_sink_error() {
+		let (writer, feed) = channel();
+		let error =
+			Player::start_with(feed, None, |_, _| Err(io::Error::new(io::ErrorKind::NotFound, "synthetic unavailable render endpoint")))
+				.err()
+				.unwrap();
+		assert!(error.feed.0.dead.load(Ordering::Acquire));
+		assert!(!error.feed.0.stop.load(Ordering::Acquire));
+		assert!(writer.write(&[0.25; 2]), "no endpoint must not pause librespot");
 	}
 }

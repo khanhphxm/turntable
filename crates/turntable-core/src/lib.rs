@@ -8,8 +8,8 @@ pub mod app;
 pub mod audio;
 pub mod engine;
 pub mod library;
+pub mod lyrics;
 pub mod net;
-pub mod sources;
 pub mod spotify;
 
 pub use app::{
@@ -25,7 +25,7 @@ pub fn has_sign_in(paths: &Paths) -> bool {
 }
 
 /// Deletes the saved playback sign-in and account-scoped library snapshots/indexes.
-/// Does not delete preferences, covers, audio cache or the separate Web API sign-in.
+/// Does not delete preferences, covers or the audio cache.
 /// A running host should dispatch [`Msg::SignOut`] instead, to stop playback too.
 pub fn forget_sign_in(paths: &Paths) -> std::io::Result<()> {
 	let credentials = engine::forget_sign_in(&paths.config);

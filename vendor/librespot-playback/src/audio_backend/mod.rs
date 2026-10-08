@@ -37,6 +37,8 @@ pub trait Sink {
         0
     }
     fn begin_crossfade(&mut self, _outgoing: CrossfadeSource, _duration_ms: u32) {}
+    // turntable: each load, including a gapless natural transition, starts a new PCM program.
+    fn new_track(&mut self) {}
     // A user load, seek or stop is a discontinuity, never an automatic overlap.
     fn reset(&mut self) {}
     fn write(&mut self, packet: AudioPacket, converter: &mut Converter) -> SinkResult<()>;

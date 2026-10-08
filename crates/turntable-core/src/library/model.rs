@@ -21,6 +21,24 @@ pub enum Route {
 	Artist(String),
 }
 
+/// A raw playlist position is meaningful only in the row revision that produced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaylistOccurrence {
+	/// Absent only in legacy cached listings; edits remain disabled there.
+	pub position: Option<u32>,
+	pub revision: u64,
+}
+
+/// Identity captured when a row is rendered, never a later list index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowTarget {
+	pub route:      Route,
+	pub uri:        String,
+	/// Includes unavailable native rows skipped by the UI; revisions prevent a
+	/// shifted identical duplicate from consuming an old click after an edit.
+	pub occurrence: Option<PlaylistOccurrence>,
+}
+
 /// Something a page links to: a playlist, an album, an artist or Liked Songs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tile {
@@ -271,75 +289,6 @@ pub(super) fn fold(s: &str) -> impl Iterator<Item = char> + '_ {
 	s.chars().flat_map(char::to_lowercase)
 }
 
-/// Spotify's Home filter chips, in desktop order.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Facet {
-	#[default]
-	All,
-	Music,
-	Podcasts,
-	Audiobooks,
-}
-
-impl Facet {
-	pub const ALL: [Self; 4] = [Self::All, Self::Music, Self::Podcasts, Self::Audiobooks];
-
-	pub const fn label(self) -> &'static str {
-		match self {
-			Self::All => "All",
-			Self::Music => "Music",
-			Self::Podcasts => "Podcasts",
-			Self::Audiobooks => "Audiobooks",
-		}
-	}
-
-	/// Pathfinder's facet value; All is the empty string, not `all`.
-	pub const fn value(self) -> &'static str {
-		match self {
-			Self::All => "",
-			Self::Music => "music-chip",
-			Self::Podcasts => "podcasts-chip",
-			Self::Audiobooks => "audiobooks-chip",
-		}
-	}
-}
-
-/// The personalised Home answer, preserving Spotify's section and item order.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HomeFeed {
-	pub greeting: String,
-	pub sections: Vec<HomeSection>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum HomeStyle {
-	Shortcuts,
-	Shelf,
-	Feed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HomeSection {
-	pub uri:    String,
-	pub title:  String,
-	pub kicker: Option<String>,
-	pub style:  HomeStyle,
-	pub items:  Vec<HomeItem>,
-	/// Spotify has a Show all destination or another page, not an inferred item count.
-	pub more:   bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HomeItem {
-	pub tile:        Tile,
-	pub label:       Option<String>,
-	pub description: Option<String>,
-	/// The large card's background, distinct from its square cover.
-	pub backdrop:    Option<String>,
-	/// Packed RGB (`0xRRGGBB`), without an alpha byte.
-	pub color:       Option<u32>,
-}
-
 /// The home page: recent plays, followed artists and saved albums.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Home {
@@ -367,16 +316,11 @@ impl Home {
 	}
 }
 
-/// Whether the account's library is connected (native Session or no-session Web API fallback).
+/// Whether the native account's library is connected.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Conn {
-	/// No `client_id` yet: the setup flow asks for one.
 	#[default]
-	NeedsClientId,
-	/// A client id but no token: the setup flow offers "Connect Spotify".
 	NeedsLogin,
-	/// The browser login is in progress; the URL is shown in case no browser opened.
-	LoggingIn(Option<String>),
 	Ready,
 	Failed(String),
 }
@@ -396,6 +340,9 @@ pub struct Listing {
 	/// The playable context (playlist/album URI); `None` for Liked Songs.
 	pub context_uri:    Option<String>,
 	pub tracks:         Vec<Track>,
+	/// Raw playlist occurrence indices, aligned with `tracks`; absent in old snapshots.
+	#[serde(default)]
+	pub positions:      Vec<u32>,
 	/// Per-occurrence Unix seconds, aligned with `tracks`; empty means unknown (old caches/albums).
 	#[serde(default)]
 	pub added_at:       Vec<Option<i64>>,
@@ -483,6 +430,7 @@ impl Listing {
 		self.tracks = page.tracks;
 		self.added_at.clear();
 		self.added_by.clear();
+		self.positions.clear();
 		self.web = true;
 		self.note = None;
 	}

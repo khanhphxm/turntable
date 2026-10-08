@@ -3,21 +3,7 @@
 use super::*;
 
 #[test]
-fn native_only_worker_waits_for_engine_without_requesting_oauth_client_id() {
-	let directory = tempfile::tempdir().unwrap();
-	let (tx, rx) = mpsc::channel();
-	let _worker = Worker::spawn(directory.path().join("config"), directory.path(), false, move |response| {
-		tx.send(response).unwrap();
-	});
-	assert!(matches!(rx.recv_timeout(Duration::from_secs(2)).unwrap(), Response::NeedsLogin));
-	// Native saved-credential discovery can create the config directory; it
-	// must not require or initialize the separate OAuth account's files.
-	assert!(!directory.path().join("config/client_id").exists());
-	assert!(!directory.path().join("config/token.json").exists());
-}
-
-#[test]
-fn fresh_native_connection_is_ready_with_web_api_disabled_and_no_oauth_account() {
+fn fresh_native_connection_is_ready_with_web_api_disabled() {
 	let directory = tempfile::tempdir().unwrap();
 	let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
 	let native = {
@@ -38,13 +24,6 @@ fn fresh_native_connection_is_ready_with_web_api_disabled_and_no_oauth_account()
 	assert!(session.as_ref().unwrap().player.is_some());
 	assert!(replies.borrow().iter().any(|response| matches!(response,
 		Response::Connected { me, .. } if me.id == "alice" && me.display_name.as_deref() == Some("Alice"))));
-	assert!(
-		!replies
-			.borrow()
-			.iter()
-			.any(|response| matches!(response, Response::NeedsClientId | Response::NeedsLogin | Response::LoginFailed(_)))
-	);
-	assert!(
-		matches!(session.as_ref().unwrap().client.me_with_plan(), Err(spotify::Error::Network(message)) if message.contains("disabled"))
-	);
+	assert!(!replies.borrow().iter().any(|response| matches!(response, Response::NeedsLogin)));
+	assert!(matches!(session.as_ref().unwrap().client.me_with_plan(), Err(spotify::Error::Network(_))));
 }

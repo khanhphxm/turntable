@@ -4,7 +4,7 @@
 
 use serde::Deserialize;
 
-use super::{Reader, network, tracks};
+use super::{Reader, tracks};
 use crate::{
 	net::trace,
 	spotify::{self, PlayContext, Track},
@@ -45,9 +45,9 @@ impl Reader {
 				history.contexts.sort_by_key(|recent| std::cmp::Reverse(recent.last_played_time));
 				let uris: Vec<_> = history.contexts.iter().filter_map(|recent| recent.last_played_track_uri.clone()).collect();
 				let rows = tracks(self.shared.session(), &uris, None).await?;
-				Ok(attach_contexts(history.contexts, rows))
+				Ok::<_, librespot_core::Error>(attach_contexts(history.contexts, rows))
 			})
-			.map_err(network)
+			.map_err(spotify::Error::from)
 	}
 }
 

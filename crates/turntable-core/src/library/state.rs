@@ -3,145 +3,70 @@
 use std::{collections::HashMap, sync::Arc};
 
 use super::{
-	Conn, Entry, Facet, Home, HomeFeed, HomeSection, HomeStyle, Kind, Listing, Request, Response, Route, Sort, View,
+	Conn, Entry, Home, Kind, Listing, Request, Response, Route, Sort, View,
 	added::{RefreshStats, TrackId},
 };
 use crate::spotify::{self, Album, Artist, Playlist, SearchResults, Track, User, id_of};
 
 #[derive(Debug, Default)]
 pub struct Library {
-	pub conn:                     Conn,
-	pub me:                       Option<User>,
-	pub playlists:                Vec<Playlist>,
+	pub conn:                    Conn,
+	pub me:                      Option<User>,
+	pub playlists:               Vec<Playlist>,
 	/// Native playlist/folder order. Metadata remains in `playlists`.
-	pub rootlist:                 Vec<super::RootEntry>,
-	pub(crate) expanded_folders:  std::collections::HashSet<String>,
+	pub rootlist:                Vec<super::RootEntry>,
+	pub(crate) expanded_folders: std::collections::HashSet<String>,
 	/// Albums saved to the library, most recently added first.
-	pub albums:                   Vec<Album>,
+	pub albums:                  Vec<Album>,
 	/// Artists the user follows.
-	pub followed:                 Vec<Artist>,
+	pub followed:                Vec<Artist>,
 	/// Explicit pins, in pin order; restored separately for each signed-in account.
-	pub(crate) pinned:            Vec<String>,
-	pub(crate) excluded:          std::collections::HashSet<String>,
+	pub(crate) pinned:           Vec<String>,
+	pub(crate) excluded:         std::collections::HashSet<String>,
 	/// What Your Library lists: the kind chips that are on (none: every kind), the order, the text
 	/// filter, and how the rows are laid out.
-	pub kinds:                    Vec<Kind>,
-	pub sort:                     Sort,
-	pub filter:                   String,
-	pub view:                     View,
-	pub route:                    Route,
-	pub listing:                  Option<Listing>,
-	pub query:                    String,
-	pub search:                   Option<SearchResults>,
-	pub home:                     Home,
-	pub home_facet:               Facet,
-	pub(crate) home_feeds:        HashMap<Facet, HomeFeed>,
-	/// A Show all page on Home; the UI can keep this URI in its own navigation history.
-	pub home_section:             Option<HomeSection>,
-	pub home_section_loading:     bool,
-	pub(crate) home_section_next: Option<u32>,
+	pub kinds:                   Vec<Kind>,
+	pub sort:                    Sort,
+	pub filter:                  String,
+	pub view:                    View,
+	pub route:                   Route,
+	pub listing:                 Option<Listing>,
+	/// Invalidates captured playlist occurrences after replacement, removal or reordering.
+	pub(crate) row_revision:     u64,
+	/// The single continuation page awaited, independent of first-page refreshes.
+	pub(crate) pending_offset:   Option<u32>,
+	pub query:                   String,
+	pub search:                  Option<SearchResults>,
+	pub home:                    Home,
 	/// Artists fetched for the now-playing view, by id. Together with overviews,
 	/// retained for the last 128 distinct artists; listings own their visible data.
-	pub artists:                  HashMap<String, Artist>,
+	pub artists:                 HashMap<String, Artist>,
 	/// What the web player says about them, by id.
-	pub overviews:                HashMap<String, spotify::ArtistOverview>,
-	pub(crate) artist_order:      std::collections::VecDeque<String>,
+	pub overviews:               HashMap<String, spotify::ArtistOverview>,
+	pub(crate) artist_order:     std::collections::VecDeque<String>,
 	/// Who made the song that last asked: (track URI, credits).
-	pub credits:                  Option<(String, Vec<spotify::Credit>)>,
+	pub credits:                 Option<(String, Vec<spotify::Credit>)>,
 	/// Whether the URI last checked is in Liked Songs.
-	pub liked:                    Option<(String, bool)>,
+	pub liked:                   Option<(String, bool)>,
 	/// The most recent completed owned-playlist refresh for the current Session.
-	pub added_refresh:            Option<RefreshStats>,
+	pub added_refresh:           Option<RefreshStats>,
 	/// Immutable, sorted owned-playlist membership delivered by the library worker.
-	pub(crate) owned_tracks:      Arc<[TrackId]>,
+	pub(crate) owned_tracks:     Arc<[TrackId]>,
 	/// Complete Liked Songs membership, when the playback Session has loaded it.
-	pub(crate) liked_tracks:      Option<Arc<[TrackId]>>,
+	pub(crate) liked_tracks:     Option<Arc<[TrackId]>>,
 	/// Per-track answers and loaded Liked Songs pages, retained across navigation.
-	pub(crate) liked_cache:       HashMap<TrackId, bool>,
+	pub(crate) liked_cache:      HashMap<TrackId, bool>,
 	/// Selected row in the content area, if any.
-	pub selected:                 Option<usize>,
+	pub selected:                Option<usize>,
 	/// Whether the selection is drawn: only after keyboard navigation or a
 	/// click, never just because a list loaded.
-	pub show_selection:           bool,
+	pub show_selection:          bool,
 	/// A track to select once the page being opened lists it (a song card opens its album there).
-	pub reveal:                   Option<String>,
-	pub error:                    Option<String>,
+	pub reveal:                  Option<String>,
+	pub error:                   Option<String>,
 }
 
 impl Library {
-	pub fn home_feed(&self) -> Option<&HomeFeed> {
-		self.home_feeds.get(&self.home_facet)
-	}
-
-	pub(crate) fn select_home_facet(&mut self, facet: Facet) -> Request {
-		self.home_facet = facet;
-		self.route = Route::Home;
-		self.selected = None;
-		self.show_selection = false;
-		self.reveal = None;
-		self.close_home_section();
-		self.error = None;
-		Request::HomeFacet(facet)
-	}
-
-	pub(crate) fn open_home_section(&mut self, uri: String) -> Request {
-		self.route = Route::Home;
-		self.selected = None;
-		self.show_selection = false;
-		self.reveal = None;
-		self.error = None;
-		self.home_section =
-			Some(self.home_feed().and_then(|feed| feed.sections.iter().find(|section| section.uri == uri)).cloned().unwrap_or_else(|| {
-				HomeSection {
-					uri:    uri.clone(),
-					title:  String::new(),
-					kicker: None,
-					style:  HomeStyle::Shelf,
-					items:  Vec::new(),
-					more:   false,
-				}
-			}));
-		self.home_section_loading = true;
-		self.home_section_next = None;
-		Request::HomeSectionMore { uri, offset: 0 }
-	}
-
-	pub(crate) fn close_home_section(&mut self) {
-		self.home_section = None;
-		self.home_section_loading = false;
-		self.home_section_next = None;
-		self.error = None;
-	}
-
-	pub(crate) fn home_section_more(&mut self) -> Option<Request> {
-		if self.route != Route::Home || self.home_section_loading {
-			return None;
-		}
-		let section = self.home_section.as_ref()?;
-		let offset = self.home_section_next?;
-		self.home_section_loading = true;
-		Some(Request::HomeSectionMore { uri: section.uri.clone(), offset })
-	}
-
-	fn apply_home_section(&mut self, mut section: HomeSection, offset: u32, next: Option<u32>) {
-		if self.route != Route::Home {
-			return;
-		}
-		let Some(current) = &mut self.home_section else { return };
-		if current.uri != section.uri || (offset != 0 && self.home_section_next != Some(offset)) {
-			return;
-		}
-		if offset == 0 {
-			*current = section;
-		} else {
-			current.items.append(&mut section.items);
-			current.more = section.more;
-		}
-		self.home_section_next = next;
-		self.home_section_loading = false;
-		self.error = None;
-	}
-
 	/// What is already known about Liked Songs, without network work or allocation.
 	pub(crate) fn track_liked(&self, uri: &str, track: &TrackId) -> Option<bool> {
 		if let Some((known_uri, liked)) = &self.liked
@@ -167,10 +92,50 @@ impl Library {
 	pub fn rows(&self) -> &[Track] {
 		match self.route {
 			Route::Search => self.search.as_ref().map_or(&[][..], |s| &s.tracks.items),
-			Route::Home if self.home_section.is_none() && self.home_feed().is_none() => self.home.songs().1,
-			Route::Home | Route::Library | Route::Folder(_) => &[],
+			Route::Home => self.home.songs().1,
+			Route::Library | Route::Folder(_) => &[],
 			_ => self.listing.as_ref().map_or(&[][..], |l| &l.tracks),
 		}
+	}
+
+	/// Capture the track and, for playlists, the native occurrence rendered at `index`.
+	pub fn row_target(&self, index: usize) -> Option<super::RowTarget> {
+		Some(super::RowTarget {
+			route:      self.route.clone(),
+			uri:        self.rows().get(index)?.uri.clone(),
+			occurrence: if matches!(self.route, Route::Playlist(_)) {
+				Some(super::PlaylistOccurrence {
+					position: self.listing.as_ref().and_then(|listing| listing.positions.get(index)).copied(),
+					revision: self.row_revision,
+				})
+			} else {
+				None
+			},
+		})
+	}
+
+	/// Resolve at dispatch. Changed routes/occurrences are stale; a reordered unique
+	/// track without occurrence metadata is still safe to address by URI.
+	pub fn resolve_row(&self, target: &super::RowTarget) -> Option<usize> {
+		if self.route != target.route {
+			return None;
+		}
+		if let Some(occurrence) = target.occurrence {
+			if occurrence.revision != self.row_revision {
+				return None;
+			}
+			if let Some(position) = occurrence.position {
+				let listing = self.listing.as_ref()?;
+				return listing
+					.positions
+					.iter()
+					.position(|raw| *raw == position)
+					.filter(|index| self.rows().get(*index).is_some_and(|track| track.uri == target.uri));
+			}
+		}
+		let mut matches = self.rows().iter().enumerate().filter(|(_, track)| track.uri == target.uri);
+		let (index, _) = matches.next()?;
+		matches.next().is_none().then_some(index)
 	}
 
 	/// What the page being shown has fully drawn, for traces (see [`crate::net::trace`]): `home`, `album:<id>`,
@@ -178,7 +143,7 @@ impl Library {
 	pub fn ready_label(&self) -> String {
 		let loaded = self.listing.as_ref().filter(|l| !l.loading);
 		match &self.route {
-			Route::Home if self.home.loaded || self.home_feed().is_some() => "home".into(),
+			Route::Home if self.home.loaded => "home".into(),
 			Route::Home => "home:loading".into(),
 			Route::Search if self.search.is_some() => "search".into(),
 			Route::Search => "search:empty".into(),
@@ -248,14 +213,18 @@ impl Library {
 
 	/// Opens `route`, returning the requests that load it.
 	pub fn navigate(&mut self, route: Route) -> Vec<Request> {
-		self.close_home_section();
+		if self.route == route && (self.listing.is_some() || matches!(route, Route::Search | Route::Library | Route::Folder(_))) {
+			return Vec::new();
+		}
+		self.row_revision = self.row_revision.wrapping_add(1);
+		self.pending_offset = None;
 		self.selected = None;
 		self.show_selection = false;
 		self.reveal = None;
 		self.error = None;
 		self.route = route.clone();
 		match &route {
-			Route::Home => vec![Request::HomeFacet(self.home_facet)],
+			Route::Home => vec![Request::Home],
 			Route::Search | Route::Library | Route::Folder(_) => {
 				self.listing = None;
 				Vec::new()
@@ -322,12 +291,6 @@ impl Library {
 					l.loading = false;
 				}
 			},
-			Response::LoginUrl(url) => {
-				if matches!(self.conn, Conn::LoggingIn(_)) {
-					self.conn = Conn::LoggingIn(Some(url));
-				}
-			},
-			Response::NeedsClientId => self.conn = Conn::NeedsClientId,
 			Response::Liked(uri, liked) => self.apply_liked(uri, liked),
 			Response::Exclusions { account, uris } => {
 				if self.me.as_ref().is_some_and(|me| me.id == account) {
@@ -343,11 +306,6 @@ impl Library {
 			Response::LikedTracks(tracks) => self.apply_liked_tracks(tracks),
 			Response::Home(home) => self.home = home,
 			Response::HomeRecentTracks(tracks) => self.home.take_recent_tracks(tracks),
-			Response::HomeFeed { facet, feed } => {
-				self.home_feeds.insert(facet, feed);
-			},
-			Response::HomeSection { section, offset, next_offset } => self.apply_home_section(section, offset, next_offset),
-			Response::HomeSectionFailed { uri, message } => self.fail_home_section(&uri, message),
 			Response::Artist(artist) => {
 				let id = id_of(&artist.uri).to_owned();
 				self.remember_artist(&id);
@@ -394,7 +352,6 @@ impl Library {
 			// Connection, playback and queue replies belong to `State`, not to the library.
 			Response::Offline(_)
 			| Response::FolderCreated { .. }
-			| Response::HomeUnavailable { .. }
 			| Response::Queue(..)
 			| Response::ContextToPlaylist(..)
 			| Response::Done(_)
@@ -402,11 +359,12 @@ impl Library {
 			| Response::Playback(_)
 			| Response::LastPlayback { .. }
 			| Response::Transferred
+			| Response::ControlFailed { .. }
 			| Response::PlayerError(_) => {},
 			Response::Listing { route, offset, listing } => self.apply_listing(&route, offset, listing),
 			Response::Search { query, results } => self.apply_search(&query, results),
 			Response::Error { route, message } => self.apply_error(route.as_ref(), message),
-			Response::LoginFailed(e) => self.conn = Conn::Failed(e),
+			Response::SignInRejected(error) => self.conn = Conn::Failed(error.message()),
 		}
 	}
 
@@ -426,13 +384,6 @@ impl Library {
 			self.search = Some(results);
 			self.selected = None;
 			self.show_selection = false;
-		}
-	}
-
-	fn fail_home_section(&mut self, uri: &str, message: String) {
-		if self.route == Route::Home && self.home_section.as_ref().is_some_and(|section| section.uri == uri) {
-			self.home_section_loading = false;
-			self.error = Some(message);
 		}
 	}
 
@@ -484,10 +435,15 @@ impl Library {
 	fn removed_playlist_row(&mut self, id: &str, uri: &str, row: u32) {
 		if matches!(&self.route, Route::Playlist(current) if current == id)
 			&& let Some(listing) = &mut self.listing
-			&& let Ok(row) = usize::try_from(row)
+			&& let Some(row) = listing.positions.iter().position(|position| *position == row)
 			&& listing.tracks.get(row).is_some_and(|track| track.uri == uri)
 		{
+			self.row_revision = self.row_revision.wrapping_add(1);
 			listing.tracks.remove(row);
+			let removed = listing.positions.remove(row);
+			for position in &mut listing.positions {
+				*position -= u32::from(*position > removed);
+			}
 			if row < listing.added_at.len() {
 				listing.added_at.remove(row);
 			}
@@ -507,10 +463,25 @@ impl Library {
 	fn moved_playlist_row(&mut self, id: &str, from: u32, to: u32) {
 		if matches!(&self.route, Route::Playlist(current) if current == id)
 			&& let Some(listing) = &mut self.listing
-			&& let (Ok(from), Ok(to)) = (usize::try_from(from), usize::try_from(to))
-			&& from < listing.tracks.len()
-			&& to < listing.tracks.len()
-		{
+			&& let (Some(source), Some(target)) = (
+				listing.positions.iter().position(|position| *position == from),
+				listing.positions.iter().position(|position| *position == to),
+			) {
+			self.row_revision = self.row_revision.wrapping_add(1);
+			for position in &mut listing.positions {
+				*position = if *position == from {
+					to
+				} else if from < *position && *position <= to {
+					*position - 1
+				} else if to <= *position && *position < from {
+					*position + 1
+				} else {
+					*position
+				};
+			}
+			let (from, to) = (source, target);
+			let position = listing.positions.remove(from);
+			listing.positions.insert(to, position);
 			let track = listing.tracks.remove(from);
 			listing.tracks.insert(to, track);
 			if !listing.added_at.is_empty() {
@@ -550,9 +521,6 @@ impl Library {
 			self.rootlist.clear();
 			self.expanded_folders.clear();
 			self.home = Home::default();
-			self.home_feeds.clear();
-			self.home_facet = Facet::All;
-			self.close_home_section();
 		}
 		for playlist in &mut playlists {
 			playlist.normalize(&me.id, me.display_name.as_deref());
@@ -586,6 +554,7 @@ impl Library {
 		if let Some(l) = &mut self.listing {
 			l.loading = false;
 		}
+		self.pending_offset = None;
 		if self.route == Route::Home {
 			self.home.loaded = true;
 		}
@@ -605,6 +574,9 @@ impl Library {
 		if *route != self.route {
 			return;
 		}
+		if offset > 0 && (self.pending_offset != Some(offset) || self.listing.as_ref().and_then(|page| page.next_offset) != Some(offset)) {
+			return;
+		}
 		match (&mut self.listing, offset) {
 			(Some(current), o) if o > 0 => {
 				if !current.added_at.is_empty() || !listing.added_at.is_empty() {
@@ -617,11 +589,19 @@ impl Library {
 					listing.added_by.resize(listing.tracks.len(), None);
 					current.added_by.extend(listing.added_by);
 				}
+				current.positions.extend(listing.positions);
 				current.tracks.extend(listing.tracks);
 				current.next_offset = listing.next_offset;
 				current.loading = false;
+				self.pending_offset = None;
 			},
+			(_, o) if o > 0 => {},
 			(current, _) => {
+				if self.pending_offset.is_some() && (listing.loading || self.pending_offset == listing.next_offset) {
+					listing.loading = true;
+				} else {
+					self.pending_offset = None;
+				}
 				// An artist's popular songs may arrive before its releases.
 				if let (Route::Artist(_), Some(early)) = (route, current.take()) {
 					if early.popular_loaded && !listing.popular_loaded {
@@ -634,10 +614,12 @@ impl Library {
 						listing.accent = early.accent;
 					}
 				}
+				self.row_revision = self.row_revision.wrapping_add(1);
 				self.listing = Some(listing);
-				if let Some(uri) = self.reveal.take()
-					&& let Some(i) = self.listing.as_ref().and_then(|l| l.tracks.iter().position(|t| t.uri == uri))
+				if let Some(uri) = &self.reveal
+					&& let Some(i) = self.listing.as_ref().and_then(|l| l.tracks.iter().position(|t| &t.uri == uri))
 				{
+					self.reveal = None;
 					self.selected = Some(i);
 					self.show_selection = true;
 				}
@@ -730,14 +712,6 @@ mod tests {
 			assert_eq!(listing.overview.as_ref(), Some(&overview));
 			assert_eq!(lib.overviews.get("artist"), Some(&overview));
 		}
-	}
-
-	#[test]
-	fn artist_navigation_only_requests_spotify_data() {
-		let requests = Library::default().navigate(Route::Artist("artist".into()));
-		assert_eq!(requests.len(), 2);
-		assert!(requests.iter().any(|request| matches!(request, Request::Open(Route::Artist(id), 0) if id == "artist")));
-		assert!(requests.iter().any(|request| matches!(request, Request::ArtistPopular(id) if id == "artist")));
 	}
 
 	#[test]
@@ -870,6 +844,7 @@ mod tests {
 		let track = |uri: &str| serde_json::from_value(serde_json::json!({ "uri": uri })).unwrap();
 		lib.listing = Some(Listing {
 			tracks: vec![track("a"), track("b"), track("a")],
+			positions: vec![0, 1, 2],
 			added_at: vec![Some(10), None, Some(30)],
 			added_by: vec![Some("alex".into()), None, Some("bo".into())],
 			total: 5,
@@ -895,6 +870,8 @@ mod tests {
 			offset:  0,
 			listing: Listing {
 				tracks: vec![track("a"), track("b"), track("a")],
+				positions: vec![0, 1, 2],
+				next_offset: Some(3),
 				added_at: vec![Some(10), None, Some(30)],
 				added_by: vec![Some("alex".into()), None, Some("bo".into())],
 				..Listing::default()
@@ -905,16 +882,19 @@ mod tests {
 		assert_eq!(listing.added_at, [Some(30), Some(10), None]);
 		assert_eq!(listing.added_by(0).as_deref(), Some("bo"));
 		lib.apply(Response::Moved("p1".into(), 0, 2));
+		lib.pending_offset = Some(3);
 		lib.apply(Response::Listing {
 			route:   route.clone(),
 			offset:  3,
-			listing: Listing { tracks: vec![track("c")], ..Listing::default() },
+			listing: Listing { tracks: vec![track("c")], positions: vec![3], next_offset: Some(4), ..Listing::default() },
 		});
+		lib.pending_offset = Some(4);
 		lib.apply(Response::Listing {
 			route,
 			offset: 4,
 			listing: Listing {
 				tracks: vec![track("a")],
+				positions: vec![4],
 				added_at: vec![Some(50)],
 				added_by: vec![Some("cy".into())],
 				..Listing::default()
@@ -932,8 +912,12 @@ mod tests {
 	fn dated_pages_pad_old_snapshots_without_shifting_added_attributes() {
 		let route = Route::Liked;
 		let track = || serde_json::from_value(serde_json::json!({ "uri": "a" })).unwrap();
-		let mut lib =
-			Library { route: route.clone(), listing: Some(Listing { tracks: vec![track()], ..Listing::default() }), ..Library::default() };
+		let mut lib = Library {
+			route: route.clone(),
+			listing: Some(Listing { tracks: vec![track()], next_offset: Some(1), ..Listing::default() }),
+			pending_offset: Some(1),
+			..Library::default()
+		};
 		lib.apply(Response::Listing {
 			route,
 			offset: 1,

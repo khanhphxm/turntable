@@ -10,7 +10,8 @@
 //! work runs on the engine's runtime with explicitly bounded concurrency.
 //! A persistence failure leaves the refreshed in-memory index usable and dirty,
 //! so the next `persist`/`refresh` retries the write. Unix cache files are 0600 in
-//! a 0700 subdirectory; Windows uses the cache directory's inherited ACL.
+//! a 0700 subdirectory; Windows uses the cache directory's inherited ACL. Atomic
+//! replacement prevents partial reads; this rebuildable cache deliberately does not fsync.
 //! Detach retains disk data for reconnects; sign-out/Premium rejection forgets it.
 
 use std::{
@@ -454,10 +455,7 @@ impl PlaylistIndex {
 			}
 			output.flush()?;
 		}
-		temporary.as_file().sync_all()?;
 		temporary.persist(&self.cache_path).map_err(|error| error.error)?;
-		#[cfg(unix)]
-		File::open(directory)?.sync_all()?;
 		self.cache_dirty = false;
 		Ok(())
 	}

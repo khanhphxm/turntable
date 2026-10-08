@@ -44,14 +44,80 @@ fn writer_queues_in_order_and_flags_the_end_when_dropped() {
 fn writer_blocks_at_the_fill_level_and_gives_up_when_stopped() {
 	let (writer, feed) = channel();
 	let h = thread::spawn(move || writer.write(&vec![0.0; 100_000]));
-	thread::sleep(Duration::from_millis(100));
-	assert!(feed.0.ring.len() <= FILL_SAMPLES, "never overfills");
+	let deadline = Instant::now() + Duration::from_secs(3);
+	while !feed.0.waiting.load(Ordering::Acquire) {
+		assert!(Instant::now() < deadline, "writer did not reach the full ring");
+		thread::yield_now();
+	}
+	assert_eq!(feed.0.ring.len(), FILL_SAMPLES, "never overfills");
 	assert!(!h.is_finished(), "waits for room");
 	feed.0.stop.store(true, Ordering::Release);
 	if let Some(t) = feed.0.writer.get() {
 		t.unpark();
 	}
 	assert!(!h.join().unwrap(), "a stopped player takes no more");
+}
+
+#[test]
+fn stalled_writer_reports_dead_once_and_drops_pcm_without_pausing_the_decoder() {
+	let (writer, feed) = channel();
+	let failures = Arc::new(AtomicU64::new(0));
+	let count = failures.clone();
+	feed.on_failure(move || {
+		count.fetch_add(1, Ordering::Relaxed);
+	});
+	assert!(writer.write(&[0.25; FILL_SAMPLES]));
+	// Inject the watchdog deadline rather than waiting two seconds in the unit suite.
+	assert!(writer.write_with_timeout(&[0.5; 2], Duration::ZERO));
+	assert!(feed.0.dead.load(Ordering::Acquire));
+	assert!(!feed.0.stop.load(Ordering::Acquire));
+	assert!(!feed.0.waiting.load(Ordering::Acquire));
+	assert_eq!(failures.load(Ordering::Relaxed), 1);
+	assert!(writer.write_with_timeout(&[0.75; 2], Duration::ZERO));
+	assert_eq!(failures.load(Ordering::Relaxed), 1, "coalesce failure events until rebuilt");
+	assert_eq!(feed.0.ring.pop(&mut [0.0; 2]), 0, "stale buffered PCM is discarded on recovery");
+	feed.0.stop.store(true, Ordering::Release);
+	assert!(!writer.write(&[0.0; 2]), "permanent shutdown still releases the sink");
+}
+
+#[test]
+fn underrun_ramps_to_silence_across_callbacks_and_refill_ramps_back_in() {
+	let sh = shared();
+	let mut render = Render::new(sh.clone());
+	sh.ring.push(&[0.5; REBUFFER_SAMPLES]);
+	let mut audio = vec![0.0; REBUFFER_SAMPLES];
+	render.render(&mut audio);
+	assert!(audio.iter().all(|&sample| sample == 0.5));
+	let mut tail = Vec::new();
+	let mut short = [0.0; 128];
+	for _ in 0..6 {
+		assert!(!render.render(&mut short), "a fade tail is not a silent callback");
+		tail.extend_from_slice(&short);
+	}
+	assert!(tail[0] < 0.5 && tail[0] > 0.49);
+	assert!(tail.as_chunks::<2>().0.iter().all(|frame| frame[0] == frame[1]));
+	assert!(tail.as_chunks::<2>().0.windows(2).all(|pair| pair[0][0] >= pair[1][0]));
+	assert_eq!(tail.last(), Some(&0.0));
+	assert!(render.render(&mut short));
+	sh.ring.push(&[0.5; REBUFFER_SAMPLES]);
+	render.render(&mut audio);
+	assert_eq!(audio[0], 0.0);
+	assert!(audio.as_chunks::<2>().0.windows(2).all(|pair| pair[0][0] <= pair[1][0]));
+	assert_eq!(audio.last(), Some(&0.5));
+	assert_eq!(sh.underruns.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn a_partial_underrun_preserves_audio_then_fades_the_last_stereo_frame() {
+	let sh = shared();
+	let mut render = Render::new(sh.clone());
+	render.buffering = false;
+	sh.ring.push(&[0.5, -0.25, 0.5, -0.25]);
+	let mut out = vec![0.0; (CLICK_FADE_FRAMES + 2) * 2];
+	render.render(&mut out);
+	assert_eq!(&out[..4], &[0.5, -0.25, 0.5, -0.25]);
+	assert!(out[4] > 0.49 && out[5] < -0.24);
+	assert_eq!(&out[out.len() - 2..], &[0.0, 0.0]);
 }
 
 #[test]

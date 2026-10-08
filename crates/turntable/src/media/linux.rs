@@ -369,7 +369,7 @@ fn register_root(crossroads: &mut Crossroads) -> IfaceToken<Player> {
 		builder.property::<bool, _>("CanQuit").emits_changed_const().get(|_, _: &mut Player| Ok(false));
 		builder.property::<bool, _>("CanRaise").emits_changed_const().get(|_, _: &mut Player| Ok(false));
 		builder.property::<bool, _>("HasTrackList").emits_changed_const().get(|_, _: &mut Player| Ok(false));
-		builder.property::<String, _>("Identity").emits_changed_const().get(|_, _: &mut Player| Ok("turntable".into()));
+		builder.property::<String, _>("Identity").emits_changed_const().get(|_, _: &mut Player| Ok("Turntable".into()));
 		builder.property::<String, _>("DesktopEntry").emits_changed_const().get(|_, _: &mut Player| Ok("turntable".into()));
 		builder.property::<Vec<String>, _>("SupportedUriSchemes").emits_changed_const().get(|_, _: &mut Player| Ok(Vec::new()));
 		builder.property::<Vec<String>, _>("SupportedMimeTypes").emits_changed_const().get(|_, _: &mut Player| Ok(Vec::new()));
@@ -415,61 +415,5 @@ mod tests {
 	#[test]
 	fn artwork_url_escapes_paths() {
 		assert_eq!(file_url(std::path::Path::new("/tmp/album art #1.png")), "file:///tmp/album%20art%20%231.png");
-	}
-
-	#[test]
-	#[ignore = "Run under dbus-run-session with --include-ignored"]
-	fn mpris_protocol_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
-		use dbus::blocking::stdintf::org_freedesktop_dbus::Properties as _;
-		let (sent, commands) = mpsc::channel();
-		let mut controls = super::super::MediaControls::new(move |command| {
-			let _ = sent.send(command);
-		})?;
-		controls.set_metadata(&Metadata {
-			title:       "Track".into(),
-			artist:      "Artist".into(),
-			album:       "Album".into(),
-			duration_ms: 180_000,
-			artwork:     None,
-		})?;
-		controls.set_playback(Playback::Paused { position_ms: 25_000 })?;
-		let connection = Connection::new_session()?;
-		let proxy = connection.with_proxy(NAME, PATH, Duration::from_secs(3));
-		assert_eq!(proxy.get::<String>(PLAYER, "PlaybackStatus")?, "Paused");
-		assert_eq!(proxy.get::<i64>(PLAYER, "Position")?, 25_000_000);
-		let metadata: PropMap = proxy.get(PLAYER, "Metadata")?;
-		assert_eq!(metadata.get("xesam:title").and_then(|value| value.0.as_str()), Some("Track"));
-		let track_id = Path::new(metadata.get("mpris:trackid").and_then(|value| value.0.as_str()).ok_or("Missing track ID")?.to_owned())?;
-		for (method, expected) in [
-			("Play", Command::Play),
-			("Pause", Command::Pause),
-			("PlayPause", Command::Toggle),
-			("Next", Command::Next),
-			("Previous", Command::Previous),
-		] {
-			let () = proxy.method_call(PLAYER, method, ())?;
-			assert_eq!(commands.recv_timeout(Duration::from_secs(3))?, expected);
-		}
-		let () = proxy.method_call(PLAYER, "Seek", (-5_000_000_i64,))?;
-		assert_eq!(commands.recv_timeout(Duration::from_secs(3))?, Command::Seek(-5_000));
-		let () = proxy.method_call(PLAYER, "Seek", (-50_000_000_i64,))?;
-		assert_eq!(commands.recv_timeout(Duration::from_secs(3))?, Command::SetPosition(0));
-		let () = proxy.method_call(PLAYER, "Seek", (200_000_000_i64,))?;
-		assert_eq!(commands.recv_timeout(Duration::from_secs(3))?, Command::Next);
-		let () = proxy.method_call(PLAYER, "SetPosition", (track_id.clone(), 42_000_000_i64))?;
-		assert_eq!(commands.recv_timeout(Duration::from_secs(3))?, Command::SetPosition(42_000));
-		let () = proxy.method_call(PLAYER, "SetPosition", (Path::from("/stale"), 42_000_000_i64))?;
-		let () = proxy.method_call(PLAYER, "SetPosition", (track_id, -1_i64))?;
-		assert!(commands.try_recv().is_err());
-		controls.set_playback(Playback::Playing { position_ms: 179_999 })?;
-		assert!(proxy.get::<i64>(PLAYER, "Position")? <= 180_000_000);
-		controls.set_playback(Playback::Stopped)?;
-		assert_eq!(proxy.get::<String>(PLAYER, "PlaybackStatus")?, "Stopped");
-		assert_eq!(proxy.get::<i64>(PLAYER, "Position")?, 0);
-		let metadata: PropMap = proxy.get(PLAYER, "Metadata")?;
-		assert_eq!(metadata.get("mpris:trackid").and_then(|value| value.0.as_str()), Some(NO_TRACK));
-		drop(controls);
-		assert!(proxy.get::<String>(PLAYER, "PlaybackStatus").is_err());
-		Ok(())
 	}
 }

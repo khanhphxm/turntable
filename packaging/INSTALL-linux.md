@@ -20,7 +20,7 @@ drivers work for supported Intel/AMD GPUs. A headless server is not sufficient.
 On Ubuntu 24.04 / recent Debian:
 
 ```sh
-sudo apt install libasound2t64 libpipewire-0.3-0 libxkbcommon0 libxkbcommon-x11-0 \
+sudo apt install libasound2t64 libpipewire-0.3-0 pipewire-bin libxkbcommon0 libxkbcommon-x11-0 \
   libvulkan1 mesa-vulkan-drivers libwayland-client0 libwayland-cursor0 \
   libwayland-egl1 libx11-6 libxcb1 libxcb-shape0 libxcb-xfixes0 libxrandr2 \
   libxi6 libxcursor1 libxinerama1 libxrender1 libxfixes3 libegl1 libgl1 \
@@ -34,6 +34,14 @@ EGL/OpenGL, Fontconfig, FreeType, D-Bus and OpenSSL. PipeWire should run in the
 user session; ALSA provides the device backend. D-Bus is needed for media keys
 and session integration. X11 libraries remain required even in a Wayland session
 because GPUI includes both platform backends.
+
+Playback also needs an audio utility on `PATH`: Turntable tries `pw-cat`
+(`pipewire-bin`), then `pacat` (`pulseaudio-utils`), then `aplay` (`alsa-utils`)
+when the preceding executable is absent. A PipeWire/PulseAudio user session or
+working ALSA output must be available; installing only the shared audio libraries
+is not enough. Playback follows the session's default sink. If the utility exits
+or the output stops draining, Turntable retries the output without requiring an
+application restart.
 
 ## Per-user install
 
@@ -55,3 +63,17 @@ copy `bin/turntable` to `/usr/local/bin` and `share/*` into `/usr/local/share`.
 Uninstall by removing the installed executable, `turntable.desktop`, and only
 `turntable.png` / `turntable.svg` from the hicolor `apps` directories. Do not
 remove the shared hicolor tree, which also contains other applications' icons.
+
+## Window decorations
+
+Turntable requests client-side decorations on X11 and Wayland. When the window
+manager grants them, the top bar provides minimize, maximize/restore and close
+buttons at its right edge (also on the welcome screen). Drag an empty part of
+the top bar to move the window, double-click to maximize/restore, and use the
+frame's edges or corners to resize. Minimize/maximize are shown only when the
+window manager supports those actions.
+
+X11 client-side decorations require a compositor and a window manager supporting
+`_GTK_FRAME_EXTENTS`. If they are unavailable, or a Wayland compositor insists
+on server-side decorations, Turntable keeps the window manager's native frame
+and does not draw a duplicate set of caption buttons.

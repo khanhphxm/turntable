@@ -6,7 +6,7 @@ use super::{input::replace_utf16, *};
 use crate::{
 	engine::{Command, Entity, Event, Position, QueueEntry, Status},
 	library::{self, Route},
-	sources::{external::Lyrics, lyrics},
+	lyrics::{self, Lyrics},
 	spotify::{PlayStart, PlaylistChanges},
 };
 
@@ -66,11 +66,8 @@ fn relative_seek_stays_inside_the_track() {
 }
 
 #[test]
-fn volume_steps_saturate_and_mute_restores() {
+fn volume_clamps_and_mute_restores() {
 	let mut s = State { volume: 98, ..State::default() };
-	assert_eq!(cmds(s.update(Msg::VolumeBy(1))), vec![Command::SetVolume { volume: 100 }]);
-	s.volume = 3;
-	assert_eq!(cmds(s.update(Msg::VolumeBy(-1))), vec![Command::SetVolume { volume: 0 }]);
 	assert_eq!(cmds(s.update(Msg::Volume(120))), vec![Command::SetVolume { volume: 100 }]);
 	s.volume = 35;
 	assert_eq!(cmds(s.update(Msg::ToggleMute)), vec![Command::SetVolume { volume: 0 }]);
@@ -90,11 +87,49 @@ fn a_band_click_where_the_thumb_stands_keeps_the_preset() {
 }
 
 #[test]
+fn eq_band_steps_cover_every_half_db() {
+	let mut state = State::default();
+	for step in 0..=EQ_STEPS {
+		let db = eq_step_db(step);
+		assert_eq!(eq_db_step(db), step);
+		assert_eq!(db, f32::from(step) * 0.5 - 12.0);
+		assert!(matches!(state.update(Msg::EqBand(9, step)).as_slice(), [Effect::SetEq]));
+		assert_eq!(state.eq.gains_db[9], db);
+	}
+	assert_eq!(eq_step_db(255), 12.0);
+	assert_eq!(eq_db_step(f32::NAN), 24);
+	for db in [-99.0, -3.75, -0.25, 0.25, 3.75, 99.0] {
+		assert_eq!(eq_step_db(eq_db_step(db)), crate::audio::sanitize_gain_db(db));
+	}
+	assert!(state.update(Msg::EqBand(10, 0)).is_empty());
+	assert_eq!(state.eq.gains_db[9], 12.0);
+}
+
+#[test]
+fn typed_eq_gains_round_clamp_and_keep_an_unchanged_preset() {
+	let mut state = State::default();
+	state.update(Msg::EqPreset("rock"));
+	state.update(Msg::EqSet(0, 3.75));
+	assert_eq!(state.eq_preset.as_deref(), Some("rock"));
+	state.update(Msg::EqEnabled(false));
+	for (db, want) in [(3.5, 3.5), (-0.25, -0.5), (99.0, 12.0), (-99.0, -12.0), (f32::NAN, 0.0)] {
+		assert!(matches!(state.update(Msg::EqSet(0, db)).as_slice(), [Effect::SetEq]));
+		assert_eq!(state.eq.gains_db[0], want);
+		assert!(state.eq.enabled);
+		assert!(state.eq_preset.is_none());
+	}
+	let before = state.eq;
+	assert!(state.update(Msg::EqSet(usize::MAX, 6.5)).is_empty());
+	assert_eq!(state.eq, before);
+}
+
+#[test]
 fn pause_freezes_the_local_clock() {
 	let mut s = playing(200_000, 10_000.0);
 	s.apply(Event::PlaybackChanged { status: Status::Paused });
-	let frozen = s.position_ms();
-	std::thread::sleep(Duration::from_millis(20));
+	assert_eq!(s.anchor.speed, 0.0);
+	let frozen = s.anchor.position_ms;
+	s.anchor.at = Instant::now().checked_sub(Duration::from_secs(60)).unwrap();
 	assert_eq!(s.position_ms(), frozen);
 }
 
@@ -104,19 +139,7 @@ fn position_sync_ignores_a_stale_timestamp() {
 	// Timestamp an hour in the past: trust arrival time, not the stale clock.
 	let hour_ago = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as f64 - 3_600_000.0;
 	s.apply(Event::PositionSync { position: Position { position_ms: 30_000.0, timestamp_ms: hour_ago, speed: 1.0 } });
-	assert!((30_000..31_000).contains(&s.position_ms()));
-}
-
-#[test]
-fn setup_needs_both_player_sign_in_and_library_access() {
-	let mut s = State::default();
-	assert!(s.needs_setup());
-	s.signed_in = true;
-	assert!(s.needs_setup());
-	s.library.conn = library::Conn::Ready;
-	assert!(!s.needs_setup());
-	s.signed_in = false;
-	assert!(s.needs_setup());
+	assert_eq!(s.anchor.position_ms, 30_000);
 }
 
 #[test]
@@ -133,16 +156,12 @@ fn native_edits_count_utf16_units() {
 
 #[test]
 fn submitting_a_field_routes_to_its_action() {
-	// The client-ID field is on screen during setup.
-	let mut s = State { focus: Some(Field::ClientId), ..State::default() };
-	s.update(Msg::Type(" abc123 \n".into()));
-	let effects = s.update(Msg::Submit);
-	assert!(matches!(effects.as_slice(), [Effect::SaveClientId(id)] if id == "abc123"));
+	let mut s = State::default();
 	// Search, once connected: Enter searches now and drops the pending debounce.
 	s.library.conn = library::Conn::Ready;
 	s.library.route = Route::Search;
 	s.focus = Some(Field::Search);
-	s.update(Msg::Type("cigarettes".into()));
+	s.update(Msg::SetText(Field::Search, "cigarettes".into()));
 	let effects = s.update(Msg::Submit);
 	assert!(matches!(
 		effects.as_slice(),
@@ -151,13 +170,13 @@ fn submitting_a_field_routes_to_its_action() {
 }
 
 #[test]
-fn focus_leaves_a_field_that_left_the_screen() {
+fn navigation_keeps_the_always_visible_host_search_field_focus() {
 	let mut s = State::default();
 	s.library.conn = library::Conn::Ready;
 	s.library.route = Route::Search;
 	s.focus = Some(Field::Search);
 	s.update(Msg::Navigate(Route::Liked));
-	assert_eq!(s.focus, None, "keys must reach the player again");
+	assert_eq!(s.focus, Some(Field::Search), "navigation does not hide the GPUI host's search field");
 }
 
 /// Signed in, with a playlist in Your Library.
@@ -210,14 +229,15 @@ fn playing_a_context_listing_loads_it_from_the_start() {
 }
 
 #[test]
-fn playing_a_row_or_selection_loads_its_context_at_the_chosen_track() {
+fn playing_a_row_loads_its_context_at_the_chosen_track() {
 	for (route, uri) in [(Route::Playlist("p".into()), "spotify:playlist:p"), (Route::Album("a".into()), "spotify:album:a")] {
 		let mut s = with_listing(route.clone(), Some(uri));
 		let expected = PlayStart::Context { uri: uri.into(), offset_uri: Some("spotify:track:180".into()), position_ms: 0 };
-		assert!(matches!(s.update(Msg::PlayRow(180)).as_slice(), [Effect::Player(Command::Load(start))] if *start == expected));
+		assert!(
+			matches!(s.update(Msg::PlayRow(s.library.row_target(180).unwrap())).as_slice(), [Effect::Player(Command::Load(start))] if *start == expected)
+		);
 		assert_eq!(s.library.selected, Some(180));
 		assert_eq!(s.played_from, Some(route));
-		assert!(matches!(s.update(Msg::PlaySelected).as_slice(), [Effect::Player(Command::Load(start))] if *start == expected));
 	}
 }
 
@@ -228,16 +248,16 @@ fn playing_without_a_context_loads_all_tracks_and_preserves_the_offset() {
 		let mut s = with_listing(route, context);
 		let uris: Vec<String> = (0..250).map(|i| format!("spotify:track:{i}")).collect();
 		let expected = PlayStart::Tracks { uris: uris.clone(), offset_uri: Some("spotify:track:180".into()) };
-		assert!(matches!(s.update(Msg::PlayRow(180)).as_slice(), [Effect::Player(Command::Load(start))] if *start == expected));
-		assert!(matches!(s.update(Msg::PlaySelected).as_slice(), [Effect::Player(Command::Load(start))] if *start == expected));
+		assert!(
+			matches!(s.update(Msg::PlayRow(s.library.row_target(180).unwrap())).as_slice(), [Effect::Player(Command::Load(start))] if *start == expected)
+		);
 		if context.is_none() {
 			let expected = PlayStart::Tracks { uris, offset_uri: Some("spotify:track:0".into()) };
 			assert!(matches!(s.update(Msg::PlayListing).as_slice(), [Effect::Player(Command::Load(start))] if *start == expected));
 		}
 	}
 	let mut s = State::default();
-	assert!(s.update(Msg::PlaySelected).is_empty());
-	assert!(s.update(Msg::PlayRow(0)).is_empty());
+	assert!(s.update(Msg::PlayRow(library::RowTarget { route: Route::Home, uri: "missing".into(), occurrence: None })).is_empty());
 	assert!(s.update(Msg::PlayListing).is_empty());
 }
 
@@ -261,14 +281,6 @@ fn the_sort_menu_closes_on_a_sort_or_any_other_message_but_not_on_a_view() {
 }
 
 #[test]
-fn the_sort_menu_needs_its_button_on_screen() {
-	let mut s = with_library();
-	s.sidebar_collapsed = true;
-	s.update(Msg::LibraryMenu);
-	assert!(!s.library_menu, "covers only: no button to hang from");
-}
-
-#[test]
 fn clearing_the_library_filter_empties_it_and_keeps_the_caret_there() {
 	let mut s = with_library();
 	s.library.filter = "road".into();
@@ -278,23 +290,12 @@ fn clearing_the_library_filter_empties_it_and_keeps_the_caret_there() {
 }
 
 #[test]
-fn the_library_filter_is_on_screen_while_the_sidebar_shows_it() {
-	let mut s = with_library();
-	assert!(s.field_visible(Field::LibraryFilter));
-	s.sidebar_collapsed = true;
-	assert!(!s.field_visible(Field::LibraryFilter), "covers only");
-	s.sidebar_collapsed = false;
-	s.library.conn = library::Conn::NeedsLogin;
-	assert!(!s.field_visible(Field::LibraryFilter));
-}
-
-#[test]
 fn typing_in_the_library_filter_filters_without_searching() {
 	let mut s = with_library();
 	s.update(Msg::Focus(Some(Field::LibraryFilter)));
-	assert!(s.update(Msg::Type("road".into())).is_empty(), "no search, no request");
+	assert!(s.update(Msg::SetText(Field::LibraryFilter, "road".into())).is_empty(), "no search, no request");
 	assert_eq!(s.library.filter, "road");
-	s.update(Msg::Backspace);
+	s.update(Msg::SetText(Field::LibraryFilter, "roa".into()));
 	assert_eq!(s.library.filter, "roa");
 	assert_eq!(s.focus, Some(Field::LibraryFilter));
 }
@@ -332,7 +333,7 @@ fn a_click_elsewhere_gives_the_filter_keys_back_to_the_player() {
 	s.dialog = None;
 	s.library.route = Route::Search;
 	s.focus = Some(Field::Search);
-	s.update(Msg::Select(0));
+	s.update(Msg::Select(library::RowTarget { route: Route::Search, uri: "missing".into(), occurrence: None }));
 	assert_eq!(s.focus, Some(Field::Search));
 }
 
@@ -424,16 +425,15 @@ fn playlist_details_prefill_and_save_changed_fields() {
 	assert_eq!(s.description_input, "First line");
 	s.update(Msg::Focus(Some(Field::PlaylistDescription)));
 	s.update(Msg::Edit { from: 10, to: 10, text: "\nSecond line".into() });
-	s.update(Msg::TogglePlaylistPublic);
 	let effects = s.update(Msg::SaveRename);
-	let expected = PlaylistChanges { name: None, description: Some("First line\nSecond line".into()), public: Some(true) };
+	let expected = PlaylistChanges { name: None, description: Some("First line\nSecond line".into()), public: None };
 	assert!(
 		matches!(effects.as_slice(), [Effect::Library(library::Request::RenamePlaylist(id, changes))] if id == "p1" && *changes == expected)
 	);
 	let listing = s.library.listing.as_ref().unwrap();
 	assert_eq!(listing.title, "Original");
 	assert_eq!(listing.description.as_deref(), Some("First line\nSecond line"));
-	assert_eq!(listing.public, Some(true));
+	assert_eq!(listing.public, Some(false));
 	assert!(s.dialog.is_none());
 	assert_eq!(s.focus, None);
 	s.update(Msg::RenamePlaylist);
@@ -598,7 +598,7 @@ fn added_respects_optimistic_unlike_over_full_liked_collection() -> Result<(), l
 	assert!(s.added(uri));
 	s.item.uri = uri.into();
 	assert_eq!(s.liked(), Some(true), "now playing can reuse full collection membership without a contains request");
-	s.update(Msg::RemoveFromLiked(uri.into()));
+	s.update(Msg::ToggleLike);
 	assert!(!s.added(uri), "optimistic removal wins while the worker's cached full collection still contains the URI");
 	assert_eq!(s.liked(), Some(false));
 	s.library.apply(owned_tracks(&[uri])?);
@@ -636,11 +636,6 @@ fn row_liked_actions_are_explicit_and_optimistic_without_changing_now_playing() 
 	assert_eq!(s.liked(), Some(true));
 	s.library.apply(library::Response::Liked(row.into(), true));
 	assert_eq!(s.liked(), Some(true), "a row's reply retains cached now-playing membership");
-	assert!(
-		matches!(s.update(Msg::RemoveFromLiked(row.into())).as_slice(), [Effect::Library(library::Request::SetLiked(track, false))] if track == row)
-	);
-	assert!(!s.added(row));
-	assert_eq!(s.liked(), Some(true));
 	s.library.apply(library::Response::Liked(row.into(), false));
 	assert_eq!(s.liked(), Some(true));
 }
@@ -653,13 +648,14 @@ fn playlist_row_edits_target_one_occurrence_and_apply_only_after_success() {
 	state.library.listing = Some(library::Listing {
 		editable: true,
 		tracks: vec![track("a"), track("b"), track("a")],
+		positions: vec![0, 1, 2],
 		total: 3,
 		plays: vec![10, 20, 30],
 		..Default::default()
 	});
 	state.library.selected = Some(1);
 	assert!(
-		matches!(state.update(Msg::MoveRow(0, 2)).as_slice(), [Effect::Library(library::Request::MovePlaylistRow(id, 0, 2))] if id == "scratch")
+		matches!(state.update(Msg::MoveRow(0, 2)).as_slice(), [Effect::Library(library::Request::MovePlaylistRow { id, from: 0, to: 2, source, target })] if id == "scratch" && source == "a" && target == "a")
 	);
 	assert_eq!(state.library.rows()[0].uri, "a", "wait for successful acknowledgment");
 	state.library.apply(library::Response::Moved("scratch".into(), 0, 2));
@@ -667,7 +663,7 @@ fn playlist_row_edits_target_one_occurrence_and_apply_only_after_success() {
 	assert_eq!(state.library.selected, Some(0));
 	assert_eq!(state.library.listing.as_ref().unwrap().plays, [20, 30, 10]);
 	assert!(
-		matches!(state.update(Msg::RemoveRow(2)).as_slice(), [Effect::Library(library::Request::RemoveFromPlaylist(id, uri, 2))] if id == "scratch" && uri == "a")
+		matches!(state.update(Msg::RemoveRow(state.library.row_target(2).unwrap())).as_slice(), [Effect::Library(library::Request::RemoveFromPlaylist(id, uri, 2))] if id == "scratch" && uri == "a")
 	);
 	state.library.apply(library::Response::Removed("scratch".into(), "a".into(), 2));
 	assert_eq!(state.library.rows().iter().map(|track| track.uri.as_str()).collect::<Vec<_>>(), ["b", "a"]);
@@ -677,7 +673,7 @@ fn playlist_row_edits_target_one_occurrence_and_apply_only_after_success() {
 	assert!(state.update(Msg::MoveRow(0, 99)).is_empty());
 	state.library.listing.as_mut().unwrap().editable = false;
 	assert!(state.update(Msg::MoveRow(0, 1)).is_empty());
-	assert!(state.update(Msg::RemoveRow(0)).is_empty());
+	assert!(state.update(Msg::RemoveRow(state.library.row_target(0).unwrap())).is_empty());
 }
 
 #[test]
@@ -695,4 +691,210 @@ fn direct_playlist_add_uses_the_same_request_without_consuming_a_dialog() {
 	assert!(
 		matches!(dialog_effects.as_slice(), [Effect::Library(library::Request::AddToPlaylist(id, name, uris))] if id == "scratch" && name == "Scratch" && uris == &["picked"])
 	);
+}
+
+#[test]
+fn host_search_and_finder_text_edits_do_not_depend_on_route_or_focus() {
+	for route in [Route::Home, Route::Playlist("playlist".into())] {
+		let mut state = with_library();
+		state.library.route = route.clone();
+		state.focus = None;
+		assert!(state.field_visible(Field::Search));
+		assert!(matches!(state.update(Msg::SetText(Field::Search, "find\nthis".into())).as_slice(), [Effect::SearchSoon]));
+		assert_eq!(state.library.query, "findthis");
+		assert_eq!(state.library.route, route);
+		assert_eq!(state.focus, None);
+		assert!(state.update(Msg::SetText(Field::Search, "findthis".into())).is_empty());
+	}
+}
+
+#[test]
+fn opening_a_track_keeps_reveal_through_same_route_navigation_and_partial_answers() {
+	let mut state = with_library();
+	let route = Route::Album("album".into());
+	assert!(matches!(state.update(Msg::OpenTrack { album: "album".into(), uri: "song".into() }).as_slice(),
+		[Effect::Library(library::Request::Open(wanted, 0))] if wanted == &route));
+	assert!(state.update(Msg::Navigate(route.clone())).is_empty());
+	assert_eq!(state.library.reveal.as_deref(), Some("song"));
+	state.library.apply(library::Response::Listing {
+		route:   route.clone(),
+		offset:  0,
+		listing: library::Listing { loading: true, ..Default::default() },
+	});
+	assert_eq!(state.library.reveal.as_deref(), Some("song"));
+	let track = serde_json::from_value(serde_json::json!({"uri": "song"})).unwrap();
+	state.library.apply(library::Response::Listing {
+		route,
+		offset: 0,
+		listing: library::Listing { tracks: vec![track], ..Default::default() },
+	});
+	assert_eq!(state.library.selected, Some(0));
+	assert!(state.library.show_selection);
+	assert!(state.library.reveal.is_none());
+	assert!(state.update(Msg::OpenTrack { album: "album".into(), uri: "song".into() }).is_empty());
+	assert_eq!(state.library.selected, Some(0));
+}
+
+#[test]
+fn continuation_pages_append_only_once_and_keep_loading_across_first_page_refresh() {
+	let route = Route::Playlist("playlist".into());
+	let track = |uri: &str| serde_json::from_value(serde_json::json!({"uri": uri})).unwrap();
+	let listing = |uri, next_offset| library::Listing { tracks: vec![track(uri)], next_offset, ..Default::default() };
+	let mut state = State::default();
+	state.library.route = route.clone();
+	state.library.apply(library::Response::Listing { route: route.clone(), offset: 0, listing: listing("cached", Some(50)) });
+	assert!(matches!(state.update(Msg::LoadMore).as_slice(), [Effect::Library(library::Request::Open(_, 50))]));
+	state.library.apply(library::Response::Listing {
+		route:   route.clone(),
+		offset:  0,
+		listing: library::Listing { loading: true, ..Default::default() },
+	});
+	assert_eq!(state.library.pending_offset, Some(50), "a partial refreshed header does not cancel the awaited page");
+	assert!(state.update(Msg::LoadMore).is_empty());
+	state.library.apply(library::Response::Listing { route: route.clone(), offset: 0, listing: listing("fresh", Some(50)) });
+	assert!(state.library.listing.as_ref().unwrap().loading);
+	assert!(state.update(Msg::LoadMore).is_empty());
+	state.library.apply(library::Response::Listing { route: route.clone(), offset: 100, listing: listing("stale", None) });
+	assert!(state.library.listing.as_ref().unwrap().loading);
+	state.library.apply(library::Response::Listing { route: route.clone(), offset: 50, listing: listing("more", Some(100)) });
+	state.library.apply(library::Response::Listing { route: route.clone(), offset: 50, listing: listing("duplicate", Some(100)) });
+	state.library.apply(library::Response::Listing { route, offset: 100, listing: listing("unsolicited", None) });
+	assert_eq!(state.library.rows().iter().map(|row| row.uri.as_str()).collect::<Vec<_>>(), ["fresh", "more"]);
+	assert!(!state.library.listing.as_ref().unwrap().loading);
+}
+
+#[test]
+fn playlist_edits_use_raw_positions_across_missing_rows_and_reject_legacy_positions() {
+	let track = |uri: &str| serde_json::from_value(serde_json::json!({"uri": uri})).unwrap();
+	let mut state = State::default();
+	state.library.route = Route::Playlist("playlist".into());
+	state.library.listing = Some(library::Listing {
+		editable: true,
+		tracks: vec![track("a"), track("b"), track("c")],
+		positions: vec![10, 12, 14],
+		..Default::default()
+	});
+	assert!(
+		matches!(state.update(Msg::RemoveRow(state.library.row_target(1).unwrap())).as_slice(), [Effect::Library(library::Request::RemoveFromPlaylist(_, uri, 12))] if uri == "b")
+	);
+	assert!(
+		matches!(state.update(Msg::MoveRow(0, 2)).as_slice(), [Effect::Library(library::Request::MovePlaylistRow { from: 10, to: 14, source, target, .. })] if source == "a" && target == "c")
+	);
+	state.library.apply(library::Response::Moved("playlist".into(), 10, 14));
+	assert_eq!(state.library.rows().iter().map(|row| row.uri.as_str()).collect::<Vec<_>>(), ["b", "c", "a"]);
+	assert_eq!(state.library.listing.as_ref().unwrap().positions, [11, 13, 14]);
+	state.library.apply(library::Response::Removed("playlist".into(), "b".into(), 11));
+	assert_eq!(state.library.listing.as_ref().unwrap().positions, [12, 13]);
+	state.library.listing.as_mut().unwrap().positions.clear();
+	assert!(state.update(Msg::RemoveRow(state.library.row_target(0).unwrap())).is_empty());
+	assert!(state.update(Msg::MoveRow(0, 1)).is_empty());
+}
+
+#[test]
+fn failed_lyrics_retry_with_exponential_backoff_and_success_stops_retrying() {
+	let mut state = State::default();
+	state.item.uri = "spotify:track:a".into();
+	let failure = || lyrics::Response { uri: "spotify:track:a".into(), lyrics: Err("offline".into()) };
+	state.apply_lyrics(failure());
+	let first = state.lyrics_retry_at.unwrap();
+	assert!(!state.lyrics_due(Instant::now()));
+	assert!(state.lyrics_due(first));
+	state.apply_lyrics(failure());
+	assert!(state.lyrics_retry_at.unwrap().duration_since(first) >= Duration::from_secs(5));
+	for _ in 0..20 {
+		state.apply_lyrics(failure());
+	}
+	assert!(state.lyrics_retry_at.unwrap().duration_since(Instant::now()) <= Duration::from_secs(300));
+	state.apply_lyrics(lyrics::Response { uri: "spotify:track:a".into(), lyrics: Ok(None) });
+	assert!(state.lyrics_retry_at.is_none());
+	assert!(!state.lyrics_due(Instant::now() + Duration::from_secs(600)));
+	state.item.uri = "spotify:track:b".into();
+	assert!(state.lyrics_due(Instant::now()));
+}
+
+#[test]
+fn empty_window_title_uses_the_application_name() {
+	assert_eq!(State::default().window_title(), "Turntable");
+}
+
+#[test]
+fn row_actions_resolve_reordered_tracks_and_ignore_removed_or_wrong_route_targets() {
+	let mut state = with_listing(Route::Liked, None);
+	let target = state.library.row_target(180).unwrap();
+	state.library.listing.as_mut().unwrap().tracks.swap(0, 180);
+	state.update(Msg::Select(target.clone()));
+	assert_eq!(state.library.selected, Some(0));
+	assert!(matches!(state.update(Msg::PlayRow(target.clone())).as_slice(),
+		[Effect::Player(Command::Load(PlayStart::Tracks { offset_uri: Some(uri), .. }))] if uri == &target.uri));
+	state.update(Msg::AddRowToPlaylist(target.clone()));
+	assert!(matches!(&state.dialog, Some(Dialog::AddToPlaylist { uris, .. }) if uris == std::slice::from_ref(&target.uri)));
+	for action in [Msg::QueueRow(target.clone()), Msg::QueuePlayNext(target.clone())] {
+		assert!(matches!(state.update(action).as_slice(), [Effect::Player(Command::EditQueue { .. })]));
+		assert!(state.upcoming.iter().all(|entry| entry.item.uri == target.uri));
+	}
+	state.dialog = None;
+	state.library.listing.as_mut().unwrap().tracks.remove(0);
+	let selection = state.library.selected;
+	for action in [
+		Msg::Select(target.clone()),
+		Msg::PlayRow(target.clone()),
+		Msg::AddRowToPlaylist(target.clone()),
+		Msg::QueueRow(target.clone()),
+		Msg::QueuePlayNext(target.clone()),
+		Msg::RemoveRow(target),
+	] {
+		assert!(state.update(action).is_empty());
+		assert_eq!(state.library.selected, selection);
+		assert!(state.dialog.is_none());
+	}
+	let other_target = state.library.row_target(0).unwrap();
+	state.library.route = Route::Album("other".into());
+	assert!(state.update(Msg::PlayRow(other_target)).is_empty(), "same URI on another route cannot consume a stale click");
+}
+
+#[test]
+fn playlist_row_targets_reject_replaced_raw_occurrences_and_disambiguate_duplicates() {
+	let track = |uri: &str| serde_json::from_value(serde_json::json!({"uri": uri})).unwrap();
+	let mut state = State::default();
+	state.library.route = Route::Playlist("playlist".into());
+	state.library.listing = Some(library::Listing {
+		editable: true,
+		tracks: vec![track("a"), track("b"), track("a")],
+		positions: vec![10, 12, 14],
+		..Default::default()
+	});
+	let second_a = state.library.row_target(2).unwrap();
+	assert!(matches!(state.update(Msg::RemoveRow(second_a.clone())).as_slice(),
+		[Effect::Library(library::Request::RemoveFromPlaylist(_, uri, 14))] if uri == "a"));
+	let stale = state.library.row_target(1).unwrap();
+	state.library.listing.as_mut().unwrap().tracks.swap(0, 1);
+	for action in [
+		Msg::Select(stale.clone()),
+		Msg::PlayRow(stale.clone()),
+		Msg::QueueRow(stale.clone()),
+		Msg::QueuePlayNext(stale.clone()),
+		Msg::AddRowToPlaylist(stale.clone()),
+		Msg::RemoveRow(stale),
+	] {
+		assert!(state.update(action).is_empty());
+	}
+	state.library.listing.as_mut().unwrap().positions.clear();
+	assert_eq!(state.library.resolve_row(&second_a), None);
+	assert_eq!(state.library.resolve_row(&state.library.row_target(2).unwrap()), None, "legacy duplicate has no occurrence identity");
+}
+
+#[test]
+fn stale_duplicate_row_cannot_remove_the_next_identical_occurrence() {
+	let track = || serde_json::from_value(serde_json::json!({"uri": "spotify:track:a"})).unwrap();
+	let mut state = State::default();
+	state.library.route = Route::Playlist("playlist".into());
+	state.library.listing =
+		Some(library::Listing { editable: true, tracks: vec![track(), track()], positions: vec![0, 1], ..Default::default() });
+	let stale = state.library.row_target(0).unwrap();
+	state.library.apply(library::Response::Removed("playlist".into(), "spotify:track:a".into(), 0));
+	assert_eq!(state.library.rows().len(), 1);
+	assert_eq!(state.library.listing.as_ref().unwrap().positions, [0]);
+	assert!(state.update(Msg::RemoveRow(stale.clone())).is_empty());
+	assert!(state.update(Msg::PlayRow(stale)).is_empty());
+	assert!(!state.update(Msg::RemoveRow(state.library.row_target(0).unwrap())).is_empty(), "newly rendered duplicate remains actionable");
 }

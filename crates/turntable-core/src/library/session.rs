@@ -9,14 +9,10 @@
 //! seconds (Playlist4 milliseconds are converted); albums and old caches return `None`.
 //! `Listing::added_by(row)` exposes Playlist4's username when present, not a display name.
 
-#[cfg(test)]
-mod added_live;
 mod artwork;
 mod collection;
 mod connect;
 mod home;
-#[cfg(test)]
-mod live;
 mod playlist;
 mod profile;
 mod rootlist;
@@ -40,7 +36,7 @@ use librespot_protocol::{
 };
 use protobuf::{EnumOrUnknown, Message};
 
-use super::{HomeSection, Listing, PAGE, Route, Tile, added::TrackId, artist::Popularity};
+use super::{Listing, PAGE, Route, Tile, added::TrackId, artist::Popularity};
 use crate::{
 	engine::SessionReader,
 	net::{cache::Cache, par, trace},
@@ -91,9 +87,10 @@ struct ArtistData {
 }
 
 pub(super) struct TrackPage {
-	pub page:     Page<Track>,
-	pub added_at: Vec<Option<i64>>,
-	pub added_by: Vec<Option<String>>,
+	pub page:      Page<Track>,
+	pub added_at:  Vec<Option<i64>>,
+	pub added_by:  Vec<Option<String>>,
+	pub positions: Vec<u32>,
 }
 
 /// Metadata batching deduplicates URIs and may omit unavailable items; match each
@@ -104,14 +101,20 @@ fn added_page<'a>(
 	offset: u32,
 	total: u32,
 ) -> TrackPage {
-	let (added_at, added_by) = rows
-		.iter()
-		.map(|track| {
-			let attributes = attributes.find(|(uri, _, _)| *uri == track.uri);
-			attributes.map_or((None, None), |(_, at, by)| (at, by.map(str::to_owned)))
-		})
-		.unzip();
-	TrackPage { page: page(rows, offset, PAGE, total), added_at, added_by }
+	let mut attributes = attributes.by_ref().enumerate();
+	let mut added_at = Vec::with_capacity(rows.len());
+	let mut added_by = Vec::with_capacity(rows.len());
+	let mut positions = Vec::with_capacity(rows.len());
+	for track in &rows {
+		let matched = attributes.find(|(_, (uri, _, _))| *uri == track.uri);
+		let (at, by) = matched.as_ref().map_or((None, None), |(_, (_, at, by))| (*at, by.map(str::to_owned)));
+		added_at.push(at);
+		added_by.push(by);
+		if let Some((position, _)) = matched {
+			positions.push(offset.saturating_add(u32::try_from(position).unwrap_or(u32::MAX)));
+		}
+	}
+	TrackPage { page: page(rows, offset, PAGE, total), added_at, added_by, positions }
 }
 
 impl Reader {
@@ -127,14 +130,6 @@ impl Reader {
 			excluded: None,
 			roots: None,
 		}
-	}
-
-	pub(super) fn session_reader(&self) -> SessionReader {
-		self.shared.clone()
-	}
-
-	pub(super) fn home_section(&self, uri: &str, offset: u32) -> Result<(HomeSection, Option<u32>), String> {
-		spotify::home_feed::fetch_section(&self.shared, uri, offset)
 	}
 
 	pub(super) fn matches(&self, username: &str) -> bool {
@@ -201,9 +196,9 @@ impl Reader {
 					bytes: bytes.len(),
 					..trace::Reply::default()
 				});
-				Ok(())
+				Ok::<(), librespot_core::Error>(())
 			})
-			.map_err(network)
+			.map_err(spotify::Error::from)
 	}
 
 	fn collection(&mut self, set: CollectionSet) -> spotify::Result<&[CollectionItem]> {
@@ -213,7 +208,7 @@ impl Reader {
 			CollectionSet::IgnoreInRecs => &mut self.excluded,
 		};
 		if cache.as_ref().is_none_or(|(at, _)| at.elapsed() >= TTL) {
-			let items = self.shared.block_on(collection(self.shared.session(), set)).map_err(network)?;
+			let items = self.shared.block_on(collection(self.shared.session(), set)).map_err(spotify::Error::from)?;
 			*cache = Some((Instant::now(), items));
 			if matches!(set, CollectionSet::Saved) {
 				self.liked_ids = None;
@@ -262,7 +257,7 @@ impl Reader {
 
 	fn roots(&mut self) -> spotify::Result<&rootlist::Data> {
 		if self.roots.as_ref().is_none_or(|(at, _)| at.elapsed() >= TTL) {
-			let roots = self.shared.block_on(rootlist::fetch(self.shared.session())).map_err(network)?;
+			let roots = self.shared.block_on(rootlist::fetch(self.shared.session())).map_err(spotify::Error::from)?;
 			self.roots = Some((Instant::now(), roots));
 		}
 		self.roots.as_ref().map(|(_, roots)| roots).ok_or_else(|| spotify::Error::Parse("Native rootlist is unavailable".into()))
@@ -298,9 +293,9 @@ impl Reader {
 				};
 				let first = page.as_ref().filter(|_| offset == 0).map(|page| (&raw, page.page.items.as_slice()));
 				artwork::fill(self.shared.session(), &mut info, first).await?;
-				Ok((info, editable, page))
+				Ok::<_, librespot_core::Error>((info, editable, page))
 			})
-			.map_err(network)
+			.map_err(spotify::Error::from)
 	}
 
 	pub(super) fn liked(&mut self, offset: u32) -> spotify::Result<TrackPage> {
@@ -313,7 +308,7 @@ impl Reader {
 			.take(PAGE as usize)
 			.map(|item| (item.uri.clone(), item.added_at))
 			.unzip();
-		let tracks = self.shared.block_on(tracks(self.shared.session(), &uris, None)).map_err(network)?;
+		let tracks = self.shared.block_on(tracks(self.shared.session(), &uris, None)).map_err(spotify::Error::from)?;
 		Ok(added_page(tracks, uris.iter().zip(timestamps).map(|(uri, at)| (uri.as_str(), Some(at), None)), offset, total))
 	}
 
@@ -325,12 +320,18 @@ impl Reader {
 		let raw = self
 			.shared
 			.block_on(metadata::<metadata::Album>(self.shared.session(), std::slice::from_ref(&entity), ExtensionKind::ALBUM_V4))
-			.map_err(network)?
+			.map_err(spotify::Error::from)?
 			.remove(&entity)
 			.ok_or_else(|| spotify::Error::Parse("Spotify returned no album metadata".into()))?;
-		let album = album(&raw).map_err(network)?;
-		let uris = raw.disc.iter().flat_map(|d| &d.track).map(|t| uri("track", t.gid())).collect::<Result<Vec<_>, _>>().map_err(network)?;
-		let tracks = self.shared.block_on(tracks(self.shared.session(), &uris, Some(&album))).map_err(network)?;
+		let album = album(&raw).map_err(spotify::Error::from)?;
+		let uris = raw
+			.disc
+			.iter()
+			.flat_map(|d| &d.track)
+			.map(|t| uri("track", t.gid()))
+			.collect::<Result<Vec<_>, _>>()
+			.map_err(spotify::Error::from)?;
+		let tracks = self.shared.block_on(tracks(self.shared.session(), &uris, Some(&album))).map_err(spotify::Error::from)?;
 		let duration_ms = tracks.iter().map(|track| u64::from(track.duration_ms)).sum();
 		let disc_count = u32::try_from(raw.disc.len()).unwrap_or(u32::MAX);
 		if offset == 0 {
@@ -349,8 +350,8 @@ impl Reader {
 			let raw = self
 				.shared
 				.block_on(metadata::<metadata::Album>(self.shared.session(), &uris, ExtensionKind::ALBUM_V4))
-				.map_err(network)?;
-			let mut releases = release_models(&uris, &raw).map_err(network)?;
+				.map_err(spotify::Error::from)?;
+			let mut releases = release_models(&uris, &raw).map_err(spotify::Error::from)?;
 			releases.sort_by(|a, b| b.release_date.cmp(&a.release_date));
 			releases.iter().map(Tile::release).collect()
 		} else {
@@ -381,7 +382,7 @@ impl Reader {
 				let raw = self
 					.shared
 					.block_on(metadata::<metadata::Album>(self.shared.session(), std::slice::from_ref(&entity), ExtensionKind::ALBUM_V4))
-					.map_err(network)?
+					.map_err(spotify::Error::from)?
 					.remove(&entity)
 					.ok_or_else(|| spotify::Error::Parse("Spotify returned no album metadata".into()))?;
 				let uris = raw
@@ -390,11 +391,11 @@ impl Reader {
 					.flat_map(|disc| &disc.track)
 					.map(|track| uri("track", track.gid()))
 					.collect::<Result<Vec<_>, _>>()
-					.map_err(network)?;
+					.map_err(spotify::Error::from)?;
 				Ok((raw.name().to_owned(), uris, None))
 			},
 			Route::Playlist(id) => {
-				let raw = self.shared.block_on(playlist::fetch(self.shared.session(), id, offset, PAGE)).map_err(network)?;
+				let raw = self.shared.block_on(playlist::fetch(self.shared.session(), id, offset, PAGE)).map_err(spotify::Error::from)?;
 				let contents = raw.contents.get_or_default();
 				let next =
 					u32::try_from(contents.pos()).unwrap_or(offset).saturating_add(u32::try_from(contents.items.len()).unwrap_or(u32::MAX));
@@ -414,7 +415,7 @@ impl Reader {
 		let raw = self
 			.shared
 			.block_on(metadata::<metadata::Artist>(self.shared.session(), std::slice::from_ref(&entity), ExtensionKind::ARTIST_V4))
-			.map_err(network)?
+			.map_err(spotify::Error::from)?
 			.remove(&entity)
 			.ok_or_else(|| spotify::Error::Parse("Spotify returned no artist metadata".into()))?;
 		let country = self.shared.session().country();
@@ -425,17 +426,17 @@ impl Reader {
 			.take(10)
 			.map(|t| uri("track", t.gid()))
 			.collect::<Result<_, _>>()
-			.map_err(network)?;
+			.map_err(spotify::Error::from)?;
 		let groups = [("Albums", &raw.album_group), ("Singles and EPs", &raw.single_group), ("Compilations", &raw.compilation_group)]
 			.into_iter()
 			.map(|(title, groups)| releases(groups).map(|uris| (title, uris)))
 			.collect::<Result<_, _>>()
-			.map_err(network)?;
+			.map_err(spotify::Error::from)?;
 		let data = Arc::new(ArtistData {
-			artist: artist(&raw).map_err(network)?,
+			artist: artist(&raw).map_err(spotify::Error::from)?,
 			top,
 			groups,
-			appears: releases(&raw.appears_on_group).map_err(network)?,
+			appears: releases(&raw.appears_on_group).map_err(spotify::Error::from)?,
 		});
 		self.artists.insert(entity, data.clone());
 		Ok(data)
@@ -469,18 +470,18 @@ impl Reader {
 					metadata::<metadata::Album>(self.shared.session(), &uris, ExtensionKind::ALBUM_V4)
 				)
 			})
-			.map_err(network)?;
+			.map_err(spotify::Error::from)?;
 		listing.tracks = rows;
 		listing.popular_loaded = true;
 		let mut discography = Vec::new();
 		for (title, uris) in &data.groups {
-			let mut releases = release_models(uris, &albums).map_err(network)?;
+			let mut releases = release_models(uris, &albums).map_err(spotify::Error::from)?;
 			releases.sort_by(|a, b| b.release_date.cmp(&a.release_date));
 			if !releases.is_empty() {
 				discography.push((*title, releases.iter().map(Tile::release).collect()));
 			}
 		}
-		listing.appears_on = release_models(&data.appears, &albums).map_err(network)?.iter().map(Tile::album).collect();
+		listing.appears_on = release_models(&data.appears, &albums).map_err(spotify::Error::from)?.iter().map(Tile::album).collect();
 		listing.followed = self.contains(&a.uri).ok();
 		listing.discography = discography;
 		Ok(listing)
@@ -488,7 +489,7 @@ impl Reader {
 
 	pub(super) fn popularity(&mut self, id: &str) -> spotify::Result<Popularity> {
 		let data = self.artist_data(id)?;
-		let tracks = self.shared.block_on(tracks(self.shared.session(), &data.top, None)).map_err(network)?;
+		let tracks = self.shared.block_on(tracks(self.shared.session(), &data.top, None)).map_err(spotify::Error::from)?;
 		Ok(Popularity { tracks, ..Popularity::default() })
 	}
 
@@ -500,9 +501,11 @@ impl Reader {
 			.take(limit)
 			.map(|i| i.uri.clone())
 			.collect();
-		let raw =
-			self.shared.block_on(metadata::<metadata::Album>(self.shared.session(), &uris, ExtensionKind::ALBUM_V4)).map_err(network)?;
-		release_models(&uris, &raw).map_err(network)
+		let raw = self
+			.shared
+			.block_on(metadata::<metadata::Album>(self.shared.session(), &uris, ExtensionKind::ALBUM_V4))
+			.map_err(spotify::Error::from)?;
+		release_models(&uris, &raw).map_err(spotify::Error::from)
 	}
 
 	pub(super) fn followed(&mut self, limit: usize) -> spotify::Result<Vec<Artist>> {
@@ -517,9 +520,11 @@ impl Reader {
 	}
 
 	pub(super) fn artists(&self, uris: &[String]) -> spotify::Result<Vec<Artist>> {
-		let mut raw =
-			self.shared.block_on(metadata::<metadata::Artist>(self.shared.session(), uris, ExtensionKind::ARTIST_V4)).map_err(network)?;
-		uris.iter().filter_map(|uri| raw.remove(uri)).map(|raw| artist(&raw)).collect::<Result<_, _>>().map_err(network)
+		let mut raw = self
+			.shared
+			.block_on(metadata::<metadata::Artist>(self.shared.session(), uris, ExtensionKind::ARTIST_V4))
+			.map_err(spotify::Error::from)?;
+		uris.iter().filter_map(|uri| raw.remove(uri)).map(|raw| artist(&raw)).collect::<Result<_, _>>().map_err(spotify::Error::from)
 	}
 }
 
@@ -534,11 +539,6 @@ fn liked_snapshot(items: &[CollectionItem], cached: &mut Option<Arc<[TrackId]>>,
 		ids.into()
 	});
 	Some(tracks.clone())
-}
-
-#[expect(clippy::needless_pass_by_value, reason = "map_err consumes the session error at every request boundary")]
-fn network(error: librespot_core::Error) -> spotify::Error {
-	spotify::Error::Network(error.to_string())
 }
 
 fn page<T>(items: Vec<T>, offset: u32, limit: u32, total: u32) -> Page<T> {

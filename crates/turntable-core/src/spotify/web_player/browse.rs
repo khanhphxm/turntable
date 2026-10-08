@@ -4,7 +4,7 @@
 
 use serde_json::Value;
 
-use super::{WebPlayer, allowed, array, text, web_track};
+use super::{WebPlayer, array, text, web_track};
 use crate::spotify::{Album, Artist, Image, Page, Playlist, SearchResults, User, id_of};
 
 const SEARCH: (&str, &str) = ("searchDesktop", "eef7cc54888d91bdd6802623477873caa3948ae173a0c34fd86827b267e94c03");
@@ -13,9 +13,8 @@ const SEARCH_LIMIT: u32 = 10;
 impl WebPlayer {
 	/// Tracks, artists, albums and playlists, with the Web API's page size and models.
 	/// Uses the anonymous web-player token, so searching does not need playback to connect.
-	/// Callers retain the Web API as fallback for disabled sources or rotated query hashes.
+	/// Pathfinder reads are always enabled; rotated query hashes can still cause errors.
 	pub fn search(&self, query: &str, offset: u32) -> Result<SearchResults, String> {
-		allowed()?;
 		let token = self.token()?;
 		let variables = serde_json::json!({
 			"searchTerm": query, "offset": offset, "limit": SEARCH_LIMIT, "numberOfTopResults": 5,

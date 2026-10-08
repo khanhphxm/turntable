@@ -1,11 +1,11 @@
-//! Library state and the session/Web API worker that loads it without blocking the UI.
+//! Library state and the native-session worker that loads it without blocking the UI.
 //!
 //! `model` and `state` describe what the views know; `pages`, `home` and `artist` load it.
 //! `protocol` carries requests and responses between the application and `worker`.
 //!
 //! Item actions never navigate: playlist headers resolve through rootlist/Playlist4,
 //! context-to-playlist gathers every native page, and saves use the Session collection
-//! service (the Web API is only a no-session fallback). Removing a playlist also drops
+//! service. No separate OAuth account is opened or refreshed. Removing a playlist also drops
 //! its disk listing and owned-track index. Pins sort ahead of every unpinned row in all
 //! library orders, with a four-item limit, and are stored per account under the config
 //! directory's `library-pins`; Spotify pin synchronization is not supported.
@@ -31,17 +31,9 @@
 //! first album cover. Rootlist enrichment is bounded-concurrent, reused by sidebar/Home
 //! tiles, and persisted with playlist snapshots. Empty playlists keep the note placeholder.
 //!
-//! Home exposes `HomeFeed` in Spotify's order (shortcuts, shelves and large feed cards).
-//! Facets are account-scoped disk snapshots, painted before background session refresh.
-//! Native fallback publishes its deduplicated recent songs as soon as history resolves,
-//! before playlist permissions and shelf metadata. Partial updates retain cached shelves
-//! in memory and on disk; the complete Home answer replaces them after enrichment.
-//! `HomeSectionMore` opens Show all on the existing Home route; `CloseHomeSection` returns
-//! to the cached feed and `LoadMore` uses Spotify's raw section cursor. Hosts can keep the
-//! URI in their own page history. If Pathfinder rejects the attached Session's client,
-//! `State::home_feed()` remains absent and hosts render the native `library.home` shelves;
-//! anonymous recommendations are never presented as personalisation. Spoken-word pages
-//! and unplayable DJ/promotions have no supported route and are omitted.
+//! Home uses native recent history, followed artists and saved albums only. Deduplicated
+//! recent songs are published before slower shelf enrichment; cached shelves stay visible
+//! until the complete refresh arrives. No personalised Pathfinder feed is requested.
 
 mod actions;
 pub mod added;
@@ -59,11 +51,11 @@ mod restore;
 mod session;
 pub(crate) mod snapshot;
 mod state;
-mod worker;
+pub(crate) mod worker;
 
 pub use artist::Popularity;
 pub use folders::{Folder, RootEntry, TreeEntry};
-pub use model::{Conn, Entry, Facet, Home, HomeFeed, HomeItem, HomeSection, HomeStyle, Kind, Listing, PAGE, Route, Sort, Tile, View};
+pub use model::{Conn, Entry, Home, Kind, Listing, PAGE, PlaylistOccurrence, Route, RowTarget, Sort, Tile, View};
 pub use protocol::{Request, Response};
 pub use restore::PlaybackPosition;
 pub use state::Library;

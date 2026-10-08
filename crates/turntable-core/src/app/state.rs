@@ -10,7 +10,7 @@ use crate::{
 	app::queue,
 	engine::{CoverSize, Entity, Options, QueueEntry, Status},
 	library::{self, Library, Route},
-	sources::{external::Lyrics, lyrics},
+	lyrics::{self, Lyrics},
 };
 
 /// The panels sharing the right-hand slot of the full layout.
@@ -21,8 +21,6 @@ pub enum Panel {
 	Queue,
 	/// The song's words, the line being sung lit.
 	Lyrics,
-	Eq,
-	Settings,
 }
 
 /// What the lyrics view knows of the now-playing song's lyrics.
@@ -40,13 +38,10 @@ pub enum LyricsState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
 	Search,
-	ClientId,
 	PlaylistName,
 	PlaylistDescription,
 	/// The filter above Your Library's rows.
 	LibraryFilter,
-	/// The player's Spotify Connect name, on the settings page.
-	DeviceName,
 }
 
 /// A dialog over the client.
@@ -65,11 +60,9 @@ impl Field {
 	pub const fn id(self) -> &'static str {
 		match self {
 			Self::Search => "search",
-			Self::ClientId => "client-id",
 			Self::PlaylistName => "playlist-name",
 			Self::PlaylistDescription => "playlist-description",
 			Self::LibraryFilter => "library-filter",
-			Self::DeviceName => "device-name",
 		}
 	}
 }
@@ -147,6 +140,8 @@ pub struct State {
 	pub item:                          Entity,
 	pub context:                       Entity,
 	pub anchor:                        Anchor,
+	/// A user transport prediction and its last confirmed clock, until the decoder acknowledges it.
+	pub(crate) transport:              super::playback::Transport,
 	/// Displayed volume: initialized from saved device preferences, then reconciled with the player.
 	pub volume:                        u8,
 	pub options:                       Options,
@@ -155,6 +150,8 @@ pub struct State {
 	pub queue_edit:                    queue::Edit,
 	/// The now-playing song's lyrics once asked for, with the URI of its track.
 	pub lyrics:                        Option<(String, LyricsState)>,
+	pub(crate) lyrics_retry_at:        Option<Instant>,
+	pub(crate) lyrics_failures:        u32,
 	/// The last error worth showing (cleared by the next good event).
 	pub notice:                        Option<String>,
 	/// Persistent welcome-page sign-in rejection. `message()` explains it;
@@ -171,7 +168,7 @@ pub struct State {
 	pub network_notice:                Option<String>,
 	/// The user's library, delivered by the Session/Web API worker.
 	pub library:                       Library,
-	/// The side panel opened by hand (queue, lyrics, equalizer or settings); when none
+	/// The side panel opened by hand (queue, lyrics or now playing); when none
 	/// is, the now-playing view shows if it's on (see [`State::side_panel`]).
 	pub panel:                         Option<Panel>,
 	/// The now-playing view is on (persisted).
@@ -182,10 +179,8 @@ pub struct State {
 	pub prefs:                         crate::app::settings::Prefs,
 	/// The sleep timer, and the pauses and skips that carry out the autoplay and explicit settings.
 	pub rules:                         crate::app::rules::Rules,
-	/// What the settings page reports: devices, cache and app memory.
+	/// Available audio output devices and the system default.
 	pub sys:                           crate::app::system::System,
-	/// The device name being typed in the settings page.
-	pub device_input:                  String,
 	/// Your Library's sort and view menu is open (it hangs from the order's button).
 	pub library_menu:                  bool,
 	/// The device menu, the devices Spotify lists, and the other device playing (see [`crate::app::connect`]).
@@ -198,8 +193,6 @@ pub struct State {
 	/// The EQ the audio path uses, and the preset it came from (if untouched).
 	pub eq:                            crate::audio::EqSettings,
 	pub eq_preset:                     Option<String>,
-	/// The equalizer's preset menu is open (it hangs from the preset button).
-	pub eq_menu:                       bool,
 	/// Whether the EQ is live: an audio output plays the player's sound.
 	pub has_audio:                     bool,
 	/// The player has a Spotify sign-in (saved): it starts by itself, no setup needed.
@@ -218,7 +211,6 @@ pub struct State {
 	pub(crate) image_misses:           std::cell::RefCell<std::collections::HashSet<String>>,
 	/// The text field that has the caret, and the text of each field.
 	pub focus:                         Option<Field>,
-	pub id_input:                      String,
 	pub name_input:                    String,
 	pub description_input:             String,
 	pub public_input:                  Option<bool>,
@@ -229,19 +221,24 @@ pub struct State {
 	pub discography:                   usize,
 	/// A confirmation shown as a toast, with a counter so a repeat shows again.
 	pub toast:                         Option<(u32, String)>,
-	pub quit:                          bool,
 	pub(crate) recent_searches:        super::recent_searches::RecentSearches,
 }
 
 impl State {
-	/// The selected personalised feed, or `None` while unavailable (render `library.home` then).
-	pub fn home_feed(&self) -> Option<&library::HomeFeed> {
-		self.library.home_feed()
-	}
-
-	/// Show all uses Home's route; hosts may keep this section URI in their own page history.
-	pub fn home_section(&self) -> Option<&library::HomeSection> {
-		self.library.home_section.as_ref().filter(|_| self.library.route == Route::Home)
+	/// Drops every account projection while retaining only machine preferences and facts.
+	pub(super) fn reset_account(&mut self) {
+		let old = std::mem::take(self);
+		*self = Self {
+			device_name: old.prefs.device.name.clone(),
+			volume: old.prefs.device.volume,
+			prefs: old.prefs,
+			sys: old.sys,
+			eq: old.eq,
+			eq_preset: old.eq_preset,
+			now_playing_view: old.now_playing_view,
+			sidebar_collapsed: old.sidebar_collapsed,
+			..Self::default()
+		};
 	}
 
 	/// Whether the user chose to collapse the sidebar; layout is the host's job.
@@ -249,6 +246,8 @@ impl State {
 		self.sidebar_collapsed
 	}
 
+	/// Displayed playback state: a user command flips it immediately, then actual decoder
+	/// or remote Connect events reconcile it. A rejected command restores its confirmed clock.
 	pub fn playing(&self) -> bool {
 		self.status == Status::Playing
 	}
@@ -269,7 +268,7 @@ impl State {
 	/// or the application name when nothing is loaded.
 	pub fn window_title(&self) -> String {
 		if self.item.uri.is_empty() {
-			return "turntable".to_owned();
+			return "Turntable".to_owned();
 		}
 		let mut title = self.item.name().to_owned();
 		let by = self.item.creators();
@@ -317,11 +316,6 @@ impl State {
 		self.panel == Some(Panel::Lyrics)
 	}
 
-	/// Whether the equalizer's preset menu is on screen: it hangs from the equalizer panel's button.
-	pub fn eq_menu_open(&self) -> bool {
-		self.eq_menu && self.side_panel() == Some(Panel::Eq)
-	}
-
 	/// What's known of the now-playing track's lyrics (`None`: not asked for yet).
 	pub fn lyrics_state(&self) -> Option<&LyricsState> {
 		self.lyrics.as_ref().filter(|(uri, _)| *uri == self.item.uri).map(|(_, state)| state)
@@ -330,13 +324,29 @@ impl State {
 	/// Takes in the answer of a lookup, unless the track has changed since.
 	pub fn apply_lyrics(&mut self, response: lyrics::Response) {
 		if response.uri == self.item.uri {
+			if self.lyrics.as_ref().is_none_or(|(uri, _)| uri != &response.uri) {
+				self.lyrics_failures = 0;
+			}
 			let state = match response.lyrics {
 				Ok(Some(lyrics)) => LyricsState::Found(lyrics),
 				Ok(None) => LyricsState::Missing,
 				Err(_) => LyricsState::Failed,
 			};
+			if matches!(state, LyricsState::Failed) {
+				self.lyrics_failures = self.lyrics_failures.saturating_add(1);
+				let seconds = 5_u64.saturating_mul(1_u64 << self.lyrics_failures.saturating_sub(1).min(6)).min(300);
+				self.lyrics_retry_at = Some(Instant::now() + Duration::from_secs(seconds));
+			} else {
+				self.lyrics_failures = 0;
+				self.lyrics_retry_at = None;
+			}
 			self.lyrics = Some((response.uri, state));
 		}
+	}
+
+	pub(crate) fn lyrics_due(&self, now: Instant) -> bool {
+		self.lyrics_state().is_none()
+			|| (matches!(self.lyrics_state(), Some(LyricsState::Failed)) && self.lyrics_retry_at.is_some_and(|at| now >= at))
 	}
 
 	/// The synced lyrics on screen.
@@ -398,21 +408,12 @@ impl State {
 		if matches!(field, Field::PlaylistName | Field::PlaylistDescription) {
 			return matches!(self.dialog, Some(Dialog::Rename { .. }));
 		}
-		if field == Field::DeviceName {
-			return self.panel == Some(Panel::Settings) && self.dialog.is_none();
-		}
 		if self.dialog.is_some() {
 			return false;
 		}
-		let setup = match lib.route {
-			Route::Home => self.needs_setup(),
-			Route::Search => !ready,
-			_ => false,
-		};
 		match field {
-			Field::Search => lib.route == Route::Search && ready,
-			Field::ClientId => setup && matches!(lib.conn, library::Conn::NeedsClientId),
-			Field::PlaylistName | Field::PlaylistDescription | Field::DeviceName => false,
+			Field::Search => ready,
+			Field::PlaylistName | Field::PlaylistDescription => false,
 			Field::LibraryFilter => self.library_tools(),
 		}
 	}
@@ -471,16 +472,16 @@ pub fn clock(ms: u64) -> String {
 	if s >= 3600 { format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60) } else { format!("{}:{:02}", s / 60, s % 60) }
 }
 
-/// Steps of an EQ band slider: 0 (−12 dB) … `EQ_STEPS` (+12 dB), 2 dB apart.
-pub const EQ_STEPS: u8 = 12;
+/// Steps of an EQ band slider: 0 (−12 dB) … `EQ_STEPS` (+12 dB), 0.5 dB apart.
+pub const EQ_STEPS: u8 = 48;
 
 /// The gain of slider step `step`.
 pub fn eq_step_db(step: u8) -> f32 {
-	f32::from(step.min(EQ_STEPS)) * 2.0 - 12.0
+	f32::from(step.min(EQ_STEPS)) * crate::audio::GAIN_STEP_DB - crate::audio::MAX_GAIN_DB
 }
 
-/// The slider step nearest to `db`.
+/// The slider step nearest to `db`, using the same rounding as typed band gains.
 #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped to ±12 dB, so the rounded step is 0..=EQ_STEPS")]
 pub fn eq_db_step(db: f32) -> u8 {
-	db.clamp(-12.0, 12.0).midpoint(12.0).round() as u8
+	((crate::audio::sanitize_gain_db(db) + crate::audio::MAX_GAIN_DB) / crate::audio::GAIN_STEP_DB) as u8
 }

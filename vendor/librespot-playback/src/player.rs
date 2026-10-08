@@ -2391,6 +2391,7 @@ impl PlayerInternal {
                     self.pending_crossfade = None;
                     self.sink.reset();
                 }
+                self.sink.new_track();
                 self.handle_command_load(track_id, None, play, position_ms)?;
             }
 

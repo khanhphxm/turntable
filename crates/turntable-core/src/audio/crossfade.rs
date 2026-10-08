@@ -38,13 +38,13 @@ impl Crossfade {
 
 	/// Mixes at most the remaining overlap. Missing outgoing frames are silence;
 	/// incoming samples beyond the boundary (or an incomplete frame) are untouched.
-	#[expect(clippy::cast_possible_truncation, reason = "unit gain envelopes intentionally use f32 PCM")]
 	pub(crate) fn mix(&mut self, incoming: &mut [f32], outgoing: &[f32]) {
 		let frames = incoming.len() / 2;
 		let count = frames.min(self.remaining());
 		let old = outgoing.as_chunks::<2>().0.iter().copied().chain(std::iter::repeat([0.0; 2]));
 		for (new, old) in incoming.as_chunks_mut::<2>().0.iter_mut().take(count).zip(old) {
-			let (out_gain, in_gain) = if self.position + 1 == self.frames { (0.0, 1.0) } else { (self.cosine as f32, self.sine as f32) };
+			let (out_gain, in_gain) =
+				if self.position + 1 == self.frames { (0.0, 1.0) } else { (super::dsp_f32(self.cosine), super::dsp_f32(self.sine)) };
 			for (new, old) in new.iter_mut().zip(old) {
 				*new = old.mul_add(out_gain, *new * in_gain);
 			}

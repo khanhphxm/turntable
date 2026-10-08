@@ -1,0 +1,12 @@
+{
+  "playlists": [
+    {"id":"source","uri":"spotify:playlist:source","name":"Zebra mix","owner":{"id":"alice"},"public":false,"items":{"total":3}},
+    {"id":"target","uri":"spotify:playlist:target","name":"Amber mix","owner":{"id":"alice"},"public":false,"items":{"total":0}},
+    {"id":"followed","uri":"spotify:playlist:followed","name":"Followed mix","owner":{"id":"bob"},"public":true,"items":{"total":0}}
+  ],
+  "tracks": [
+    {"uri":"spotify:track:0000000000000000000001","name":"Last alphabetically","duration_ms":240000,"disc_number":1,"artists":[{"uri":"spotify:artist:artist","name":"Artist"}],"album":{"uri":"spotify:album:album","name":"Album"}},
+    {"uri":"spotify:track:0000000000000000000002","name":"First alphabetically","duration_ms":180000,"disc_number":2,"artists":[{"uri":"spotify:artist:artist","name":"Artist"}],"album":{"uri":"spotify:album:album","name":"Album"}},
+    {"uri":"spotify:track:0000000000000000000001","name":"Last alphabetically","duration_ms":240000,"disc_number":1,"artists":[{"uri":"spotify:artist:artist","name":"Artist"}],"album":{"uri":"spotify:album:album","name":"Album"}}
+  ]
+}

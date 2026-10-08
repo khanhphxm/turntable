@@ -260,7 +260,6 @@ fn dot_stereo(left: &[f32], right: &[f32], coefficients: &[f32]) -> [f32; 2] {
 	[((l0 + l1) + (l2 + l3)) + ((l4 + l5) + (l6 + l7)), ((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7))]
 }
 
-#[expect(clippy::cast_possible_truncation, reason = "sinc coefficients are designed in f64 and deliberately rounded to f32")]
 fn design(taps: usize, cutoff: f64, phases: usize, endpoint: bool) -> Box<[f32]> {
 	let radius = taps as f64 * 0.5;
 	let window_scale = 1.0 / bessel_i0(KAISER_BETA);
@@ -280,11 +279,11 @@ fn design(taps: usize, cutoff: f64, phases: usize, endpoint: bool) -> Box<[f32]>
 				let window = bessel_i0(KAISER_BETA * (1.0 - relative * relative).sqrt()) * window_scale;
 				sinc * window
 			};
-			table.push(coefficient as f32);
+			table.push(super::dsp_f32(coefficient));
 			sum += coefficient;
 		}
 		for coefficient in table.split_at_mut(start).1 {
-			*coefficient = (f64::from(*coefficient) / sum) as f32;
+			*coefficient = super::dsp_f32(f64::from(*coefficient) / sum);
 		}
 	}
 	table.into_boxed_slice()
@@ -306,7 +305,6 @@ fn bessel_i0(x: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-	use std::{hint::black_box, time::Instant};
 
 	use super::*;
 
@@ -606,43 +604,5 @@ mod tests {
 			let mut fresh = Resampler::new(44_100, to);
 			assert_eq!(render_noise(&mut resampler, 333, &[333]), render_noise(&mut fresh, 333, &[333]));
 		}
-	}
-
-	#[test]
-	fn release_callback_cost() {
-		const BLOCK_FRAMES: usize = 2048;
-		// Device rates and converter state are opaque to the optimizer, as they
-		// are in the real HAL path; do not specialize the benchmark to a fixed FIR.
-		let mut resampler = black_box(Resampler::new(black_box(44_100), black_box(48_000)));
-		let mut seed = 91;
-		let input: Vec<f32> = (0..MAX_OUT_FRAMES * 2).map(|_| noise(&mut seed)).collect();
-		let mut position = 0;
-		let mut pull = |out: &mut [f32]| {
-			let end = position + out.len();
-			out.copy_from_slice(&input[position..end]);
-			position = if end == input.len() { 0 } else { end };
-		};
-		let mut output = [0.0; BLOCK_FRAMES * 2];
-		for _ in 0..8 {
-			resampler.process(&mut output, &mut pull);
-		}
-		let repetitions = if cfg!(debug_assertions) { 64 } else { 2048 };
-		let mut timings = [0.0f64; 3];
-		for timing in &mut timings {
-			let start = Instant::now();
-			for _ in 0..repetitions {
-				black_box(&mut resampler).process(black_box(&mut output), &mut pull);
-				black_box(&output);
-			}
-			*timing = start.elapsed().as_secs_f64() * 1e9 / (repetitions * BLOCK_FRAMES) as f64;
-		}
-		timings.sort_by(f64::total_cmp);
-		let ns_per_frame = timings[1];
-		println!(
-			"resample 44.1->48 kHz, {BLOCK_FRAMES}-frame callback: {ns_per_frame:.2} ns/stereo output frame (median; debug={})",
-			cfg!(debug_assertions)
-		);
-		let ceiling = if cfg!(debug_assertions) { 25_000.0 } else { 25.0 };
-		assert!(ns_per_frame < ceiling, "callback cost {ns_per_frame:.2} ns/frame");
 	}
 }

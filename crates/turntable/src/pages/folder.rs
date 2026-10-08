@@ -3,7 +3,10 @@
 use gpui_kit::{
 	Context, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, StatefulInteractiveElement as _, Styled as _, div, px,
 };
-use turntable_core::library::{Entry, Tile};
+use turntable_core::{
+	Route,
+	library::{Entry, Tile},
+};
 
 use crate::{shell::Shell, theme};
 
@@ -19,7 +22,15 @@ impl Shell {
 				other => Tile { route: other.route(), play: None, title: other.title().to_owned(), sub: other.sub(), image: None },
 			})
 			.collect();
-		let count = tiles.len();
+		// Spotify's line under the name: playlists and folders counted apart.
+		let folders = tiles.iter().filter(|t| matches!(t.route, Route::Folder(_))).count();
+		let playlists = tiles.len() - folders;
+		let count_line = [(playlists, "playlist"), (folders, "folder")]
+			.iter()
+			.filter(|(n, _)| *n > 0)
+			.map(|(n, noun)| if *n == 1 { format!("1 {noun}") } else { format!("{n} {noun}s") })
+			.collect::<Vec<_>>()
+			.join(", ");
 		let cards: Vec<_> = tiles.iter().enumerate().map(|(i, t)| self.card(("folder-card", i), t, cx)).collect();
 		div()
 			.id("folder-page")
@@ -38,11 +49,7 @@ impl Shell {
 					.gap_2()
 					.child(div().text_size(px(14.)).child("Folder"))
 					.child(div().text_size(px(72.)).font_weight(FontWeight::EXTRA_BOLD).line_clamp(1).child(name))
-					.child(div().text_size(px(14.)).text_color(theme::subdued()).child(if count == 1 {
-						"1 playlist".to_owned()
-					} else {
-						format!("{count} playlists")
-					})),
+					.child(div().text_size(px(14.)).text_color(theme::subdued()).child(count_line)),
 			)
 			.child(div().mx(px(-12.)).flex().flex_wrap().children(cards))
 	}

@@ -3,29 +3,23 @@
 //! listed.
 
 use gpui_kit::{
-	AnyElement, AppContext as _, ClickEvent, Context, Div, ElementId, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-	Pixels, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, WeakEntity,
-	component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem},
-	div, linear_color_stop, linear_gradient,
-	prelude::FluentBuilder as _,
-	px, rgb,
+	AnyElement, AppContext as _, ClickEvent, Context, Div, ElementId, FontWeight, InteractiveElement as _, IntoElement, MouseButton,
+	MouseDownEvent, ParentElement as _, Pixels, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, div,
+	linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px, rgb,
 };
 use turntable_core::{
 	Msg, Route,
-	library::Tile,
+	app::clock,
+	library::{RowTarget, Tile},
 	spotify::{Track, id_of, pick_image},
 };
 
 use crate::{
+	menu::{Action, Item},
 	shell::Shell,
 	theme,
 	widgets::{Icon, added_badge, cover, eq_bars, icon, menu_icon, play_disc, section_title},
 };
-
-pub fn clock(ms: u64) -> String {
-	let s = ms / 1000;
-	format!("{}:{:02}", s / 60, s % 60)
-}
 
 /// 1234567 → "1,234,567".
 pub fn grouped(n: u64) -> String {
@@ -89,6 +83,12 @@ impl Shell {
 				.justify_center()
 				.child(icon(Icon::Heart, size * 0.42, theme::text())),
 			Route::Artist(_) => cover(self.image(url, logical, cx), theme::RAISED, size, size / 2.),
+			// A folder: Spotify's grey tile with a folder outline.
+			Route::Folder(_) => cover(None, theme::RAISED, size, if size > px(100.) { px(6.) } else { px(4.) })
+				.flex()
+				.items_center()
+				.justify_center()
+				.child(icon(Icon::Folder, size * 0.4, theme::subdued())),
 			// A playlist without artwork (new or empty) shows a note, as Spotify does.
 			_ if url.is_none() => cover(None, theme::RAISED, size, if size > px(100.) { px(6.) } else { px(4.) })
 				.flex()
@@ -133,6 +133,10 @@ impl Shell {
 		cx: &mut Context<'_, Self>,
 	) -> AnyElement {
 		let st = self.st();
+		let Some(row) = st.library.row_target(i) else { return div().into_any_element() };
+		let clicked_row = row.clone();
+		let play_row = row.clone();
+		let add_row = row.clone();
 		let current = !st.item.uri.is_empty() && t.uri == st.item.uri;
 		let playing = current && st.playing();
 		let selected = st.library.show_selection && st.library.selected == Some(i);
@@ -144,14 +148,16 @@ impl Shell {
 		let editable = st.library.listing.as_ref().is_some_and(|l| l.editable) && matches!(st.library.route, Route::Playlist(_));
 		let artist_id = t.artists.first().map(|a| id_of(&a.uri).to_owned());
 		let album_id = album.map(|a| id_of(&a.uri).to_owned());
-		let shell = cx.entity().downgrade();
 		let menu_artist = artist_id.clone();
 		let menu_album = album_id.clone();
+		// Compact rows (Settings → Display) drop the cover and tighten to Spotify's 32 px.
+		let compact = st.prefs.display.compact;
+		let with_cover = with_cover && !compact;
 		div()
 			.id(("row", i))
 			.group("row")
 			.w_full()
-			.h(theme::ROW_H)
+			.h(if compact { theme::ROW_COMPACT_H } else { theme::ROW_H })
 			.flex()
 			.items_center()
 			.gap_4()
@@ -165,9 +171,9 @@ impl Shell {
 			.when(!selected, |s| s.hover(|s| s.bg(theme::hover())))
 			.on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
 				if e.click_count() >= 2 {
-					this.send(Msg::PlayRow(i), cx);
+					this.send(Msg::PlayRow(clicked_row.clone()), cx);
 				} else {
-					this.send(Msg::Select(i), cx);
+					this.send(Msg::Select(clicked_row.clone()), cx);
 				}
 			}))
 			.child(
@@ -182,7 +188,7 @@ impl Shell {
 							.text_size(px(16.))
 							.when(current, |s| s.text_color(theme::accent()))
 							.group_hover("row", |s| s.invisible())
-							.map(|s| if playing { s.child(eq_bars(("row-bars", i), px(14.))) } else { s.child((i + 1).to_string()) }),
+							.map(|s| if playing { s.child(eq_bars("row-bars", px(14.))) } else { s.child((i + 1).to_string()) }),
 					)
 					.child(
 						div()
@@ -193,7 +199,12 @@ impl Shell {
 							.group_hover("row", |s| s.visible())
 							.on_click(cx.listener(move |this, _, _, cx| {
 								cx.stop_propagation();
-								this.send(if current { Msg::TogglePlay } else { Msg::PlayRow(i) }, cx);
+								if this.st().library.resolve_row(&play_row).is_some() {
+									this.send(
+										if this.st().item.uri == play_row.uri { Msg::TogglePlay } else { Msg::PlayRow(play_row.clone()) },
+										cx,
+									);
+								}
 							}))
 							.child(icon(if playing { Icon::Pause } else { Icon::Play }, px(16.), theme::text())),
 					),
@@ -210,7 +221,9 @@ impl Shell {
 						div()
 							.min_w_0()
 							.flex()
-							.flex_col()
+							// Compact: title and artists on one line, as Spotify's compact list.
+							.when(!compact, |s| s.flex_col())
+							.when(compact, |s| s.items_center().gap_2())
 							.child(
 								div()
 									.text_size(px(16.))
@@ -255,7 +268,7 @@ impl Shell {
 							.group_hover("row", |s| s.visible())
 							.on_click(cx.listener(move |this, _, _, cx| {
 								cx.stop_propagation();
-								this.send(if added { Msg::AddRowToPlaylist(i) } else { Msg::AddToLiked(uri.clone()) }, cx);
+								this.send(if added { Msg::AddRowToPlaylist(add_row.clone()) } else { Msg::AddToLiked(uri.clone()) }, cx);
 							}))
 							.child(added_badge(added, px(16.))),
 					)
@@ -274,7 +287,12 @@ impl Shell {
 						}
 					}))
 			})
-			.context_menu(move |menu, _, _| track_menu(menu, &shell, i, menu_artist.clone(), menu_album.clone(), editable))
+			.on_mouse_down(
+				MouseButton::Right,
+				cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+					this.open_menu(e.position, track_menu(row.clone(), menu_artist.clone(), menu_album.clone(), editable), cx);
+				}),
+			)
 			.into_any_element()
 	}
 
@@ -312,11 +330,7 @@ impl Shell {
 			.id(id)
 			.group("card")
 			// Spotify warms a page while the pointer rests on its card.
-			.on_hover(cx.listener(move |this, over: &bool, _, cx| {
-				if *over {
-					this.send(Msg::Prefetch(hovered.clone()), cx);
-				}
-			}))
+			.on_hover(cx.listener(move |this, over: &bool, _, cx| this.prefetch_on_hover(&hovered, *over, cx)))
 			.w(px(theme::CARD_W))
 			.flex_none()
 			.p(px(12.))
@@ -337,7 +351,7 @@ impl Shell {
 							.bottom(px(8.))
 							.when(!playing, |s| s.invisible().group_hover("card", |s| s.visible()))
 							.child(play_disc(
-								("card-play", uri.len()),
+								"card-play",
 								px(48.),
 								playing,
 								cx.listener(move |this, _, _, cx| {
@@ -519,28 +533,28 @@ impl Shell {
 		let owned = self.editable_playlist();
 		let followed = listing.and_then(|l| l.followed);
 		let artist = listing.and_then(|l| l.album.as_ref()).and_then(|a| a.artists.first()).map(|a| id_of(&a.uri).to_owned());
-		let shell = cx.entity().downgrade();
-		menu_icon("page-more", Icon::Ellipsis, px(32.)).dropdown_menu(move |menu, _, _| {
-			let item = |label: &'static str, msg: Msg| {
-				let shell = shell.clone();
-				PopupMenuItem::new(label).on_click(move |_, _, cx| {
-					let _ = shell.update(cx, |this, cx| match &msg {
-						Msg::Navigate(route) => this.go(route.clone(), cx),
-						other => this.send(other.clone(), cx),
-					});
-				})
-			};
-			let mut menu = menu.item(item("Add to queue", Msg::QueueContext(route.clone())));
-			if owned {
-				menu = menu.item(item("Edit details", Msg::RenamePlaylist));
-			} else if let Some(followed) = followed {
-				menu = menu.item(item(if followed { "Remove from Your Library" } else { "Add to Your Library" }, Msg::ToggleFollow));
-			}
-			if let Some(id) = &artist {
-				menu = menu.item(PopupMenuItem::separator()).item(item("Go to artist", Msg::Navigate(Route::Artist(id.clone()))));
-			}
-			menu
-		})
+		let mut items = vec![Item::row(Icon::MenuQueue, "Add to queue", Action::Send(Msg::QueueContext(route.clone())))];
+		if owned {
+			items.push(Item::row(Icon::MenuEdit, "Edit details", Action::Send(Msg::RenamePlaylist)));
+		} else if let Some(followed) = followed {
+			let (glyph, label) =
+				if followed { (Icon::MenuRemove, "Remove from Your Library") } else { (Icon::MenuPlus, "Add to Your Library") };
+			items.push(Item::row(glyph, label, Action::Send(Msg::ToggleFollow)));
+		}
+		if matches!(route, Route::Playlist(_) | Route::Album(_)) {
+			items.push(Item::row(
+				Icon::MenuAddTo,
+				"Add to other playlist",
+				Action::SendAll(vec![Msg::AddContextToPlaylist(route), Msg::AddToPlaylist(None)]),
+			));
+		}
+		if let Some(id) = artist {
+			items.push(Item::Divider);
+			items.push(Item::row(Icon::MenuArtist, "Go to artist", Action::Go(Route::Artist(id))));
+		}
+		menu_icon("page-more", Icon::Ellipsis, px(32.)).on_click(cx.listener(move |this, e: &ClickEvent, _, cx| {
+			this.open_menu(e.position(), items.clone(), cx);
+		}))
 	}
 
 	/// The colour wash behind a page's action bar and first rows.
@@ -586,40 +600,27 @@ fn explicit_badge() -> Div {
 		.child("E")
 }
 
-/// Right-click on a track.
-fn track_menu(
-	menu: PopupMenu,
-	shell: &WeakEntity<Shell>,
-	row: usize,
-	artist: Option<String>,
-	album: Option<String>,
-	editable: bool,
-) -> PopupMenu {
-	let item = |label: &'static str, msg: Msg| {
-		let shell = shell.clone();
-		PopupMenuItem::new(label).on_click(move |_, _, cx| {
-			// The window may be closing; then there's nothing to do.
-			let _ = shell.update(cx, |this, cx| match &msg {
-				Msg::Navigate(route) => this.go(route.clone(), cx),
-				other => this.send(other.clone(), cx),
-			});
-		})
-	};
-	let mut menu = menu
-		.item(item("Play next", Msg::QueuePlayNext(row)))
-		.item(item("Add to queue", Msg::QueueRow(row)))
-		.item(item("Add to playlist", Msg::AddRowToPlaylist(row)));
+/// Right-click on a track: Spotify's song menu.
+fn track_menu(row: RowTarget, artist: Option<String>, album: Option<String>, editable: bool) -> Vec<Item> {
+	let send = |glyph: Icon, label: &str, msg: Msg| Item::row(glyph, label, Action::Send(msg));
+	let mut items = vec![
+		send(Icon::MenuAddTo, "Add to playlist", Msg::AddRowToPlaylist(row.clone())),
+		send(Icon::MenuQueue, "Add to queue", Msg::QueueRow(row.clone())),
+		send(Icon::MenuNext, "Play next", Msg::QueuePlayNext(row.clone())),
+	];
 	if editable {
-		menu = menu.item(item("Remove from this playlist", Msg::RemoveRow(row)));
+		items.push(send(Icon::MenuDelete, "Remove from this playlist", Msg::RemoveRow(row)));
 	}
-	menu = menu.item(PopupMenuItem::separator());
+	if artist.is_some() || album.is_some() {
+		items.push(Item::Divider);
+	}
 	if let Some(id) = artist {
-		menu = menu.item(item("Go to artist", Msg::Navigate(Route::Artist(id))));
+		items.push(Item::row(Icon::MenuArtist, "Go to artist", Action::Go(Route::Artist(id))));
 	}
 	if let Some(id) = album {
-		menu = menu.item(item("Go to album", Msg::Navigate(Route::Album(id))));
+		items.push(Item::row(Icon::MenuAlbum, "Go to album", Action::Go(Route::Album(id))));
 	}
-	menu
+	items
 }
 
 /// A track row being dragged within the user's playlist; it draws itself under the pointer.

@@ -2,24 +2,26 @@
 //!
 //! [`Engine::start`] signs in, registers the device and decodes into the audio path's
 //! [`PcmWriter`]; [`Engine::connect`] hands out the [`Client`] the UI drives it with. What the
-//! player does comes back as the [`model`] events the UI already speaks: librespot's player
+//! player does comes back as the [`Incoming`] events the UI already speaks: librespot's player
 //! events, plus the connect state (context, options, upcoming tracks) the vendored
 //! `librespot-connect` sends after every change.
 //!
-//! Natural playback overlaps use [`transition`]'s album-order policy and the
-//! core audio mixer; manual transport commands cut immediately. Gapless PCM,
-//! overlap PCM and ordinary PCM all pass through the same EQ/leveler/output.
+//! Natural playback overlaps leave adjacent tracks in unshuffled albums gapless;
+//! other eligible transitions use the core audio mixer. Manual transport commands cut
+//! immediately; every PCM stream passes through the same EQ/leveler/output.
 
 mod connect;
 mod load;
+mod metadata;
 mod model;
+mod oauth;
 mod premium;
 #[cfg(test)]
 mod session_tests;
+mod start;
 mod transition;
 
 use std::{
-	collections::HashMap,
 	fs, io,
 	path::PathBuf,
 	sync::{
@@ -30,7 +32,7 @@ use std::{
 };
 
 pub(crate) use connect::device_of;
-use librespot_connect::{ConnectConfig, LoadRequest, LoadRequestOptions, Spirc, StateSnapshot};
+use librespot_connect::{ConnectConfig, LoadRequest, LoadRequestOptions, PlaybackCommand, Spirc, StateSnapshot};
 use librespot_core::{
 	SpotifyUri,
 	authentication::Credentials,
@@ -40,14 +42,16 @@ use librespot_core::{
 	session::Session,
 	spclient::TransferRequest,
 };
-use librespot_metadata::{Album, Artist, Episode, Metadata, Playlist, Track, image::Images};
 use librespot_playback::{
 	config::{Bitrate, PlayerConfig},
 	mixer::{Mixer, MixerConfig, softmixer::SoftMixer},
 	player::{Player as Decoder, PlayerEvent},
 };
 pub use model::*;
+pub(crate) use oauth::SIGN_IN_TIMEOUT;
 pub use premium::SignInError;
+pub(crate) use start::SignInTimedOut;
+pub use start::StartAuthorization;
 use tokio::{
 	runtime::Runtime,
 	sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
@@ -72,7 +76,7 @@ pub struct EngineConfig {
 	pub cache_mb:    u32,
 }
 
-/// The browser sign-in's redirect (librespot's OAuth helper serves it).
+/// The browser sign-in's registered loopback redirect.
 const OAUTH_REDIRECT: &str = "http://127.0.0.1:5588/login";
 /// What the sign-in asks for: playback, and what the library pages read and change.
 const OAUTH_SCOPES: &[&str] = &[
@@ -97,8 +101,6 @@ const OAUTH_SCOPES: &[&str] = &[
 ];
 /// How long commands wait for a takeover (transfer) to land before this device starts on its own.
 const TAKEOVER_WAIT: Duration = Duration::from_secs(4);
-/// Entities kept for queue rows and context names, so a queue change looks up only what's new.
-const ENTITY_CACHE: usize = 256;
 /// Bounds connection and session reads even while librespot is retrying a dead network.
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -180,7 +182,15 @@ struct Streams {
 impl Engine {
 	/// Signs in (with the saved sign-in, else in the browser), registers the Connect device and
 	/// starts decoding into `writer`. Blocks until the device is online.
-	pub fn start(config: &EngineConfig, writer: PcmWriter, progress: &mut dyn FnMut(&str)) -> io::Result<Self> {
+	/// Credential writes are serialized with `authorization.cancel()`, so an unfinished
+	/// browser/Spirc authentication can never restore credentials after sign-out.
+	pub fn start(
+		config: &EngineConfig,
+		writer: PcmWriter,
+		progress: &mut dyn FnMut(&str),
+		authorization: &StartAuthorization,
+	) -> io::Result<Self> {
+		authorization.check()?;
 		fs::create_dir_all(&config.state_dir)?;
 		let runtime = tokio::runtime::Builder::new_multi_thread()
 			.worker_threads(1)
@@ -191,15 +201,17 @@ impl Engine {
 			.build()?;
 		let audio = (config.cache_mb > 0).then(|| config.cache_dir.join("files"));
 		let limit = (config.cache_mb > 0).then(|| u64::from(config.cache_mb) << 20);
-		let cache = Cache::new(Some(&config.state_dir), Some(&config.state_dir), audio.as_ref(), limit).map_err(io::Error::other)?;
+		let mut cache = Cache::new(Some(&config.state_dir), Some(&config.state_dir), audio.as_ref(), limit).map_err(io::Error::other)?;
+		authorization.guard_cache(&mut cache, &config.state_dir);
 		let session_config = SessionConfig { device_id: device_id(&config.state_dir)?, ..SessionConfig::default() };
 		let credentials = match cache.credentials() {
 			Some(c) => c,
 			None => {
 				progress("Sign in to Spotify in your browser…");
-				sign_in(&session_config.client_id)?
+				oauth::sign_in(&session_config.client_id, &runtime, authorization)?
 			},
 		};
+		authorization.check()?;
 		progress("Connecting to Spotify…");
 		// librespot spawns its tasks on the ambient runtime.
 		let _context = runtime.enter();
@@ -213,6 +225,14 @@ impl Engine {
 			Box::new(RingSink::new(writer, sink_transitions, output_volume))
 		});
 		let player = decoder.get_player_event_channel();
+		if crate::net::trace::enabled() {
+			let mut observed = decoder.get_player_event_channel();
+			runtime.spawn(async move {
+				while let Some(event) = observed.recv().await {
+					trace_player_event(&event, "player-event");
+				}
+			});
+		}
 		let (snap_tx, snapshots) = mpsc::unbounded_channel();
 		let connect = ConnectConfig {
 			name: config.device_name.clone(),
@@ -238,6 +258,10 @@ impl Engine {
 				return Err(error);
 			},
 		};
+		if let Err(error) = authorization.check() {
+			session.shutdown();
+			return Err(error);
+		}
 		let done = Arc::new(AtomicBool::new(false));
 		let ended = done.clone();
 		let (stop, _) = tokio::sync::watch::channel(false);
@@ -266,23 +290,28 @@ impl Engine {
 	pub fn connect(&mut self, deliver: impl FnMut(Incoming) + Send + 'static) -> Option<Client> {
 		let streams = self.streams.take()?;
 		let (tx, requests) = mpsc::unbounded_channel();
-		let activating = Arc::new(AtomicBool::new(false));
+		let runtime = self.runtime.as_ref()?;
+		let _context = runtime.enter();
+		let (metadata, enriched) = metadata::spawn(self.session.clone(), self.transitions.clone());
 		let forward = Forward {
-			spirc:         self.spirc.clone(),
-			activating:    activating.clone(),
-			deferred:      Vec::new(),
-			takeover_by:   None,
-			session:       self.session.clone(),
-			deliver:       Box::new(deliver),
-			entities:      HashMap::new(),
-			state:         Tracker::default(),
-			pending_track: None,
-			transitions:   self.transitions.clone(),
-			cluster:       self.cluster.clone(),
+			spirc: self.spirc.clone(),
+			deferred: Vec::new(),
+			takeover_by: None,
+			takeover_id: 0,
+			load_id: 0,
+			loading_request: None,
+			session: self.session.clone(),
+			deliver: Box::new(deliver),
+			metadata,
+			requests: tx.clone(),
+			state: Tracker::default(),
+			queue_generation: 0,
+			transitions: self.transitions.clone(),
+			cluster: self.cluster.clone(),
 		};
 		let (name, volume) = (self.name.clone(), self.volume);
-		self.runtime.as_ref()?.spawn(forward.run(streams, requests, name, volume));
-		Some(Client { spirc: self.spirc.clone(), requests: tx, activating })
+		runtime.spawn(forward.run(streams, requests, enriched, name, volume));
+		Some(Client { requests: tx })
 	}
 
 	/// Shares authenticated library I/O; stopping the engine cancels its in-flight requests.
@@ -357,16 +386,6 @@ fn device_id(dir: &std::path::Path) -> io::Result<String> {
 	Ok(id)
 }
 
-/// Signs in through the browser (Spotify's own sign-in page) and returns the credentials.
-fn sign_in(client_id: &str) -> io::Result<Credentials> {
-	let token = librespot_oauth::OAuthClientBuilder::new(client_id, OAUTH_REDIRECT, OAUTH_SCOPES.to_vec())
-		.open_in_browser()
-		.build()
-		.and_then(|client| client.get_access_token())
-		.map_err(io::Error::other)?;
-	Ok(Credentials::with_access_token(token.access_token))
-}
-
 /// Percent (0 to 100) to librespot's volume (0 to 65535).
 fn to_u16(percent: u8) -> u16 {
 	u16::try_from(u32::from(percent.min(100)) * 65_535 / 100).unwrap_or(u16::MAX)
@@ -393,60 +412,30 @@ fn now_ms() -> f64 {
 
 /// Drives the player. Every call queues and returns at once.
 pub struct Client {
-	spirc:      Arc<Spirc>,
-	requests:   UnboundedSender<Request>,
-	/// A takeover is on its way: commands wait for the device to become active (Spotify ignores
-	/// them until then) and the forwarding task sends them on.
-	activating: Arc<AtomicBool>,
+	requests: UnboundedSender<Request>,
 }
 
-/// What the forwarding task does for the client.
+/// Commands and asynchronous failures share the engine's immediate event loop.
 enum Request {
-	Queue,
-	/// A takeover was asked for: commands wait for it (or for [`TAKEOVER_WAIT`]).
-	Activating,
-	/// A command sent while the device was being activated.
-	Deferred(Command),
-	Transfer {
-		device: String,
-		play:   bool,
-	},
+	Command { command: Command, id: u64 },
+	Failed { id: u64, message: String },
 }
 
 impl Client {
-	pub fn send(&self, cmd: Command) {
-		match cmd {
-			Command::GetQueue => {
-				let _ = self.requests.send(Request::Queue);
-			},
-			Command::Transfer { device, play } => {
-				let _ = self.requests.send(Request::Transfer { device, play });
-			},
-			// Takes playback over from wherever it is (or was last) and plays, like picking this
-			// device in Spotify and pressing play.
-			Command::Activate => {
-				self.activating.store(true, Ordering::Release);
-				let _ = self.requests.send(Request::Activating);
-				let resume = TransferOptions { restore_paused: Some("resume".to_owned()), ..TransferOptions::default() };
-				let _ = self.spirc.transfer(Some(TransferRequest { transfer_options: resume }));
-			},
-			cmd @ (Command::Load(_) | Command::EditQueue { .. }) => {
-				let _ = self.requests.send(Request::Deferred(cmd));
-			},
-			cmd if self.activating.load(Ordering::Acquire) => {
-				let _ = self.requests.send(Request::Deferred(cmd));
-			},
-			cmd => dispatch(&self.spirc, cmd),
-		}
+	/// Queues a command, tagged with the host's optimistic playback revision (0 if untracked).
+	/// A closed engine stream is reported synchronously; dispatch/load failures arrive as events.
+	pub fn send(&self, command: Command, id: u64) -> io::Result<()> {
+		crate::net::trace::playback("command", command.name(), None);
+		self.requests.send(Request::Command { command, id }).map_err(|error| io::Error::other(format!("The player stopped: {error}")))
 	}
 }
 
-/// Hands a command to the Connect device. A closed channel means the player stopped (`alive`
-/// reports it), so errors are dropped.
-fn dispatch(spirc: &Spirc, cmd: Command) {
-	let _ = match cmd {
+/// Hands a command to Connect, preserving errors for optimistic rollback.
+fn dispatch(spirc: &Spirc, cmd: Command, id: u64) -> Result<(), librespot_core::Error> {
+	crate::net::trace::playback("engine-command", cmd.name(), None);
+	match cmd {
 		Command::GetQueue | Command::Activate | Command::Load(_) | Command::Transfer { .. } => Ok(()),
-		Command::Play { uri: None } => spirc.play(),
+		Command::Play { uri: None } => spirc.playback(id, PlaybackCommand::Play),
 		Command::Play { uri: Some(uri) } => {
 			let options = LoadRequestOptions { start_playing: true, ..LoadRequestOptions::default() };
 			let request = if uri.starts_with("spotify:track:") || uri.starts_with("spotify:episode:") {
@@ -454,18 +443,18 @@ fn dispatch(spirc: &Spirc, cmd: Command) {
 			} else {
 				LoadRequest::from_context_uri(uri, options)
 			};
-			spirc.load(request)
+			spirc.playback(id, PlaybackCommand::Load(request))
 		},
-		Command::Pause => spirc.pause(),
-		Command::SkipNext => spirc.next(),
-		Command::SkipPrev => spirc.prev(),
+		Command::Pause => spirc.playback(id, PlaybackCommand::Pause),
+		Command::SkipNext => spirc.playback(id, PlaybackCommand::Next),
+		Command::SkipPrev => spirc.playback(id, PlaybackCommand::Previous),
 		Command::Seek { position_ms } => spirc.set_position_ms(u32::try_from(position_ms).unwrap_or(u32::MAX)),
 		Command::SetVolume { volume } => spirc.set_volume(to_u16(volume)),
 		Command::SetShuffle { enabled } => spirc.shuffle(enabled),
 		Command::SetRepeatContext { enabled } => spirc.repeat(enabled),
 		Command::SetRepeatTrack { enabled } => spirc.repeat_track(enabled),
 		Command::EditQueue { revision, edit } => spirc.edit_queue(revision, edit),
-	};
+	}
 }
 
 // ------------------------------------------------------------------- forward
@@ -477,89 +466,120 @@ struct Tracker {
 	active:         bool,
 	options:        (bool, bool, bool),
 	context:        String,
+	track:          String,
 	upcoming:       Vec<(String, String, String)>,
 	queue_revision: u64,
 }
 
 struct Forward {
-	spirc:         Arc<Spirc>,
-	/// Shared with the client: a takeover is on its way.
-	activating:    Arc<AtomicBool>,
-	/// Commands waiting for the takeover to land, and until when they wait.
-	deferred:      Vec<Command>,
-	takeover_by:   Option<tokio::time::Instant>,
-	session:       Session,
-	deliver:       Box<dyn FnMut(Incoming) + Send>,
-	entities:      HashMap<String, Entity>,
-	state:         Tracker,
-	/// A track change seen in the last player event, to look up before telling the UI.
-	pending_track: Option<String>,
-	transitions:   Arc<Transitions>,
-	cluster:       SharedCluster,
+	spirc:            Arc<Spirc>,
+	/// Transport commands waiting for a requested takeover, never for metadata.
+	deferred:         Vec<(Command, u64)>,
+	takeover_by:      Option<tokio::time::Instant>,
+	takeover_id:      u64,
+	load_id:          u64,
+	loading_request:  Option<u64>,
+	session:          Session,
+	deliver:          Box<dyn FnMut(Incoming) + Send>,
+	metadata:         UnboundedSender<metadata::Request>,
+	requests:         UnboundedSender<Request>,
+	state:            Tracker,
+	queue_generation: u64,
+	transitions:      Arc<Transitions>,
+	cluster:          SharedCluster,
 }
 
 impl Forward {
-	async fn run(mut self, mut streams: Streams, mut requests: UnboundedReceiver<Request>, name: String, volume: u8) {
+	async fn run(
+		mut self,
+		mut streams: Streams,
+		mut requests: UnboundedReceiver<Request>,
+		mut enriched: UnboundedReceiver<metadata::Ready>,
+		name: String,
+		volume: u8,
+	) {
 		self.event(Event::AuthState { logged_in: true, is_active: false, device_name: name });
 		self.event(Event::VolumeChanged { volume });
 		loop {
 			tokio::select! {
 				event = streams.player.recv() => match event {
-					Some(event) => {
-						self.player_event(event);
-						if let Some(uri) = self.pending_track.take() {
-							let item = self.track(&uri).await;
-							self.event(Event::TrackChanged { item });
-						}
-					},
+					Some(event) => self.player_event(event),
 					None => break,
 				},
 				snapshot = streams.snapshots.recv() => match snapshot {
-					Some(snapshot) => self.snapshot(snapshot).await,
+					Some(snapshot) => self.snapshot(snapshot),
 					None => break,
 				},
+				Some(ready) = enriched.recv() => self.enriched(ready),
 				() = sleep_until(self.takeover_by), if self.takeover_by.is_some() => {
-					// Nothing to take over (no session to transfer): this device starts its own.
 					self.takeover_by = None;
-					if self.activating.swap(false, Ordering::AcqRel) {
-						let _ = self.spirc.activate();
-						for cmd in std::mem::take(&mut self.deferred) {
-							self.dispatch(cmd);
-						}
+					match self.spirc.playback(self.takeover_id, PlaybackCommand::Activate) {
+						Ok(()) => self.flush_deferred(),
+						Err(error) => {
+							self.failed(self.takeover_id, error.to_string());
+							self.deferred.clear();
+						},
 					}
 				},
 				Some(request) = requests.recv() => match request {
-					Request::Queue => self.send_queue().await,
-					Request::Activating => self.takeover_by = Some(tokio::time::Instant::now() + TAKEOVER_WAIT),
-					Request::Transfer { device, play } => self.transfer_device(&device, play).await,
-					Request::Deferred(cmd) => {
-						// The takeover may have landed while the command was on its way.
-						if self.activating.load(Ordering::Acquire) {
-							self.deferred.push(cmd);
-						} else {
-							self.dispatch(cmd);
-						}
-					},
+					Request::Command { command, id } => self.command(command, id),
+					Request::Failed { id, message } => self.failed(id, message),
 				},
 			}
 		}
 		(self.deliver)(Incoming::Closed("The player stopped".into()));
 	}
 
-	/// Sends a command on; a load first activates this device (Spotify ignores one otherwise)
-	/// and keeps the shuffle and repeat it plays with, as the Web API's play does.
-	fn dispatch(&mut self, cmd: Command) {
-		if matches!(cmd, Command::EditQueue { .. }) && !self.state.active {
-			let _ = self.spirc.activate();
+	fn command(&mut self, command: Command, id: u64) {
+		match command {
+			Command::GetQueue => self.send_queue(),
+			Command::Transfer { device, play } => self.transfer_device(device, play, id),
+			Command::Activate => {
+				crate::net::trace::playback("engine-command", "activate", None);
+				self.takeover_id = id;
+				self.takeover_by = Some(tokio::time::Instant::now() + TAKEOVER_WAIT);
+				let resume = TransferOptions { restore_paused: Some("resume".to_owned()), ..TransferOptions::default() };
+				if let Err(error) = self.spirc.playback(id, PlaybackCommand::Transfer(Some(TransferRequest { transfer_options: resume }))) {
+					self.takeover_by = None;
+					self.failed(id, error.to_string());
+				}
+			},
+			command if self.takeover_by.is_some() => self.deferred.push((command, id)),
+			command => self.dispatch(command, id),
 		}
-		let Command::Load(start) = cmd else {
-			dispatch(&self.spirc, cmd);
+	}
+
+	fn flush_deferred(&mut self) {
+		for (command, id) in std::mem::take(&mut self.deferred) {
+			self.dispatch(command, id);
+		}
+	}
+
+	fn dispatch(&mut self, command: Command, id: u64) {
+		if matches!(command, Command::Load(_) | Command::Play { uri: Some(_) } | Command::SkipNext | Command::SkipPrev) {
+			self.load_id = id;
+		}
+		if matches!(command, Command::Load(_) | Command::EditQueue { .. })
+			&& !self.state.active
+			&& let Err(error) = self.spirc.playback(id, PlaybackCommand::Activate)
+		{
+			self.failed(id, error.to_string());
 			return;
-		};
-		if !self.state.active {
-			let _ = self.spirc.activate();
 		}
-		let _ = self.spirc.load(load::request(start, self.state.options));
+		let result = if let Command::Load(start) = command {
+			crate::net::trace::playback("engine-command", "load", None);
+			self.spirc.playback(id, PlaybackCommand::Load(load::request(start, self.state.options)))
+		} else {
+			dispatch(&self.spirc, command, id)
+		};
+		if let Err(error) = result {
+			self.failed(id, error.to_string());
+		}
+	}
+
+	fn failed(&mut self, id: u64, message: String) {
+		crate::net::trace::playback("command-failed", "playback", None);
+		(self.deliver)(Incoming::CommandFailed { id, message });
 	}
 
 	fn event(&mut self, event: Event) {
@@ -567,10 +587,11 @@ impl Forward {
 	}
 
 	fn status(&mut self, status: Status, position_ms: u32) {
-		if self.state.status != status {
-			self.state.status = status;
-			self.event(Event::PlaybackChanged { status });
+		if status != Status::Buffering {
+			self.loading_request = None;
 		}
+		self.state.status = status;
+		self.event(Event::PlaybackChanged { status });
 		self.position(position_ms);
 	}
 
@@ -580,23 +601,43 @@ impl Forward {
 	}
 
 	fn player_event(&mut self, event: PlayerEvent) {
+		trace_player_event(&event, "forward-event");
 		match event {
 			PlayerEvent::Playing { position_ms, .. } => self.status(Status::Playing, position_ms),
 			PlayerEvent::Paused { position_ms, .. } => self.status(Status::Paused, position_ms),
-			PlayerEvent::Loading { position_ms, .. } => self.status(Status::Buffering, position_ms),
+			PlayerEvent::Loading { play_request_id, position_ms, .. } => {
+				self.loading_request = Some(play_request_id);
+				self.status(Status::Buffering, position_ms);
+			},
 			PlayerEvent::Stopped { .. } => self.status(Status::Idle, 0),
 			PlayerEvent::Seeked { position_ms, .. } | PlayerEvent::PositionCorrection { position_ms, .. } => self.position(position_ms),
-			PlayerEvent::TrackChanged { audio_item } => self.pending_track = Some(audio_item.uri),
+			PlayerEvent::TrackChanged { audio_item } => {
+				self.state.track.clone_from(&audio_item.uri);
+				let _ = self.metadata.send(metadata::Request::Track(audio_item.uri.clone()));
+				self.event(Event::TrackChanged { item: metadata::audio_entity(*audio_item) });
+			},
+			PlayerEvent::Unavailable { play_request_id, .. } if self.loading_request == Some(play_request_id) => {
+				self.loading_request = None;
+				self.failed(self.load_id, "Spotify couldn't load this track".into());
+			},
 			PlayerEvent::VolumeChanged { volume } => self.event(Event::VolumeChanged { volume: to_percent(volume) }),
 			_ => {},
 		}
 	}
 
-	async fn snapshot(&mut self, snap: StateSnapshot) {
+	fn snapshot(&mut self, snap: StateSnapshot) {
+		if let Some((id, message)) = snap.command_error {
+			if id == self.takeover_id {
+				self.takeover_by = None;
+				self.deferred.clear();
+			}
+			self.failed(id, message);
+			return;
+		}
 		if let Some(cluster) = snap.cluster {
 			let cluster = Arc::new(cluster);
 			self.cluster.send_replace(Some(cluster.clone()));
-			self.cluster(&cluster, snap.initial_cluster).await;
+			self.cluster(&cluster, snap.initial_cluster);
 			return;
 		}
 		if snap.initial_cluster {
@@ -612,13 +653,8 @@ impl Forward {
 			self.state.active = snap.active;
 			self.event(Event::DeviceChanged { is_active: snap.active });
 		}
-		if snap.active && self.activating.swap(false, Ordering::AcqRel) {
-			self.takeover_by = None;
-			// What was asked meanwhile goes now (a takeover keeps the other device's pause, so a
-			// play asked for still has to be sent).
-			for cmd in std::mem::take(&mut self.deferred) {
-				self.dispatch(cmd);
-			}
+		if snap.active && self.takeover_by.take().is_some() {
+			self.flush_deferred();
 		}
 		self.transitions.context(&snap.context_uri, snap.shuffle);
 		let options = (snap.shuffle, snap.repeat_context, snap.repeat_track);
@@ -635,136 +671,35 @@ impl Forward {
 		}
 		if snap.context_uri != self.state.context {
 			self.state.context.clone_from(&snap.context_uri);
-			let context = self.context(&snap.context_uri).await;
-			self.event(Event::ContextChanged { context });
+			let _ = self.metadata.send(metadata::Request::Context(snap.context_uri.clone()));
+			self.event(Event::ContextChanged { context: named(snap.context_uri, String::new()) });
 		}
 		if snap.next != self.state.upcoming || snap.queue_revision != self.state.queue_revision {
 			self.state.upcoming = snap.next;
 			self.state.queue_revision = snap.queue_revision;
-			self.send_queue().await;
+			self.send_queue();
 		}
 	}
 
-	async fn send_queue(&mut self) {
-		let wanted = self.state.upcoming.clone();
-		let mut upcoming = Vec::with_capacity(wanted.len());
-		for (uid, uri, provider) in wanted {
-			let item = self.track(&uri).await;
-			let source = match provider.as_str() {
-				"queue" => "queue",
-				"autoplay" => "autoplay",
-				_ => "context",
-			};
-			upcoming.push(QueueEntry { uid, source: source.to_owned(), item });
-		}
-		self.event(Event::QueueChanged { upcoming, revision: self.state.queue_revision });
+	fn send_queue(&mut self) {
+		self.queue_generation = self.queue_generation.wrapping_add(1);
+		let _ = self.metadata.send(metadata::Request::Queue {
+			next:       self.state.upcoming.clone(),
+			revision:   self.state.queue_revision,
+			generation: self.queue_generation,
+		});
 	}
 
-	fn remember(&mut self, entity: Entity) {
-		if self.entities.len() >= ENTITY_CACHE {
-			self.entities.clear();
-		}
-		self.entities.insert(entity.uri.clone(), entity);
-	}
-
-	/// A track or episode (now playing, a queue row), looked up once.
-	async fn track(&mut self, uri: &str) -> Entity {
-		if let Some(e) = self.entities.get(uri) {
-			return e.clone();
-		}
-		let looked_up = match SpotifyUri::from_uri(uri) {
-			Ok(id @ SpotifyUri::Track { .. }) => Track::get(&self.session, &id).await.ok().map(|t| self.track_entity(&t)),
-			Ok(id @ SpotifyUri::Episode { .. }) => Episode::get(&self.session, &id).await.ok().map(|e| self.episode_entity(&e)),
-			_ => None,
-		};
-		let entity = looked_up.unwrap_or_else(|| Entity { uri: uri.to_owned(), ..Entity::default() });
-		self.remember(entity.clone());
-		entity
-	}
-
-	fn track_entity(&self, track: &Track) -> Entity {
-		let album = Entity {
-			uri:         uri_of(&track.album.id),
-			decorations: Decorations {
-				identity: Identity { name: track.album.name.clone() },
-				visual_identity: VisualIdentity { cover: self.covers(&track.album.covers) },
-				..Decorations::default()
+	fn enriched(&mut self, ready: metadata::Ready) {
+		match ready {
+			metadata::Ready::Entity(entity) if entity.uri == self.state.track || entity.uri == self.state.context => {
+				self.event(Event::MetadataChanged { entity });
 			},
-		};
-		let creators = track.artists.iter().map(|a| Related { entity: Box::new(named(uri_of(&a.id), a.name.clone())) }).collect();
-		Entity {
-			uri:         uri_of(&track.id),
-			decorations: Decorations {
-				identity: Identity { name: track.name.clone() },
-				visual_identity: VisualIdentity::default(),
-				parent: Some(Related { entity: Box::new(album) }),
-				creators,
-				playback: PlaybackInfo {
-					duration_ms:     u64::try_from(track.duration).unwrap_or_default(),
-					content_ratings: if track.is_explicit { vec!["explicit".to_owned()] } else { Vec::new() },
-				},
+			metadata::Ready::Queue { upcoming, revision, generation } if generation == self.queue_generation => {
+				self.event(Event::QueueChanged { upcoming, revision });
 			},
+			_ => {},
 		}
-	}
-
-	fn episode_entity(&self, episode: &Episode) -> Entity {
-		let show = Entity {
-			decorations: Decorations {
-				identity: Identity { name: episode.show_name.clone() },
-				visual_identity: VisualIdentity { cover: self.covers(&episode.covers) },
-				..Decorations::default()
-			},
-			..Entity::default()
-		};
-		Entity {
-			uri:         uri_of(&episode.id),
-			decorations: Decorations {
-				identity:        Identity { name: episode.name.clone() },
-				visual_identity: VisualIdentity::default(),
-				parent:          Some(Related { entity: Box::new(show) }),
-				creators:        vec![Related { entity: Box::new(named(String::new(), episode.show_name.clone())) }],
-				playback:        PlaybackInfo {
-					duration_ms:     u64::try_from(episode.duration).unwrap_or_default(),
-					content_ratings: if episode.is_explicit { vec!["explicit".to_owned()] } else { Vec::new() },
-				},
-			},
-		}
-	}
-
-	/// Cover URLs by the size names the UI picks from.
-	fn covers(&self, images: &Images) -> Vec<Cover> {
-		let base = self.session.get_user_attribute("image-url").unwrap_or_else(|| "https://i.scdn.co/image/{file_id}".to_owned());
-		images
-			.iter()
-			.map(|i| Cover { url: base.replace("{file_id}", &i.id.to_string()), size: format!("{:?}", i.size).to_ascii_lowercase() })
-			.collect()
-	}
-
-	/// What plays, by name: a playlist, an album, an artist, Liked Songs.
-	async fn context(&mut self, uri: &str) -> Entity {
-		if !uri.starts_with("spotify:album:")
-			&& let Some(e) = self.entities.get(uri)
-		{
-			return e.clone();
-		}
-		let name = if uri.ends_with(":collection") {
-			Some("Liked Songs".to_owned())
-		} else {
-			match SpotifyUri::from_uri(uri) {
-				Ok(id @ SpotifyUri::Playlist { .. }) => Playlist::get(&self.session, &id).await.ok().map(|p| p.name().to_owned()),
-				Ok(id @ SpotifyUri::Album { .. }) => Album::get(&self.session, &id).await.ok().map(|a| {
-					self.transitions.album(&a);
-					a.name
-				}),
-				Ok(id @ SpotifyUri::Artist { .. }) => Artist::get(&self.session, &id).await.ok().map(|a| a.name),
-				_ => None,
-			}
-		};
-		let entity = named(uri.to_owned(), name.unwrap_or_default());
-		if !uri.is_empty() {
-			self.remember(entity.clone());
-		}
-		entity
 	}
 }
 
@@ -775,4 +710,18 @@ fn named(uri: String, name: String) -> Entity {
 
 fn uri_of(id: &SpotifyUri) -> String {
 	id.to_uri().unwrap_or_default()
+}
+
+fn trace_player_event(event: &PlayerEvent, stage: &str) {
+	let (name, position_ms) = match event {
+		PlayerEvent::Playing { position_ms, .. } => ("playing", Some(*position_ms)),
+		PlayerEvent::Paused { position_ms, .. } => ("paused", Some(*position_ms)),
+		PlayerEvent::Loading { position_ms, .. } => ("buffering", Some(*position_ms)),
+		PlayerEvent::Stopped { .. } => ("idle", Some(0)),
+		PlayerEvent::Seeked { position_ms, .. } | PlayerEvent::PositionCorrection { position_ms, .. } => ("position", Some(*position_ms)),
+		PlayerEvent::TrackChanged { .. } => ("track", None),
+		PlayerEvent::Unavailable { .. } => ("unavailable", None),
+		_ => return,
+	};
+	crate::net::trace::playback(stage, name, position_ms.map(f64::from));
 }

@@ -3,7 +3,8 @@
 //! Policy: crossfade songs within a context, except adjacent tracks in the
 //! original order of an unshuffled album context (including disc boundaries).
 //! Those transitions preserve the decoder's gapless trimming and concatenate
-//! PCM without closing/clearing the ring. Playlists, shuffled albums, queued
+//! PCM without closing/clearing the ring, with only an eight-millisecond click ramp at track starts.
+//! Playlists, shuffled albums, queued
 //! nonadjacent songs and album wraparound may crossfade; episodes never do.
 //! This deliberately does not implement Spotify Automix. Unknown album order
 //! stays gapless until Session metadata supplies it, rather than risking a fade
@@ -27,7 +28,7 @@ use librespot_playback::{
 	player::CrossfadeSource,
 };
 
-use crate::audio::{Crossfade, PcmWriter};
+use crate::audio::{CLICK_FADE_FRAMES, Crossfade, PcmWriter, dsp_f32};
 
 #[derive(Default)]
 struct Context {
@@ -74,15 +75,16 @@ impl Transitions {
 
 /// librespot's output; only an overlap decodes from a second source.
 pub(super) struct RingSink {
-	writer:      PcmWriter,
-	transitions: Arc<Transitions>,
-	volume:      Box<dyn VolumeGetter + Send>,
-	samples:     Vec<f32>,
-	outgoing:    Vec<f32>,
-	packet:      Vec<f64>,
-	cursor:      usize,
-	source:      Option<CrossfadeSource>,
-	fade:        Crossfade,
+	writer:          PcmWriter,
+	transitions:     Arc<Transitions>,
+	volume:          Box<dyn VolumeGetter + Send>,
+	samples:         Vec<f32>,
+	outgoing:        Vec<f32>,
+	packet:          Vec<f64>,
+	cursor:          usize,
+	source:          Option<CrossfadeSource>,
+	fade:            Crossfade,
+	start_remaining: usize,
 }
 
 impl RingSink {
@@ -97,18 +99,18 @@ impl RingSink {
 			cursor: 0,
 			source: None,
 			fade: Crossfade::default(),
+			start_remaining: CLICK_FADE_FRAMES,
 		}
 	}
 
 	/// Aligns independently sized decoder packets without dropping either channel.
-	#[expect(clippy::cast_possible_truncation, reason = "decoder f64 samples and attenuation intentionally become f32 PCM")]
 	fn read_outgoing(&mut self, samples: usize) -> SinkResult<()> {
 		self.outgoing.clear();
 		let volume = self.volume.attenuation_factor();
 		while self.outgoing.len() < samples {
 			if let Some(available) = self.packet.get(self.cursor..).filter(|tail| !tail.is_empty()) {
 				let count = available.len().min(samples - self.outgoing.len());
-				self.outgoing.extend(available.iter().take(count).map(|s| (*s * volume) as f32));
+				self.outgoing.extend(available.iter().take(count).map(|s| dsp_f32(*s * volume)));
 				self.cursor += count;
 				continue;
 			}
@@ -133,9 +135,24 @@ impl RingSink {
 		}
 		Ok(())
 	}
+
+	fn fade_start(&mut self) {
+		for frame in self.samples.as_chunks_mut::<2>().0.iter_mut().take(self.start_remaining) {
+			let gain = 1.0 - self.start_remaining as f32 / CLICK_FADE_FRAMES as f32;
+			for sample in frame {
+				*sample *= gain;
+			}
+			self.start_remaining -= 1;
+		}
+	}
 }
 
 impl Sink for RingSink {
+	fn new_track(&mut self) {
+		// The equal-power crossfade already fades the incoming track from zero.
+		self.start_remaining = if self.fade.remaining() == 0 { CLICK_FADE_FRAMES } else { 0 };
+	}
+
 	fn crossfade_duration(&self, current: &SpotifyUri, next: &SpotifyUri) -> u32 {
 		if self.fade.remaining() > 0 {
 			return 0;
@@ -149,6 +166,7 @@ impl Sink for RingSink {
 		self.packet.clear();
 		self.cursor = 0;
 		self.fade.start(usize::try_from(duration_ms).unwrap_or(0) * 44_100 / 1000);
+		self.start_remaining = 0;
 	}
 
 	fn reset(&mut self) {
@@ -156,6 +174,7 @@ impl Sink for RingSink {
 		self.packet.clear();
 		self.cursor = 0;
 		self.fade.cancel();
+		self.start_remaining = CLICK_FADE_FRAMES;
 		self.writer.clear();
 	}
 
@@ -164,8 +183,8 @@ impl Sink for RingSink {
 			return Err(SinkError::InvalidParams("raw packets (passthrough) are not supported".into()));
 		};
 		self.samples.clear();
-		#[expect(clippy::cast_possible_truncation, reason = "f64 samples in [-1, 1] to f32")]
-		self.samples.extend(samples.iter().map(|s| *s as f32));
+		self.samples.extend(samples.iter().copied().map(dsp_f32));
+		self.fade_start();
 		if self.fade.remaining() > 0 {
 			self.read_outgoing((self.samples.len() / 2).min(self.fade.remaining()) * 2)?;
 			self.fade.mix(&mut self.samples, &self.outgoing);
@@ -210,7 +229,7 @@ mod tests {
 	}
 
 	#[test]
-	fn a_user_skip_cancels_the_sink_fade_and_the_next_packet_is_unattenuated() {
+	fn a_user_skip_cancels_the_overlap_and_ramps_the_new_tracks_first_frames() {
 		let (writer, _feed) = crate::audio::channel();
 		let mut sink = RingSink::new(writer, Arc::new(Transitions::default()), Box::new(librespot_playback::mixer::NoOpVolume));
 		let mut converter = Converter::new(None);
@@ -220,8 +239,29 @@ mod tests {
 		assert!(sink.fade.remaining() > 0);
 		sink.reset();
 		sink.write(AudioPacket::Samples(vec![0.75; 512]), &mut converter).unwrap();
-		assert_eq!(sink.samples, [0.75; 512]);
+		assert_eq!(sink.samples.first(), Some(&0.0));
+		assert!(sink.samples.as_chunks::<2>().0.windows(2).all(|pair| pair[0][0] <= pair[1][0]));
+		assert_eq!(sink.start_remaining, CLICK_FADE_FRAMES - 256);
 		assert_eq!(sink.fade.remaining(), 0);
 		assert!(sink.packet.is_empty() && sink.source.is_none());
+	}
+
+	#[test]
+	fn track_start_ramp_is_stereo_and_sample_counted_across_packets() {
+		let (writer, _feed) = crate::audio::channel();
+		let mut sink = RingSink::new(writer, Arc::new(Transitions::default()), Box::new(librespot_playback::mixer::NoOpVolume));
+		let mut converter = Converter::new(None);
+		sink.write(AudioPacket::Samples(vec![0.5; 200]), &mut converter).unwrap();
+		assert_eq!(&sink.samples[..2], &[0.0, 0.0]);
+		assert!(sink.samples.as_chunks::<2>().0.iter().all(|frame| frame[0] == frame[1]));
+		sink.write(AudioPacket::Samples(vec![0.5; CLICK_FADE_FRAMES * 2]), &mut converter).unwrap();
+		assert!((sink.samples[0] - 0.5 * 100.0 / CLICK_FADE_FRAMES as f32).abs() < 1e-6);
+		assert_eq!(sink.samples.last(), Some(&0.5));
+		assert_eq!(sink.start_remaining, 0);
+		sink.new_track();
+		assert_eq!(sink.start_remaining, CLICK_FADE_FRAMES, "natural loads also arm the click ramp");
+		sink.fade.start(4410);
+		sink.new_track();
+		assert_eq!(sink.start_remaining, 0, "do not attenuate the outgoing side of a crossfade");
 	}
 }

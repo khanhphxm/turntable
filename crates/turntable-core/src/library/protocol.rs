@@ -1,6 +1,6 @@
 //! Requests to the authenticated library worker and responses delivered to the app.
 //! Playlist attributes and library writes use the authenticated playback Session.
-//! Only operations without that Session may fall back to the Web API.
+//! Anonymous web-player metadata never supplies account authentication.
 
 use std::{
 	collections::{HashMap, HashSet},
@@ -8,7 +8,7 @@ use std::{
 };
 
 use super::{
-	Facet, Home, HomeFeed, HomeSection, Listing, Popularity, RootEntry, Route,
+	Home, Listing, Popularity, RootEntry, Route,
 	added::{RefreshStats, TrackId},
 };
 use crate::spotify::{self, Album, Artist, Playlist, SearchResults, Track, User};
@@ -17,17 +17,8 @@ use crate::spotify::{self, Album, Artist, Playlist, SearchResults, Track, User};
 pub enum Request {
 	/// (Re)open the client and load the profile and playlists.
 	Connect,
-	/// Run the browser login, then connect.
-	Login,
 	/// Load the home page.
 	Home,
-	/// Select and load a personalised Home facet.
-	HomeFacet(Facet),
-	/// Show all in a Home section; offsets count raw Spotify items, including unmapped ones.
-	HomeSectionMore {
-		uri:    String,
-		offset: u32,
-	},
 	/// Load the albums saved to the library.
 	Albums,
 	/// Load the artists the user follows.
@@ -79,8 +70,14 @@ pub enum Request {
 	AddToPlaylist(String, String, Vec<String>),
 	/// Remove one occurrence (playlist id, URI, absolute zero-based row).
 	RemoveFromPlaylist(String, String, u32),
-	/// Move one row to its final zero-based position.
-	MovePlaylistRow(String, u32, u32),
+	/// Move a raw playlist occurrence after checking both endpoint URIs.
+	MovePlaylistRow {
+		id:     String,
+		from:   u32,
+		to:     u32,
+		source: String,
+		target: String,
+	},
 	/// The tracks of an album or playlist, to add to the queue.
 	QueueContext(Route),
 	/// Whether `uri` is in Liked Songs.
@@ -106,10 +103,11 @@ pub enum Request {
 	},
 	/// A transport command for the device playing elsewhere.
 	Control {
-		device:  String,
-		command: spotify::PlayerCommand,
+		device:   String,
+		command:  spotify::PlayerCommand,
+		/// Optimistic playback revision; 0 for controls that don't change transport.
+		revision: u64,
 	},
-	Logout,
 	/// Forget disk library data when the playback account signs out.
 	ForgetSnapshot,
 }
@@ -128,10 +126,6 @@ impl Response {
 			Self::Connected { playlists, .. } => format!("Connected({})", playlists.len()),
 			Self::Home(_) => "Home".into(),
 			Self::HomeRecentTracks(tracks) => format!("HomeRecentTracks({})", tracks.len()),
-			Self::HomeFeed { facet, feed } => format!("HomeFeed({facet:?}, {})", feed.sections.len()),
-			Self::HomeSection { section, offset, .. } => format!("HomeSection({}@{offset})", section.uri),
-			Self::HomeUnavailable { facet } => format!("HomeUnavailable({facet:?})"),
-			Self::HomeSectionFailed { uri, message } => format!("HomeSectionFailed({uri}, {message})"),
 			Self::Albums(albums) => format!("Albums({})", albums.len()),
 			Self::Following(artists) => format!("Following({})", artists.len()),
 			Self::Playlists(playlists) => format!("Playlists({})", playlists.len()),
@@ -155,31 +149,12 @@ pub enum Response {
 	},
 	/// A network failure, or a successful online account refresh (never a disk snapshot).
 	Offline(bool),
-	NeedsClientId,
 	NeedsLogin,
-	LoginFailed(String),
-	/// The authorization URL, for when no browser opens by itself.
-	LoginUrl(String),
+	/// A definitive subscription refusal tears down the whole account, not just this worker.
+	SignInRejected(crate::engine::SignInError),
 	Home(Home),
 	/// First usable native Home rows; keep every cached shelf until full enrichment arrives.
 	HomeRecentTracks(Vec<Track>),
-	HomeFeed {
-		facet: Facet,
-		feed:  HomeFeed,
-	},
-	HomeSection {
-		section:     HomeSection,
-		offset:      u32,
-		next_offset: Option<u32>,
-	},
-	/// A failed personalised refresh leaves cached data visible; first load uses legacy shelves.
-	HomeUnavailable {
-		facet: Facet,
-	},
-	HomeSectionFailed {
-		uri:     String,
-		message: String,
-	},
 	Albums(Vec<Album>),
 	Following(Vec<Artist>),
 	Artist(Artist),
@@ -255,6 +230,11 @@ pub enum Response {
 	},
 	/// Playback was moved to the device asked for.
 	Transferred,
-	/// A transfer or a transport command to another device failed (a sentence for the user).
+	/// A transfer to another device failed (a sentence for the user).
 	PlayerError(String),
+	/// A remote control failed; only its own outstanding prediction may be rolled back.
+	ControlFailed {
+		revision: u64,
+		message:  String,
+	},
 }

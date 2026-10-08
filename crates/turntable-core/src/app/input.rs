@@ -16,27 +16,18 @@ impl State {
 	pub(super) fn field_text(&mut self, field: Field) -> &mut String {
 		match field {
 			Field::Search => &mut self.library.query,
-			Field::ClientId => &mut self.id_input,
 			Field::PlaylistName => &mut self.name_input,
 			Field::PlaylistDescription => &mut self.description_input,
 			Field::LibraryFilter => &mut self.library.filter,
-			Field::DeviceName => &mut self.device_input,
 		}
 	}
 
-	pub(super) fn type_input(&mut self, mut text: String, effects: &mut Vec<Effect>) {
-		if let Some(field) = self.focus {
-			if field != Field::PlaylistDescription {
-				text.retain(|c| c != '\n' && c != '\r');
-			}
-			self.field_text(field).push_str(&text);
-			self.after_edit(field, effects);
+	pub(super) fn set_text(&mut self, field: Field, mut text: String, effects: &mut Vec<Effect>) {
+		if field != Field::PlaylistDescription {
+			text.retain(|c| c != '\n' && c != '\r');
 		}
-	}
-
-	pub(super) fn backspace_input(&mut self, effects: &mut Vec<Effect>) {
-		if let Some(field) = self.focus {
-			self.field_text(field).pop();
+		if *self.field_text(field) != text {
+			*self.field_text(field) = text;
 			self.after_edit(field, effects);
 		}
 	}
@@ -55,14 +46,15 @@ impl State {
 		let Some(field) = self.focus else { return Vec::new() };
 		let msg = match field {
 			Field::Search => Msg::SearchSubmit(self.field_text(field).clone()),
-			Field::ClientId => Msg::SaveClientId(self.field_text(field).clone()),
 			Field::PlaylistName => Msg::SaveRename,
-			Field::PlaylistDescription => Msg::Type("\n".into()),
+			Field::PlaylistDescription => {
+				self.field_text(field).push('\n');
+				return Vec::new();
+			},
 			Field::LibraryFilter => match self.library.entries(true).first() {
 				Some(entry) => Msg::Navigate(entry.route()),
 				None => Msg::Focus(None),
 			},
-			Field::DeviceName => Msg::SaveDeviceName,
 		};
 		self.update(msg)
 	}

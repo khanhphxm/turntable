@@ -4,9 +4,12 @@
 //! transitions and pushes into a lock-free ring ([`PcmWriter`]); the platform
 //! render thread runs the EQ, then the output stage (mono, volume normalization
 //! with a true-peak limiter, balance). Rendering never allocates or locks.
-//! macOS plays through CoreAudio and follows the system default unless a device is picked. Linux writes raw PCM to
-//! `pw-cat`, `pacat` or `aplay`; Windows uses shared-mode WASAPI. Both use the system
-//! default output. Every backend stops when idle.
+//! macOS follows the system default unless a device is picked. Device discovery/opening and
+//! stream replacement run on controller workers, never the host UI thread. Linux writes raw
+//! PCM to `pw-cat`, `pacat` or `aplay`; Windows uses shared-mode WASAPI. A failed utility or a
+//! ring that does not drain for two seconds reports a dead output for rebuilding from its feed.
+//! While unavailable, PCM is dropped at a bounded pace rather than pausing/blocking the decoder.
+//! Short ramps soften underruns and track starts. Every backend stops when idle.
 
 mod crossfade;
 mod eq;
@@ -28,16 +31,25 @@ use std::{
 		Arc, OnceLock,
 		atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering},
 	},
+	task::{Wake, Waker},
 	thread::{self, Thread},
-	time::Duration,
+	time::{Duration, Instant},
 };
 
 pub(crate) use crossfade::Crossfade;
-pub use eq::{BANDS_HZ, EqSettings, PRESETS};
+pub use eq::{BANDS_HZ, EqSettings, GAIN_STEP_DB, MAX_GAIN_DB, PRESETS, sanitize_gain_db};
 use eq::{Equalizer, Mailbox};
+use futures_util::task::AtomicWaker;
 use ring::Ring;
 use stage::OutputStage;
 pub use stage::{Normalize, StageParams, volume_db};
+
+/// Rounds DSP samples, gains and coefficients to the f32 render format.
+#[inline]
+#[expect(clippy::cast_possible_truncation, reason = "DSP calculations use f64 precision; the render pipeline deliberately stores f32")]
+pub(crate) fn dsp_f32(value: f64) -> f32 {
+	value as f32
+}
 
 /// Whether this platform offers an output-device picker. Other platforms use the system default.
 pub const CAN_PICK_OUTPUT: bool = output::CAN_PICK_OUTPUT;
@@ -79,6 +91,10 @@ const REBUFFER_SAMPLES: usize = 2048 * 2;
 const MIN_REFILL_SAMPLES: usize = 2048 * 2;
 /// A parked writer re-checks at least this often (a missed wake-up, stop).
 const READER_PARK: Duration = Duration::from_millis(100);
+/// A vanished device must not hold the decoder (and its transport commands) indefinitely.
+const WRITER_TIMEOUT: Duration = Duration::from_secs(2);
+/// Eight milliseconds at 44.1 kHz; the same duration is used for track-start ramps.
+pub(crate) const CLICK_FADE_FRAMES: usize = 353;
 /// After this many frames of nothing but silence (1.5 s) the output unit is
 /// stopped, so a paused player costs no audio callbacks at all.
 const IDLE_STOP_FRAMES: u64 = 44_100 * 3 / 2;
@@ -115,6 +131,11 @@ struct Shared {
 	/// Natural-transition overlap in seconds, read by the decoder (not the callback).
 	crossfade:  AtomicU8,
 	stop:       AtomicBool,
+	/// Output failure, distinct from permanent shutdown: the decoder keeps accepting commands.
+	dead:       AtomicBool,
+	/// A replacement owns the feed while the old backend is being shut down.
+	recovering: AtomicBool,
+	failure:    OnceLock<Box<dyn Fn() + Send + Sync>>,
 	ended:      AtomicBool,
 	#[cfg(test)]
 	underruns:  AtomicU64,
@@ -127,7 +148,8 @@ struct Shared {
 	/// Requests for the control thread, which owns starting and stopping.
 	want_stop:  AtomicBool,
 	want_start: AtomicBool,
-	control:    OnceLock<Thread>,
+	/// Re-registerable: a rebuilt output has a new control thread. Wake never locks/allocates.
+	control:    AtomicWaker,
 	stage:      StageShared,
 	/// Backend control state; default-output backends need none.
 	_output:    output::State,
@@ -136,11 +158,26 @@ struct Shared {
 impl Shared {
 	/// Asks the control thread to resume output (new audio arrived while stopped).
 	fn request_start(&self) {
-		if !self.running.load(Ordering::Acquire)
-			&& !self.want_start.swap(true, Ordering::AcqRel)
-			&& let Some(t) = self.control.get()
+		if !self.running.load(Ordering::Acquire) && !self.want_start.swap(true, Ordering::AcqRel) {
+			self.control.wake();
+		}
+	}
+
+	fn writer_stopped(&self) -> bool {
+		// A restart clears stop before releasing recovering. Re-read stop after observing
+		// that release, rather than mistaking the old backend's stop for permanent shutdown.
+		self.stop.load(Ordering::Acquire) && !self.recovering.load(Ordering::Acquire) && self.stop.load(Ordering::Acquire)
+	}
+
+	fn output_failed(&self) {
+		self.running.store(false, Ordering::Release);
+		if !self.dead.swap(true, Ordering::AcqRel)
+			&& let Some(notify) = self.failure.get()
 		{
-			t.unpark();
+			notify();
+		}
+		if let Some(writer) = self.writer.get() {
+			writer.unpark();
 		}
 	}
 }
@@ -152,6 +189,9 @@ impl Shared {
 			mailbox:                Mailbox::new(),
 			crossfade:              AtomicU8::new(0),
 			stop:                   AtomicBool::new(false),
+			dead:                   AtomicBool::new(false),
+			recovering:             AtomicBool::new(false),
+			failure:                OnceLock::new(),
 			ended:                  AtomicBool::new(false),
 			#[cfg(test)]
 			underruns:              AtomicU64::new(0),
@@ -160,11 +200,27 @@ impl Shared {
 			running:                AtomicBool::new(true),
 			want_stop:              AtomicBool::new(false),
 			want_start:             AtomicBool::new(false),
-			control:                OnceLock::new(),
+			control:                AtomicWaker::new(),
 			stage:                  StageShared::new(),
 			_output:                output::State::default(),
 		}
 	}
+}
+
+struct ControlThread(Thread);
+
+impl Wake for ControlThread {
+	fn wake(self: Arc<Self>) {
+		self.0.unpark();
+	}
+
+	fn wake_by_ref(self: &Arc<Self>) {
+		self.0.unpark();
+	}
+}
+
+fn control_waker() -> Waker {
+	Waker::from(Arc::new(ControlThread(thread::current())))
 }
 
 /// The producer's end of the audio path: the decoder pushes interleaved stereo `f32` frames.
@@ -179,6 +235,14 @@ pub fn channel() -> (PcmWriter, Feed) {
 	(PcmWriter(shared.clone()), Feed(shared))
 }
 
+impl Feed {
+	/// Installs the output-failure callback once for this path. It runs on a decoder/output
+	/// thread and must only post an event and wake its host, never wait for that host.
+	pub fn on_failure(&self, notify: impl Fn() + Send + Sync + 'static) {
+		self.0.failure.get_or_init(|| Box::new(notify));
+	}
+}
+
 impl PcmWriter {
 	/// The currently requested natural-transition overlap, in seconds.
 	pub(crate) fn crossfade(&self) -> u8 {
@@ -190,24 +254,47 @@ impl PcmWriter {
 		self.0.ring.discard_buffered();
 	}
 
-	/// Queues `samples` (whole stereo frames), blocking while the buffer is full: the output's
-	/// pace is the decoder's. Returns false once the player is gone (the samples are dropped).
-	pub fn write(&self, mut samples: &[f32]) -> bool {
+	/// Queues whole stereo frames at the output's pace. A stalled output is reported dead
+	/// after two seconds; unavailable audio is dropped, without turning a transient device
+	/// failure into a librespot pause. Returns false only for permanent shutdown.
+	pub fn write(&self, samples: &[f32]) -> bool {
+		self.write_with_timeout(samples, WRITER_TIMEOUT)
+	}
+
+	fn write_with_timeout(&self, mut samples: &[f32], timeout: Duration) -> bool {
 		let sh = &*self.0;
 		sh.writer.get_or_init(thread::current);
+		let mut progress = Instant::now();
+		let mut queued = sh.ring.len();
 		while !samples.is_empty() {
-			if sh.stop.load(Ordering::Acquire) {
+			if sh.writer_stopped() {
 				return false;
 			}
+			if sh.dead.load(Ordering::Acquire) {
+				sh.ring.discard_buffered();
+				// Bound both decoder wake-ups and transport-command latency while there is no device.
+				let frames = u64::try_from(samples.len() / 2).unwrap_or(u64::MAX);
+				thread::park_timeout(Duration::from_micros(frames.saturating_mul(1_000_000) / 44_100).min(READER_PARK));
+				return !sh.writer_stopped();
+			}
+			let now_queued = sh.ring.len();
+			if now_queued < queued {
+				progress = Instant::now();
+			}
+			queued = now_queued;
 			// Wait for a refill's worth of room (or room for all that's left): the render
 			// callback wakes this thread then, so a playing stream costs ~22 wake-ups a second.
 			let need = samples.len().min(MIN_REFILL_SAMPLES);
 			if FILL_SAMPLES.saturating_sub(sh.ring.len()) < need {
+				if progress.elapsed() >= timeout {
+					sh.output_failed();
+					continue;
+				}
 				sh.waiting.store(true, Ordering::Release);
 				// A full ring with output stopped would wait forever: wake it up.
 				sh.request_start();
 				if FILL_SAMPLES.saturating_sub(sh.ring.len()) < need {
-					thread::park_timeout(READER_PARK);
+					thread::park_timeout(READER_PARK.min(timeout.saturating_sub(progress.elapsed())));
 				}
 				sh.waiting.store(false, Ordering::Release);
 				continue;
@@ -216,6 +303,8 @@ impl PcmWriter {
 			let Some(chunk) = samples.get(..room.min(samples.len())) else { return false };
 			let n = sh.ring.push(chunk);
 			samples = samples.get(n..).unwrap_or_default();
+			queued = sh.ring.len();
+			progress = Instant::now();
 			// Audio after a pause: resume the (idle-stopped) output.
 			sh.request_start();
 		}
@@ -252,10 +341,28 @@ impl Player {
 	/// Playback begins as soon as enough PCM has been buffered. When the output can't start (no
 	/// device, the device busy) the feed comes back with the error, so the caller can try again.
 	pub fn start(feed: Feed, device: Option<&str>) -> Result<Self, StartError> {
+		Self::start_with(feed, device, output::Output::start)
+	}
+
+	fn start_with(
+		feed: Feed,
+		device: Option<&str>,
+		open: impl FnOnce(Arc<Shared>, Option<&str>) -> io::Result<output::Output>,
+	) -> Result<Self, StartError> {
 		let shared = feed.0;
-		match output::Output::start(shared.clone(), device) {
+		// The previous backend has been joined before its feed is returned. Reset its shutdown
+		// and idle requests, and let the new thread register its own control waker.
+		shared.stop.store(false, Ordering::Release);
+		shared.dead.store(false, Ordering::Release);
+		shared.recovering.store(false, Ordering::Release);
+		shared.want_stop.store(false, Ordering::Release);
+		shared.want_start.store(false, Ordering::Release);
+		match open(shared.clone(), device) {
 			Ok(out) => Ok(Self { shared, out }),
-			Err(error) => Err(StartError { error, feed: Feed(shared) }),
+			Err(error) => {
+				shared.output_failed();
+				Err(StartError { error, feed: Feed(shared) })
+			},
 		}
 	}
 
@@ -299,6 +406,26 @@ impl Player {
 		self.out.has_output()
 	}
 
+	/// Whether the opened stream must follow a changed default or device format.
+	pub fn is_stale(&self) -> bool {
+		self.out.is_stale()
+	}
+
+	/// Whether the backend exited or its ring stopped draining.
+	pub fn is_dead(&self) -> bool {
+		self.shared.dead.load(Ordering::Acquire)
+	}
+
+	/// Stops/joins the old backend and returns its original feed for rebuilding. Run on an
+	/// output worker: disposal can wait for a driver callback or a blocked Linux pipe write.
+	pub fn into_feed(self) -> Feed {
+		let Self { shared, out } = self;
+		shared.recovering.store(true, Ordering::Release);
+		shared.dead.store(true, Ordering::Release);
+		drop(out);
+		Feed(shared)
+	}
+
 	/// Changes the output device where selection is supported; otherwise keeps the system default.
 	/// A missing device falls back to the default. An error keeps the stream for a later retry.
 	pub fn set_device(&mut self, uid: Option<&str>) -> io::Result<()> {
@@ -316,6 +443,10 @@ trait DeviceControl {
 		true
 	}
 
+	fn is_stale(&self) -> bool {
+		false
+	}
+
 	fn set_device(&mut self, _uid: Option<&str>) -> io::Result<()> {
 		Ok(())
 	}
@@ -331,13 +462,28 @@ pub(crate) struct Render {
 	program:       u32,
 	/// Waiting for the ring to fill (start-up or after running dry).
 	buffering:     bool,
+	/// Last PCM frame and bounded tails bridge underruns even across short callbacks.
+	last:          [f32; 2],
+	fade_out:      usize,
+	fade_in:       usize,
 	/// Frames of pure silence in a row (for stopping the unit when idle).
 	silent_frames: u64,
 }
 
 impl Render {
 	fn new(shared: Arc<Shared>) -> Render {
-		Render { shared, eq: Equalizer::new(), stage: OutputStage::new(), seen: 0, program: 0, buffering: true, silent_frames: 0 }
+		Render {
+			shared,
+			eq: Equalizer::new(),
+			stage: OutputStage::new(),
+			seen: 0,
+			program: 0,
+			buffering: true,
+			last: [0.0; 2],
+			fade_out: 0,
+			fade_in: 0,
+			silent_frames: 0,
+		}
 	}
 
 	/// Hands the stage the settings published since the last callback.
@@ -356,6 +502,34 @@ impl Render {
 		}
 	}
 
+	/// No lookahead/allocation: extend the last frame into an eight-millisecond tail, then
+	/// ramp the refill from zero. Keep stereo gains identical and count frames, not packets.
+	fn soften_underrun(out: &mut [f32], n: usize, last: &mut [f32; 2], fade_in: &mut usize, fade_out: &mut usize) -> bool {
+		let (audio, silence) = out.split_at_mut(n);
+		for frame in audio.as_chunks_mut::<2>().0.iter_mut().take(*fade_in) {
+			let gain = 1.0 - *fade_in as f32 / CLICK_FADE_FRAMES as f32;
+			for sample in frame {
+				*sample *= gain;
+			}
+			*fade_in -= 1;
+		}
+		if let Some(frame) = audio.as_chunks::<2>().0.last() {
+			*last = *frame;
+		}
+		let tail = *fade_out > 0;
+		for frame in silence.as_chunks_mut::<2>().0 {
+			if *fade_out == 0 {
+				break;
+			}
+			*fade_out -= 1;
+			let gain = *fade_out as f32 / CLICK_FADE_FRAMES as f32;
+			for (sample, previous) in frame.iter_mut().zip(last.iter()) {
+				*sample = previous * gain;
+			}
+		}
+		tail
+	}
+
 	/// Fills `out` (interleaved stereo f32). Returns true if it is all silence.
 	pub(crate) fn render(&mut self, out: &mut [f32]) -> bool {
 		let sh = &*self.shared;
@@ -364,11 +538,12 @@ impl Render {
 		}
 		let ended = sh.ended.load(Ordering::Acquire);
 		let avail = sh.ring.len();
-		if self.buffering && (avail >= REBUFFER_SAMPLES || (ended && avail > 0)) {
+		if self.buffering && self.fade_out == 0 && (avail >= REBUFFER_SAMPLES || (ended && avail > 0)) {
 			self.buffering = false;
 		}
 		let want = out.len() & !1;
 		let n = if self.buffering { 0 } else { out.get_mut(..want).map_or(0, |frames| sh.ring.pop(frames)) };
+		let underrun = n < want && !self.buffering && !ended;
 		if n < out.len() {
 			if let Some(silence) = out.get_mut(n..) {
 				silence.fill(0.0);
@@ -377,7 +552,12 @@ impl Render {
 				#[cfg(test)]
 				sh.underruns.fetch_add(1, Ordering::Relaxed);
 				self.buffering = true;
+				self.fade_out = CLICK_FADE_FRAMES;
 			}
+		}
+		let tail = Self::soften_underrun(out, n, &mut self.last, &mut self.fade_in, &mut self.fade_out);
+		if underrun {
+			self.fade_in = CLICK_FADE_FRAMES;
 		}
 		// Wake the writer once a refill's worth of room exists. `unpark` doesn't
 		// allocate or block, so it's safe on the audio thread.
@@ -392,14 +572,11 @@ impl Render {
 		self.eq.process(out);
 		Self::poll_stage(&mut self.stage, &mut self.program, sh);
 		self.stage.process(out);
-		let silent = n == 0 && self.eq.is_bypassed() && self.stage.is_idle();
+		let silent = n == 0 && !tail && self.eq.is_bypassed() && self.stage.is_idle();
 		// Nothing to play for a while (paused, idle): have the unit stopped.
 		self.silent_frames = if n == 0 { self.silent_frames + (out.len() / 2) as u64 } else { 0 };
-		if self.silent_frames >= IDLE_STOP_FRAMES
-			&& !sh.want_stop.swap(true, Ordering::AcqRel)
-			&& let Some(t) = sh.control.get()
-		{
-			t.unpark();
+		if self.silent_frames >= IDLE_STOP_FRAMES && !sh.want_stop.swap(true, Ordering::AcqRel) {
+			sh.control.wake();
 		}
 		silent
 	}

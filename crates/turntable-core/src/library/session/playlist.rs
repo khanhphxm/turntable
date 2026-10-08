@@ -1,9 +1,6 @@
 //! Revision-checked Playlist4 edits. A row removal targets one occurrence; moves
 //! use final, zero-based row indices (Playlist4's insertion index is pre-removal).
 
-#[cfg(test)]
-mod live;
-
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::Method;
@@ -18,14 +15,11 @@ use librespot_protocol::{
 use protobuf::{Message, MessageField};
 use rand::RngCore;
 
-use super::{Reader, network};
+use super::Reader;
 use crate::{
 	net::trace,
 	spotify::{self, Playlist, PlaylistChanges},
 };
-
-#[cfg(test)]
-static REQUESTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn item(uri: &str) -> Item {
 	Item { uri: Some(uri.to_owned()), ..Default::default() }
@@ -164,8 +158,6 @@ fn create_attributes(name: &str) -> Op {
 pub(super) async fn fetch(session: &Session, id: &str, offset: u32, length: u32) -> Result<SelectedListContent, librespot_core::Error> {
 	let id = SpotifyId::from_base62(id)?.to_base62()?;
 	let endpoint = format!("/playlist/v2/playlist/{id}?from={offset}&length={length}");
-	#[cfg(test)]
-	REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 	let span = trace::start();
 	let bytes = session.spclient().request(&Method::GET, &endpoint, None, None).await?;
 	if trace::enabled() {
@@ -180,8 +172,6 @@ pub(super) async fn fetch(session: &Session, id: &str, offset: u32, length: u32)
 
 pub(super) async fn post(session: &Session, endpoint: &str, revision: &[u8], ops: Vec<Op>) -> Result<(), librespot_core::Error> {
 	let body = changes(&session.username(), revision, ops);
-	#[cfg(test)]
-	REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 	// Sync/resync flags describe the returned view, not whether the write applied.
 	let span = trace::start();
 	let bytes = session.spclient().request_with_protobuf(&Method::POST, endpoint, None, &body).await?;
@@ -196,8 +186,6 @@ pub(super) async fn post(session: &Session, endpoint: &str, revision: &[u8], ops
 }
 
 pub(super) async fn root(session: &Session, offset: u32, length: u32) -> Result<SelectedListContent, librespot_core::Error> {
-	#[cfg(test)]
-	REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 	let span = trace::start();
 	let bytes = session.spclient().get_rootlist(usize::try_from(offset)?, Some(usize::try_from(length)?)).await?;
 	span.done("session", "GET", "https://spclient.spotify.com/playlist/v2/user/me/rootlist", trace::Reply {
@@ -253,7 +241,7 @@ impl Reader {
 				change_root(session, uri, remove).await?;
 				Ok(())
 			})
-			.map_err(network)?;
+			.map_err(spotify::Error::from)?;
 		self.roots = None;
 		Ok(())
 	}
@@ -261,7 +249,7 @@ impl Reader {
 	pub(in crate::library) fn create_playlist(&mut self, name: &str, uris: &[String]) -> spotify::Result<Playlist> {
 		let mut raw = [0; 16];
 		rand::rng().fill_bytes(&mut raw);
-		let id = SpotifyId::from_raw(&raw).map_err(network)?.to_base62().map_err(network)?;
+		let id = SpotifyId::from_raw(&raw).map_err(spotify::Error::from)?.to_base62().map_err(spotify::Error::from)?;
 		let uri = format!("spotify:playlist:{id}");
 		self.shared
 			.block_on(async {
@@ -289,7 +277,7 @@ impl Reader {
 				)
 				.await
 			})
-			.map_err(network)?;
+			.map_err(spotify::Error::from)?;
 		self.roots = None;
 		let mut created = super::playlist(
 			&id,
@@ -313,9 +301,9 @@ impl Reader {
 				if let Some(public) = edits.public {
 					set_public(session, id, public).await?;
 				}
-				Ok(())
+				Ok::<_, librespot_core::Error>(())
 			})
-			.map_err(network)?;
+			.map_err(spotify::Error::from)?;
 		self.roots = None;
 		Ok(())
 	}
@@ -339,7 +327,7 @@ impl Reader {
 				};
 				post(session, &format!("/playlist/v2/playlist/{id}/changes"), current.revision(), vec![op]).await
 			})
-			.map_err(network)?;
+			.map_err(spotify::Error::from)?;
 		self.roots = None;
 		Ok(())
 	}
@@ -353,7 +341,7 @@ impl Reader {
 				let current = fetch(self.shared.session(), id, 0, 0).await?;
 				post(self.shared.session(), &format!("/playlist/v2/playlist/{id}/changes"), current.revision(), vec![append(uris)]).await
 			})
-			.map_err(network)?;
+			.map_err(spotify::Error::from)?;
 		self.roots = None;
 		Ok(())
 	}
@@ -369,31 +357,52 @@ impl Reader {
 				post(self.shared.session(), &format!("/playlist/v2/playlist/{id}/changes"), current.revision(), vec![remove(index, uri)])
 					.await
 			})
-			.map_err(network)?;
+			.map_err(spotify::Error::from)?;
 		self.roots = None;
 		Ok(())
 	}
 
-	pub(in crate::library) fn move_playlist_row(&mut self, id: &str, from: u32, to: u32) -> spotify::Result<()> {
+	pub(in crate::library) fn move_playlist_row(
+		&mut self,
+		id: &str,
+		from: u32,
+		to: u32,
+		source_uri: &str,
+		target_uri: &str,
+	) -> spotify::Result<()> {
 		let (source, target) = (position(from)?, position(to)?);
 		if from == to {
 			return Ok(());
 		}
 		self.shared
 			.block_on(async {
-				let current = fetch(self.shared.session(), id, 0, 0).await?;
-				if source >= current.length() || target >= current.length() {
-					return Err(librespot_core::Error::failed_precondition("Playlist row is out of range"));
-				}
+				let (current, destination) =
+					tokio::try_join!(fetch(self.shared.session(), id, from, 1), fetch(self.shared.session(), id, to, 1))?;
+				validate_move(&current, &destination, source_uri, target_uri)?;
 				post(self.shared.session(), &format!("/playlist/v2/playlist/{id}/changes"), current.revision(), vec![move_row(
 					source, target,
 				)])
 				.await
 			})
-			.map_err(network)?;
+			.map_err(spotify::Error::from)?;
 		self.roots = None;
 		Ok(())
 	}
+}
+
+fn validate_move(
+	source: &SelectedListContent,
+	target: &SelectedListContent,
+	source_uri: &str,
+	target_uri: &str,
+) -> Result<(), librespot_core::Error> {
+	if source.revision() != target.revision()
+		|| source.contents.get_or_default().items.first().is_none_or(|item| item.uri() != source_uri)
+		|| target.contents.get_or_default().items.first().is_none_or(|item| item.uri() != target_uri)
+	{
+		return Err(librespot_core::Error::failed_precondition("The playlist changed; reopen it before editing"));
+	}
+	Ok(())
 }
 
 #[cfg(test)]
@@ -448,5 +457,20 @@ mod tests {
 		assert!(values.has_description());
 		assert_eq!(values.description(), "");
 		Ok(())
+	}
+
+	#[test]
+	fn move_rejects_changed_source_target_or_revision() {
+		let mut source = SelectedListContent::new();
+		source.set_revision(vec![1]);
+		source.contents = MessageField::some(Default::default());
+		source.contents.as_mut().unwrap().items = vec![item("source")];
+		let mut target = source.clone();
+		target.contents.as_mut().unwrap().items = vec![item("target")];
+		assert!(validate_move(&source, &target, "source", "target").is_ok());
+		assert!(validate_move(&source, &target, "wrong", "target").is_err());
+		assert!(validate_move(&source, &target, "source", "wrong").is_err());
+		target.set_revision(vec![2]);
+		assert!(validate_move(&source, &target, "source", "target").is_err());
 	}
 }

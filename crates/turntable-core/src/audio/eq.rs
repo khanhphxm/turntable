@@ -23,8 +23,16 @@ const N: usize = BANDS_HZ.len();
 
 /// Per-band gain limit (dB).
 pub const MAX_GAIN_DB: f32 = 12.0;
+/// Resolution of a per-band gain (dB).
+pub const GAIN_STEP_DB: f32 = 0.5;
 /// Preamp range (dB).
 pub const PREAMP_RANGE_DB: (f32, f32) = (-24.0, 12.0);
+
+/// Clamps a band gain to ±12 dB and rounds to the nearest half dB.
+/// Ties round away from zero; NaN becomes 0 dB.
+pub fn sanitize_gain_db(db: f32) -> f32 {
+	if db.is_nan() { 0.0 } else { (db.clamp(-MAX_GAIN_DB, MAX_GAIN_DB) / GAIN_STEP_DB).round() * GAIN_STEP_DB }
+}
 
 /// Peaking-filter Q: roughly one octave between neighbouring bands.
 const Q_PEAK: f64 = 1.41;
@@ -71,6 +79,7 @@ const STATE_EPS_IDLE: f32 = 1e-7;
 pub struct EqSettings {
 	pub enabled:   bool,
 	pub preamp_db: f32,
+	/// Gains in dB, quantized to 0.5 dB by [`Self::sanitized`]. Old integer dB values retain their meaning.
 	pub gains_db:  [f32; 10],
 }
 
@@ -82,12 +91,11 @@ impl EqSettings {
 		PRESETS.iter().find(|(n, _)| *n == name).map(|(_, s)| *s)
 	}
 
-	/// Clamps to the supported ranges and replaces NaN with 0.
+	/// Clamps to the supported ranges, rounds band gains to 0.5 dB and replaces NaN with 0.
 	pub fn sanitized(mut self) -> EqSettings {
-		let clamp = |v: f32, lo: f32, hi: f32| if v.is_nan() { 0.0 } else { v.clamp(lo, hi) };
-		self.preamp_db = clamp(self.preamp_db, PREAMP_RANGE_DB.0, PREAMP_RANGE_DB.1);
+		self.preamp_db = if self.preamp_db.is_nan() { 0.0 } else { self.preamp_db.clamp(PREAMP_RANGE_DB.0, PREAMP_RANGE_DB.1) };
 		for g in &mut self.gains_db {
-			*g = clamp(*g, -MAX_GAIN_DB, MAX_GAIN_DB);
+			*g = sanitize_gain_db(*g);
 		}
 		self
 	}
@@ -130,7 +138,6 @@ impl Biquad {
 
 /// Designs band `band` at `gain_db` (RBJ audio-EQ cookbook). `cos_w0`/`sin_w0`
 /// belong to the band's centre frequency.
-#[expect(clippy::cast_possible_truncation, reason = "coefficients are designed in f64 and stored in f32")]
 fn design(band: usize, gain_db: f32, cos_w0: f64, sin_w0: f64) -> Biquad {
 	let a = 10f64.powf(f64::from(gain_db) / 40.0);
 	let (b0, b1, b2, a0, a1, a2);
@@ -163,7 +170,13 @@ fn design(band: usize, gain_db: f32, cos_w0: f64, sin_w0: f64) -> Biquad {
 		a2 = 1.0 - alpha / a;
 	}
 	let inv = 1.0 / a0;
-	Biquad { b0: (b0 * inv) as f32, b1: (b1 * inv) as f32, b2: (b2 * inv) as f32, a1: (a1 * inv) as f32, a2: (a2 * inv) as f32 }
+	Biquad {
+		b0: super::dsp_f32(b0 * inv),
+		b1: super::dsp_f32(b1 * inv),
+		b2: super::dsp_f32(b2 * inv),
+		a1: super::dsp_f32(a1 * inv),
+		a2: super::dsp_f32(a2 * inv),
+	}
 }
 
 /// Smooth knee above [`KNEE`]; slope-continuous, asymptote at +-1.
@@ -647,6 +660,62 @@ mod tests {
 		let mut buf = sine_stereo(1000.0, 0.5, 0.9);
 		eq.process(&mut buf);
 		assert!(buf.iter().all(|s| s.abs() < 1.0));
+	}
+
+	#[test]
+	fn band_gains_round_to_half_db_and_clamp() {
+		for (input, want) in [
+			(0.24, 0.0),
+			(0.25, 0.5),
+			(-0.24, 0.0),
+			(-0.25, -0.5),
+			(3.74, 3.5),
+			(3.75, 4.0),
+			(-3.75, -4.0),
+			(11.9, 12.0),
+			(-11.9, -12.0),
+			(99.0, 12.0),
+			(-99.0, -12.0),
+			(f32::INFINITY, 12.0),
+			(f32::NEG_INFINITY, -12.0),
+			(f32::NAN, 0.0),
+		] {
+			assert_eq!(sanitize_gain_db(input), want, "input {input}");
+			let settings = EqSettings { enabled: true, preamp_db: 1.25, gains_db: [input; N] }.sanitized();
+			assert_eq!(settings.gains_db, [want; N]);
+			assert_eq!(settings.preamp_db, 1.25, "preamp is not a band slider");
+			assert_eq!(settings.sanitized(), settings);
+		}
+	}
+
+	#[test]
+	fn presets_keep_their_original_db_values() {
+		let expected = [
+			("flat", [0.0; N]),
+			("bass_boost", [6.0, 5.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+			("bass_cut", [-6.0, -5.0, -3.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+			("vocal", [-3.0, -3.0, -2.0, 1.0, 3.0, 4.0, 3.0, 1.0, 0.0, -1.0]),
+			("treble_boost", [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 4.0, 5.0, 6.0]),
+			("loudness", [6.0, 4.0, 1.0, 0.0, -1.0, -1.0, 0.0, 2.0, 4.0, 5.0]),
+			("rock", [4.0, 3.0, 2.0, 0.0, -1.0, -1.0, 0.0, 2.0, 3.0, 4.0]),
+		];
+		assert_eq!(PRESETS.len(), expected.len());
+		for (name, gains_db) in expected {
+			let settings = EqSettings::preset(name).unwrap();
+			assert_eq!(settings.gains_db, gains_db, "{name}");
+			assert_eq!(settings.enabled, name != "flat");
+			assert_eq!(settings.preamp_db, 0.0);
+			assert_eq!(settings.sanitized(), settings, "{name}");
+		}
+		assert!(EqSettings::preset("unknown").is_none());
+	}
+
+	#[test]
+	fn half_db_gains_reach_the_dsp_without_integer_rounding() {
+		for target in [-3.5, -0.5, 0.5, 3.5] {
+			let gain = gain_db_at(&settings_with(5, target), BANDS_HZ[5]);
+			assert!((gain - f64::from(target)).abs() < 0.05, "target {target}, measured {gain}");
+		}
 	}
 
 	#[test]
