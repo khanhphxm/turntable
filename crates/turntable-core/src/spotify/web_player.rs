@@ -1,14 +1,13 @@
-//! What Spotify's own apps show but the Web API no longer gives (its top tracks
-//! endpoint and popularity are gone since February 2026, Development Mode
-//! refuses other people's playlists): an artist's page (popular tracks and their
-//! play counts, listeners, photos, related artists), play counts on albums,
-//! playlists of any owner, track credits and the colors of a cover.
+//! Spotify's web-player reads: search, account shelves and metadata the public Web API
+//! no longer exposes (artist pages, play counts, playlists of any owner and credits).
 //!
-//! Read the way Spotify's embeddable player reads them. An embed page carries an
-//! anonymous web player token; the web player's GraphQL endpoint ("pathfinder")
-//! takes that token for persisted queries, and its client service for credits.
-//! None of it is a public API, so everything fails soft: the caller shows what it
-//! has without the missing part.
+//! Public metadata uses the anonymous token carried by an embed page. Account shelves
+//! use the playback session's authenticated token. Persisted queries go to the web
+//! player's GraphQL endpoint ("pathfinder"), never the quota-limited Web API.
+//! These private endpoints can change: library callers keep Web API reads as fallback.
+//! Settings → Sources controls all web-player requests, including search and shelves.
+
+mod browse;
 
 use std::{
 	collections::HashMap,
@@ -850,6 +849,7 @@ mod tests {
 			assert!(web.album_plays("4aawyAB9vmqN3uQ7FjRGTy").is_err());
 			assert!(web.playlist("37i9dQZF1DXcBWIGoYBM5M", 0, 50).is_err());
 			assert!(web.credits("2JRo0gjbX4GrCqBYdRohoo").is_err());
+			assert!(web.search("radiohead", 0).is_err());
 			assert_eq!(web.colors("https://i.scdn.co/image/ab67616d00001e02"), None);
 		});
 	}
