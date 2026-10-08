@@ -380,20 +380,16 @@ fn queued(uid: &str, source: &str) -> QueueEntry {
 }
 
 #[test]
-fn a_jump_skips_to_the_song_and_keeps_the_playlist() {
+fn a_jump_skips_to_the_occurrence_without_muting_or_restarting_intermediate_songs() {
 	let mut s = playing(200_000, 10_000.0);
 	s.volume = 50;
 	s.upcoming = vec![queued("a", "queue"), queued("b", "context"), queued("c", "context")];
-	assert_eq!(cmds(s.update(Msg::QueueJump(1))), [Command::SetVolume { volume: 0 }, Command::SkipNext, Command::SkipNext]);
-	assert_eq!(s.volume, 50, "muted for the skips, not shown so");
-	s.apply(Event::VolumeChanged { volume: 0 });
+	assert_eq!(cmds(s.update(Msg::QueueJump(1))), [Command::EditQueue {
+		revision: 1,
+		edit:     crate::engine::QueueEdit::Jump { uid: "b".into() },
+	}]);
 	assert_eq!(s.volume, 50);
-	s.apply(Event::TrackChanged { item: Entity { uri: "spotify:track:b".into(), ..Entity::default() } });
-	assert_eq!(s.queue_edit.take_commands(), [Command::SetVolume { volume: 50 }]);
-	s.apply(Event::VolumeChanged { volume: 50 });
-	// The next song needs no mute.
-	s.queue_edit.settled();
-	assert_eq!(cmds(s.update(Msg::QueueJump(0))), [Command::SkipNext]);
+	assert_eq!(s.upcoming.first().map(|e| e.uid.as_str()), Some("c"));
 }
 
 #[test]

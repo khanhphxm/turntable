@@ -145,6 +145,7 @@ pub struct State {
 	pub item:                Entity,
 	pub context:             Entity,
 	pub anchor:              Anchor,
+	/// Displayed volume: initialized from saved device preferences, then reconciled with the player.
 	pub volume:              u8,
 	pub options:             Options,
 	pub upcoming:            Vec<QueueEntry>,

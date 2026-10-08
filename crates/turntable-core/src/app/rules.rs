@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 use crate::{
-	app::{Panel, State, queue},
+	app::State,
 	engine::{Command, Entity, QueueEntry},
 };
 
@@ -201,8 +201,7 @@ impl State {
 			}
 			// What follows this song decides whether it is the last: ask rather than assume the
 			// player broadcasts the queue at every change.
-			let limit = if self.panel == Some(Panel::Queue) { queue::WIDE } else { u32::try_from(queue::DEFAULT_QUEUE).unwrap_or(10) };
-			cmds.push(Command::GetQueue { limit });
+			cmds.push(Command::GetQueue);
 		}
 		cmds
 	}
@@ -246,7 +245,10 @@ impl State {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::{app::Anchor, engine::Status};
+	use crate::{
+		app::{Anchor, Panel},
+		engine::Status,
+	};
 
 	/// Playing song `a` (200 s long) 100 s in, on this player; the queue starts with `up`.
 	fn playing(autoplay: bool, up: &[(&str, &str)]) -> State {
@@ -491,12 +493,12 @@ mod tests {
 		let mut s = playing(false, &[("context", "spotify:track:b")]);
 		let before = s.rules_before();
 		s.item.uri = "spotify:track:b".into();
-		assert_eq!(s.rules_after(&before, Instant::now()), vec![Command::GetQueue { limit: 10 }]);
-		// With the queue open the whole list is wanted.
+		assert_eq!(s.rules_after(&before, Instant::now()), vec![Command::GetQueue]);
+		// The complete queue is requested whether the panel is open or not.
 		s.panel = Some(Panel::Queue);
 		let before = s.rules_before();
 		s.item.uri = "spotify:track:c".into();
-		assert_eq!(s.rules_after(&before, Instant::now()), vec![Command::GetQueue { limit: queue::WIDE }]);
+		assert_eq!(s.rules_after(&before, Instant::now()), vec![Command::GetQueue]);
 		// With autoplay on there is nothing to ask for.
 		let mut on = playing(true, &[]);
 		let before = on.rules_before();

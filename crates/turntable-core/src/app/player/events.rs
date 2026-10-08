@@ -166,7 +166,6 @@ impl Controller {
 		let was_logged_in = self.state.logged_in;
 		let was_item = std::mem::take(&mut self.last_item);
 		let was_active = self.state.active;
-		let queue_event = matches!(event, Event::QueueChanged { .. });
 		let before = self.state.rules_before();
 		let changed = self.state.apply(event);
 		if self.state.playing() && self.playback_interrupted {
@@ -179,13 +178,9 @@ impl Controller {
 		for cmd in self.state.rules_after(&before, Instant::now()) {
 			self.send_player(cmd);
 		}
-		self.send_queue_commands();
-		if queue_event {
-			self.queue_arrived();
-		}
 		// Ask for the queue as soon as a login exists.
 		if self.state.logged_in && !was_logged_in {
-			self.send_player(Command::GetQueue { limit: 20 });
+			self.send_player(Command::GetQueue);
 		}
 		self.item_changed(&was_item);
 		self.remember_playback(!self.state.playing());
@@ -231,16 +226,13 @@ impl Controller {
 				return true;
 			},
 			library::Response::Queue(uris, title) => {
-				if let Some(client) = &self.client {
-					for uri in uris {
-						client.send(Command::AddToQueue { uri: uri.clone() });
-					}
+				for command in self.state.queue_tracks(uris.clone(), false) {
+					self.send_player(command);
 				}
 				self.state.show_toast(format!("Added {title} to the queue"));
 			},
 			_ => {},
 		}
-		self.send_queue_commands();
 		let connected = matches!(response, library::Response::Connected { .. });
 		self.state.library.apply(response);
 		self.state.drop_remote_if_signed_out();

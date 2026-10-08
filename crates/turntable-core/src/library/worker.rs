@@ -265,6 +265,11 @@ fn serve(
 			Ok(()) => connect(config, snapshots, session, player, web_api, &output),
 			Err(e) => deliver(Response::LoginFailed(e.user_message())),
 		},
+		Request::QueueContext(route) => {
+			// Connect's reader survives a library reconnect even when the Web API is disabled.
+			let reader = session.as_mut().and_then(|s| s.player.as_mut()).or(player.as_mut());
+			output(queue_context(reader, &route));
+		},
 		Request::RememberPlayback(position) => {
 			if let Err(error) = super::restore::remember(config, position) {
 				deliver(Response::Error { route: None, message: format!("Couldn't save playback position: {error}") });
@@ -298,7 +303,11 @@ fn serve(
 					| Request::RemoveFromPlaylist(..)
 					| Request::MovePlaylistRow(..)
 			);
-			match run(config, s, added, refresh_added, other, deliver) {
+			let result = match other {
+				Request::LastPlayback => last_playback(config, s, s.player.as_ref().or(player.as_ref())).map(Some),
+				other => run(s, added, refresh_added, other, deliver),
+			};
+			match result {
 				Ok(Some(response)) => {
 					// What the Web API lacks of a page follows it, so nothing waits for it: an album's play
 					// counts, and the cover's tint (all the page's tracks share the first page's).
@@ -457,8 +466,51 @@ fn is_free(plan: Option<&str>) -> bool {
 	matches!(plan, Some("free" | "open"))
 }
 
+/// Queue every native page, preserving duplicate occurrences and omitting local files.
+fn queue_context_pages(
+	mut page: impl FnMut(u32) -> spotify::Result<(String, Vec<spotify::Track>, Option<u32>)>,
+) -> spotify::Result<(Vec<String>, String)> {
+	let mut offset = 0;
+	let mut uris = Vec::new();
+	let mut title = None;
+	loop {
+		let (name, tracks, next) = page(offset)?;
+		title.get_or_insert(name);
+		uris.extend(tracks.into_iter().filter(|t| !t.is_local).map(|t| t.uri));
+		match next {
+			Some(next) if next > offset => offset = next,
+			Some(_) => return Err(spotify::Error::Parse("Spotify returned a non-advancing queue page.".into())),
+			None => return Ok((uris, title.unwrap_or_default())),
+		}
+	}
+}
+
+fn queue_context(player: Option<&mut Reader>, route: &Route) -> Response {
+	let Some(player) = player else {
+		return Response::Error { route: None, message: "Start the player before adding a context to its queue.".into() };
+	};
+	let result = queue_context_pages(|offset| match route {
+		Route::Album(id) => player.album(id, offset).map(|listing| (listing.title, listing.tracks, listing.next_offset)),
+		Route::Playlist(id) => {
+			let (playlist, _, page) = player.playlist(id, offset, true)?;
+			let page = page.ok_or_else(|| spotify::Error::Parse("Spotify returned no playlist tracks".into()))?;
+			let next = page.next_offset();
+			Ok((playlist.name, page.items, next))
+		},
+		_ => Err(spotify::Error::Parse("Only albums and playlists can be queued as a context.".into())),
+	});
+	match result {
+		Ok((uris, title)) => Response::Queue(uris, title),
+		Err(error) => Response::Error { route: None, message: error.user_message() },
+	}
+}
+
+fn last_playback(config: &Path, s: &Session, player: Option<&Reader>) -> spotify::Result<Response> {
+	let playback = super::restore::recent(config, &s.me, &s.client, player, &s.playlists, &s.snapshots)?;
+	Ok(Response::LastPlayback { account: s.me.clone(), playback })
+}
+
 fn run(
-	config: &Path,
 	s: &mut Session,
 	added: &mut Membership,
 	refresh_added: &mut bool,
@@ -523,18 +575,7 @@ fn run(
 			Response::Removed(id, uri, row)
 		},
 		Request::MovePlaylistRow(id, from, to) => move_playlist_row(s, id, from, to)?,
-		Request::QueueContext(route) => {
-			let listing = open(s, &route, 0)?;
-			Response::Queue(listing.tracks.into_iter().filter(|t| !t.is_local).map(|t| t.uri).collect(), listing.title)
-		},
-		Request::CheckLiked(uri) => {
-			let liked = match &mut s.player {
-				Some(player) => player.contains(&uri)?,
-				None => s.client.library_contains(&[&uri])?.first().copied().unwrap_or(false),
-			};
-			s.publish_liked(deliver);
-			Response::Liked(uri, liked)
-		},
+		Request::CheckLiked(uri) => check_liked(s, uri, deliver)?,
 		Request::SetLiked(uri, liked) => set_liked(s, &uri, liked, deliver)?,
 		Request::Open(route, offset) => {
 			let listing = open(s, &route, offset)?;
@@ -552,9 +593,6 @@ fn run(
 		},
 		Request::Devices => Response::Devices(player_reply(s.client.devices())?),
 		Request::Playback => Response::Playback(player_reply(s.client.playback())?),
-		Request::LastPlayback => {
-			Response::LastPlayback { account: s.me.clone(), playback: super::restore::recent(config, &s.me, &s.client, &s.playlists)? }
-		},
 		Request::Transfer { id, play } => match player_reply(s.client.transfer(&id, play))? {
 			Ok(()) => Response::Transferred,
 			Err(message) => Response::PlayerError(message),
@@ -563,8 +601,23 @@ fn run(
 			Ok(()) => return Ok(None),
 			Err(message) => Response::PlayerError(message),
 		},
-		Request::Connect | Request::Login | Request::Logout | Request::ForgetSnapshot | Request::RememberPlayback(_) => return Ok(None),
+		Request::Connect
+		| Request::Login
+		| Request::Logout
+		| Request::ForgetSnapshot
+		| Request::RememberPlayback(_)
+		| Request::LastPlayback
+		| Request::QueueContext(_) => return Ok(None),
 	}))
+}
+
+fn check_liked(s: &mut Session, uri: String, deliver: &dyn Fn(Response)) -> spotify::Result<Response> {
+	let liked = match &mut s.player {
+		Some(player) => player.contains(&uri)?,
+		None => s.client.library_contains(&[&uri])?.first().copied().unwrap_or(false),
+	};
+	s.publish_liked(deliver);
+	Ok(Response::Liked(uri, liked))
 }
 
 fn set_liked(s: &mut Session, uri: &str, liked: bool, deliver: &dyn Fn(Response)) -> spotify::Result<Response> {
@@ -701,6 +754,48 @@ fn move_playlist_row(s: &mut Session, id: String, from: u32, to: u32) -> spotify
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn context_queue_without_a_player_reports_that_not_a_web_login_requirement() {
+		let response = queue_context(None, &Route::Album("album".into()));
+		assert!(matches!(response, Response::Error { message, .. } if message.contains("Start the player")));
+	}
+
+	#[test]
+	fn queue_context_reads_all_pages_preserving_order_and_duplicates() -> spotify::Result<()> {
+		let mut requested = Vec::new();
+		let (uris, title) = queue_context_pages(|offset| {
+			requested.push(offset);
+			let track = |uri: &str, is_local| spotify::Track {
+				uri: uri.into(),
+				name: "Track".into(),
+				duration_ms: 1_000,
+				disc_number: 0,
+				explicit: false,
+				artists: Vec::new(),
+				album: None,
+				is_local,
+				is_episode: false,
+			};
+			Ok((
+				"Album".into(),
+				vec![track("spotify:track:a", false), track("spotify:local:b", true)],
+				if offset == 0 { Some(50) } else { None },
+			))
+		})?;
+		assert_eq!(requested, [0, 50]);
+		assert_eq!(uris, ["spotify:track:a", "spotify:track:a"]);
+		assert_eq!(title, "Album");
+		Ok(())
+	}
+
+	#[test]
+	fn queue_context_does_not_succeed_with_a_partial_page_failure() {
+		let result = queue_context_pages(|offset| {
+			if offset == 0 { Ok(("Playlist".into(), Vec::new(), Some(50))) } else { Err(spotify::Error::Parse("page failed".into())) }
+		});
+		assert!(result.is_err());
+	}
 
 	#[test]
 	fn all_worker_metadata_insertions_obey_the_budget() {

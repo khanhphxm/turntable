@@ -1,4 +1,4 @@
-//! Startup restore orchestration and cheap position checkpoints on the existing worker.
+//! Route-independent startup restoration and cheap position checkpoints on the existing worker.
 
 use std::time::{Duration, Instant};
 
@@ -188,5 +188,48 @@ mod tests {
 		assert_eq!(controller.state.item.uri, "spotify:track:last");
 		assert_eq!(controller.state.position_ms(), 2_000);
 		assert!(!controller.state.active);
+	}
+
+	#[test]
+	fn failed_page_load_preserves_restored_playback_and_does_not_cancel_a_late_restore() {
+		for error_first in [false, true] {
+			let (mut controller, _root) = controller();
+			controller.state.library.conn = library::Conn::Ready;
+			controller.restore.pending = true;
+			controller.on_connect_state(ConnectState {
+				account:      "alex".into(),
+				devices:      Vec::new(),
+				local_active: false,
+				initial:      true,
+				playback:     None,
+			});
+			let route = library::Route::Album("missing".into());
+			controller.state.update(Msg::Navigate(route.clone()));
+			let failed_page = || {
+				super::super::AppEvent::Library(Box::new(library::Response::Error {
+					route:   Some(route.clone()),
+					message: "Can't reach Spotify. Check your connection.".into(),
+				}))
+			};
+			if error_first {
+				controller.on_event(failed_page());
+			}
+			controller.on_event(super::super::AppEvent::Library(Box::new(library::Response::LastPlayback {
+				account:  "alex".into(),
+				playback: Some(playback()),
+			})));
+			let anchor_at = controller.state.anchor.at;
+			controller.on_event(super::super::AppEvent::Library(Box::new(library::Response::Offline(true))));
+			controller.on_event(failed_page());
+			assert_eq!(controller.state.item.uri, "spotify:track:last");
+			assert_eq!(controller.state.context.uri, "spotify:playlist:context");
+			assert_eq!(controller.state.position_ms(), 2_000);
+			assert_eq!(controller.state.duration_ms(), 248_000);
+			assert_eq!(controller.state.anchor.at, anchor_at);
+			assert_eq!(controller.state.anchor.speed, 0.0);
+			assert_eq!(controller.state.status, Status::Paused);
+			assert!(!controller.state.library.listing.as_ref().unwrap().loading);
+			assert!(controller.state.library.error.is_some());
+		}
 	}
 }

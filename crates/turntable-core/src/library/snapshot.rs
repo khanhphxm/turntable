@@ -111,6 +111,12 @@ impl Store {
 		self.data.as_ref()?.home.clone()
 	}
 
+	/// Last-played metadata for offline startup, preferring the checkpoint's exact track.
+	pub(super) fn recent_track(&self, account: &str, uri: Option<&str>) -> Option<Track> {
+		let tracks = &self.data.as_ref().filter(|data| data.me.id == account)?.home.as_ref()?.recent_tracks;
+		uri.and_then(|uri| tracks.iter().find(|track| track.uri == uri)).or_else(|| tracks.first()).cloned()
+	}
+
 	pub(super) fn top(&self, user: &str) -> TopShelves {
 		let Some(data) = self.data.as_ref().filter(|data| data.me.id == user) else { return TopShelves::default() };
 		if data.top.checked_at.is_none()

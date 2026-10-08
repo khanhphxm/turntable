@@ -398,7 +398,27 @@ impl Shell {
 					.flex()
 					.flex_col()
 					.gap_2()
-					.child(div().text_size(px(14.)).child(kicker))
+					.child(
+						div()
+							.flex()
+							.items_center()
+							.gap_2()
+							.text_size(px(14.))
+							.when(kicker.starts_with("Verified"), |s| {
+								// Spotify's verified badge: a blue disc with a white check.
+								s.child(
+									div()
+										.size(px(22.))
+										.rounded_full()
+										.bg(rgb(0x004c_b3ff))
+										.flex()
+										.items_center()
+										.justify_center()
+										.child(icon(Icon::Check, px(14.), theme::text())),
+								)
+							})
+							.child(kicker),
+					)
 					.child(
 						div()
 							.id("header-title")
@@ -554,7 +574,10 @@ fn track_menu(
 			});
 		})
 	};
-	let mut menu = menu.item(item("Add to queue", Msg::QueueRow(row))).item(item("Add to playlist", Msg::AddRowToPlaylist(row)));
+	let mut menu = menu
+		.item(item("Play next", Msg::QueuePlayNext(row)))
+		.item(item("Add to queue", Msg::QueueRow(row)))
+		.item(item("Add to playlist", Msg::AddRowToPlaylist(row)));
 	if editable {
 		menu = menu.item(item("Remove from this playlist", Msg::RemoveRow(row)));
 	}
@@ -575,16 +598,34 @@ pub struct DraggedRow {
 	title: String,
 }
 
+/// A song being dragged within the user's queue.
+#[derive(Clone)]
+pub struct DraggedQueue {
+	pub from:  usize,
+	pub title: String,
+}
+
+/// What follows the pointer while a row is dragged: its title on a raised chip.
+fn drag_chip(title: &str) -> Div {
+	div()
+		.px_3()
+		.py_1p5()
+		.rounded(px(4.))
+		.bg(theme::raised_hover())
+		.shadow_lg()
+		.text_size(px(14.))
+		.text_color(theme::text())
+		.child(title.to_owned())
+}
+
 impl gpui_kit::Render for DraggedRow {
 	fn render(&mut self, _: &mut gpui_kit::Window, _: &mut Context<'_, Self>) -> impl IntoElement {
-		div()
-			.px_3()
-			.py_1p5()
-			.rounded(px(4.))
-			.bg(theme::raised_hover())
-			.shadow_lg()
-			.text_size(px(14.))
-			.text_color(theme::text())
-			.child(self.title.clone())
+		drag_chip(&self.title)
+	}
+}
+
+impl gpui_kit::Render for DraggedQueue {
+	fn render(&mut self, _: &mut gpui_kit::Window, _: &mut Context<'_, Self>) -> impl IntoElement {
+		drag_chip(&self.title)
 	}
 }

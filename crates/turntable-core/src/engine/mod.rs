@@ -361,7 +361,7 @@ pub struct Client {
 
 /// What the forwarding task does for the client.
 enum Request {
-	Queue(u32),
+	Queue,
 	/// A takeover was asked for: commands wait for it (or for [`TAKEOVER_WAIT`]).
 	Activating,
 	/// A command sent while the device was being activated.
@@ -375,8 +375,8 @@ enum Request {
 impl Client {
 	pub fn send(&self, cmd: Command) {
 		match cmd {
-			Command::GetQueue { limit } => {
-				let _ = self.requests.send(Request::Queue(limit));
+			Command::GetQueue => {
+				let _ = self.requests.send(Request::Queue);
 			},
 			Command::Transfer { device, play } => {
 				let _ = self.requests.send(Request::Transfer { device, play });
@@ -389,8 +389,7 @@ impl Client {
 				let resume = TransferOptions { restore_paused: Some("resume".to_owned()), ..TransferOptions::default() };
 				let _ = self.spirc.transfer(Some(TransferRequest { transfer_options: resume }));
 			},
-			// A load needs what the forwarding task knows (whether this device is active, the options).
-			cmd @ Command::Load(_) => {
+			cmd @ (Command::Load(_) | Command::EditQueue { .. }) => {
 				let _ = self.requests.send(Request::Deferred(cmd));
 			},
 			cmd if self.activating.load(Ordering::Acquire) => {
@@ -405,7 +404,7 @@ impl Client {
 /// reports it), so errors are dropped.
 fn dispatch(spirc: &Spirc, cmd: Command) {
 	let _ = match cmd {
-		Command::GetQueue { .. } | Command::Activate | Command::Load(_) | Command::Transfer { .. } => Ok(()),
+		Command::GetQueue | Command::Activate | Command::Load(_) | Command::Transfer { .. } => Ok(()),
 		Command::Play { uri: None } => spirc.play(),
 		Command::Play { uri: Some(uri) } => {
 			let options = LoadRequestOptions { start_playing: true, ..LoadRequestOptions::default() };
@@ -424,7 +423,7 @@ fn dispatch(spirc: &Spirc, cmd: Command) {
 		Command::SetShuffle { enabled } => spirc.shuffle(enabled),
 		Command::SetRepeatContext { enabled } => spirc.repeat(enabled),
 		Command::SetRepeatTrack { enabled } => spirc.repeat_track(enabled),
-		Command::AddToQueue { uri } => spirc.add_to_queue(uri),
+		Command::EditQueue { revision, edit } => spirc.edit_queue(revision, edit),
 	};
 }
 
@@ -433,15 +432,12 @@ fn dispatch(spirc: &Spirc, cmd: Command) {
 /// What the UI has been told, so only changes are sent.
 #[derive(Default)]
 struct Tracker {
-	status:       Status,
-	active:       bool,
-	options:      (bool, bool, bool),
-	context:      String,
-	upcoming:     Vec<(String, String, String)>,
-	/// How many upcoming tracks the UI last asked for.
-	queue_limit:  u32,
-	/// Whether the UI has asked for the queue at all (it shows nothing until then).
-	queue_wanted: bool,
+	status:         Status,
+	active:         bool,
+	options:        (bool, bool, bool),
+	context:        String,
+	upcoming:       Vec<(String, String, String)>,
+	queue_revision: u64,
 }
 
 struct Forward {
@@ -491,11 +487,7 @@ impl Forward {
 					}
 				},
 				Some(request) = requests.recv() => match request {
-					Request::Queue(limit) => {
-						self.state.queue_limit = limit;
-						self.state.queue_wanted = true;
-						self.send_queue().await;
-					},
+					Request::Queue => self.send_queue().await,
 					Request::Activating => self.takeover_by = Some(tokio::time::Instant::now() + TAKEOVER_WAIT),
 					Request::Transfer { device, play } => self.transfer_device(&device, play).await,
 					Request::Deferred(cmd) => {
@@ -515,6 +507,9 @@ impl Forward {
 	/// Sends a command on; a load first activates this device (Spotify ignores one otherwise)
 	/// and keeps the shuffle and repeat it plays with, as the Web API's play does.
 	fn dispatch(&mut self, cmd: Command) {
+		if matches!(cmd, Command::EditQueue { .. }) && !self.state.active {
+			let _ = self.spirc.activate();
+		}
 		let Command::Load(start) = cmd else {
 			dispatch(&self.spirc, cmd);
 			return;
@@ -599,17 +594,15 @@ impl Forward {
 			let context = self.context(&snap.context_uri).await;
 			self.event(Event::ContextChanged { context });
 		}
-		if snap.next != self.state.upcoming {
+		if snap.next != self.state.upcoming || snap.queue_revision != self.state.queue_revision {
 			self.state.upcoming = snap.next;
-			if self.state.queue_wanted {
-				self.send_queue().await;
-			}
+			self.state.queue_revision = snap.queue_revision;
+			self.send_queue().await;
 		}
 	}
 
 	async fn send_queue(&mut self) {
-		let limit = usize::try_from(self.state.queue_limit).unwrap_or(usize::MAX);
-		let wanted: Vec<_> = self.state.upcoming.iter().take(limit).cloned().collect();
+		let wanted = self.state.upcoming.clone();
 		let mut upcoming = Vec::with_capacity(wanted.len());
 		for (uid, uri, provider) in wanted {
 			let item = self.track(&uri).await;
@@ -620,7 +613,7 @@ impl Forward {
 			};
 			upcoming.push(QueueEntry { uid, source: source.to_owned(), item });
 		}
-		self.event(Event::QueueChanged { upcoming });
+		self.event(Event::QueueChanged { upcoming, revision: self.state.queue_revision });
 	}
 
 	fn remember(&mut self, entity: Entity) {

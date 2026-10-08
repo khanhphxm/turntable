@@ -10,7 +10,7 @@ use crate::{
 	components::Column,
 	shell::Shell,
 	theme,
-	widgets::{Icon, icon_button},
+	widgets::{Icon, icon, icon_button},
 };
 
 impl Shell {
@@ -47,7 +47,37 @@ impl Shell {
 				} else {
 					(Column::Album, None)
 				};
-				div().px_6().child(this.track_row(i, &t, column, plays, !album, cx)).into_any_element()
+				// A multi-disc album heads each disc's first row, as Spotify does.
+				let disc_head = album
+					&& this.st().library.listing.as_ref().is_some_and(|l| l.disc_count > 1)
+					&& t.disc_number > 0
+					&& (i == 0
+						|| this
+							.st()
+							.library
+							.listing
+							.as_ref()
+							.and_then(|l| l.tracks.get(i - 1))
+							.is_some_and(|p| p.disc_number != t.disc_number));
+				div()
+					.px_6()
+					.when(disc_head, |s| {
+						s.child(
+							div()
+								.h(px(48.))
+								.px(px(16.))
+								.flex()
+								.items_center()
+								.gap_4()
+								.text_size(px(16.))
+								.font_weight(FontWeight::BOLD)
+								.text_color(theme::subdued())
+								.child(div().w(px(24.)).flex().justify_end().child(icon(Icon::Disc, px(16.), theme::subdued())))
+								.child(format!("Disc {}", t.disc_number)),
+						)
+					})
+					.child(this.track_row(i, &t, column, plays, !album, cx))
+					.into_any_element()
 			}),
 		)
 		.size_full()
@@ -91,6 +121,7 @@ impl Shell {
 			.text_color(theme::subdued())
 			.when_some(text, |s, t| s.child(t))
 			.when(more, |s| s.child("Loading more…"))
+			.when(!more && !empty, |s| s.children(self.album_footer(cx)))
 			.when_some(own.filter(|_| !more), |s, id| s.child(self.finder(&id, empty, window, cx)))
 			.into_any_element()
 	}
@@ -109,10 +140,22 @@ impl Shell {
 		// Spotify ends the line with the total length: the album's own, or the sum of the rows
 		// once every page is in.
 		let total = l.duration_ms.or_else(|| l.next_offset.is_none().then(|| l.tracks.iter().map(|t| u64::from(t.duration_ms)).sum()));
-		let subtitle = match total.filter(|ms| *ms > 0) {
-			Some(ms) => format!("{}, {}", l.subtitle, length(ms)),
-			None => l.subtitle.clone(),
-		};
+		let mut subtitle = l.subtitle.clone();
+		// The album's artist is shown as a link before this line: don't repeat it.
+		if let Some(name) = l.album.as_ref().and_then(|a| a.artists.first()).map(|a| a.name.as_str())
+			&& let Some(rest) = subtitle.strip_prefix(name)
+		{
+			subtitle = rest.trim_start_matches([' ', '•', ',']).to_owned();
+		}
+		// An album leads with its year ("2017 • 11 songs"), unless the core's line already has it.
+		if let Some(year) = l.release_date.as_deref().and_then(|d| d.get(..4))
+			&& !subtitle.contains(year)
+		{
+			subtitle = format!("{year} • {subtitle}");
+		}
+		if let Some(ms) = total.filter(|ms| *ms > 0) {
+			subtitle = format!("{subtitle}, {}", length(ms));
+		}
 		// Spotify stores a missing description as the text "null" on some playlists.
 		let description = l.description.clone().filter(|d| !d.is_empty() && d != "null");
 		let note = l.note.clone();
@@ -168,5 +211,49 @@ fn length(ms: u64) -> String {
 		(0, m) if m < 10 => format!("{m} min {s} sec"),
 		(0, m) => format!("{m} min"),
 		(h, m) => format!("{h} hr {m} min"),
+	}
+}
+
+impl Shell {
+	/// Under an album's songs: its release date, the copyright lines, then more by the artist.
+	fn album_footer(&self, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
+		let l = self.st().library.listing.as_ref()?;
+		if !matches!(self.st().library.route, Route::Album(_)) {
+			return None;
+		}
+		let date = l.release_date.as_deref().map(release_date);
+		let lines = l.copyrights.clone();
+		let artist = l.album.as_ref().and_then(|a| a.artists.first()).map(|a| a.name.clone());
+		let more = l.more_by.clone();
+		let cards = self.cards("more-by", &more, cx);
+		Some(
+			div()
+				.flex()
+				.flex_col()
+				.gap_1()
+				.pt_4()
+				.text_size(px(12.))
+				.when_some(date, |s, d| s.child(div().text_size(px(14.)).child(d)))
+				.children(lines.into_iter().map(|c| div().child(c)))
+				.when(!cards.is_empty(), |s| {
+					s.child(div().mx(px(-12.)).pt_10().child(self.shelf(format!("More by {}", artist.unwrap_or_default()), cards)))
+				})
+				.into_any_element(),
+		)
+	}
+}
+
+/// "2017-04-21" → "April 21, 2017"; "2017-04" → "April 2017"; "2017" stays.
+fn release_date(date: &str) -> String {
+	const MONTHS: [&str; 12] =
+		["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+	let mut parts = date.split('-');
+	let year = parts.next().unwrap_or(date);
+	let month = parts.next().and_then(|m| m.parse::<usize>().ok()).and_then(|m| MONTHS.get(m.wrapping_sub(1)));
+	let day = parts.next().and_then(|d| d.parse::<u32>().ok());
+	match (month, day) {
+		(Some(m), Some(d)) => format!("{m} {d}, {year}"),
+		(Some(m), None) => format!("{m} {year}"),
+		_ => year.to_owned(),
 	}
 }

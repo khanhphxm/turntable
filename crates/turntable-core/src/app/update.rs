@@ -4,7 +4,6 @@ use std::time::Instant;
 
 use super::{Dialog, Effect, Field, Msg, Panel, State, eq_step_db};
 use crate::{
-	app::queue,
 	engine::{Command, Repeat},
 	library::{self, Route},
 };
@@ -94,17 +93,18 @@ impl State {
 			Msg::ToggleLike => self.toggle_like(&mut effects),
 			Msg::AddToLiked(uri) => self.set_row_liked(uri, true, &mut effects),
 			Msg::RemoveFromLiked(uri) => self.set_row_liked(uri, false, &mut effects),
-			Msg::QueueRemove(i) => {
-				self.queue_edit.remove(&self.upcoming, i, Instant::now());
-			},
+			Msg::QueueRemove(i) => self.queue_remove(i, &mut cmds),
 			Msg::QueueMove(i, delta) => {
-				self.queue_edit.move_by(&self.upcoming, i, delta, Instant::now());
+				if let Some(to) = i.checked_add_signed(isize::from(delta)) {
+					self.queue_move(i, to, &mut cmds);
+				}
 			},
-			Msg::QueueClear => {
-				self.queue_edit.clear_queued(&self.upcoming, Instant::now());
-			},
+			Msg::QueueMoveTo(from, to) => self.queue_move(from, to, &mut cmds),
+			Msg::QueueClear => self.queue_clear(&mut cmds),
 			Msg::QueueJump(i) => self.queue_jump(i, &mut cmds),
-			Msg::QueueRow(i) => self.queue_row(i, &mut cmds),
+			Msg::QueueRow(i) => self.queue_row(i, false, &mut cmds),
+			Msg::QueuePlayNext(i) => self.queue_row(i, true, &mut cmds),
+			Msg::QueueTracks { uris, next } => cmds.extend(self.queue_tracks(uris, next)),
 			Msg::PlayListing => self.play_listing(&mut effects),
 			Msg::LoadMore => self.load_more(&mut effects),
 			Msg::SearchSubmit(text) => self.search_submit(&text, &mut effects),
@@ -252,7 +252,7 @@ impl State {
 		} else {
 			self.panel = if self.panel == Some(panel) { None } else { Some(panel) };
 			if self.panel == Some(Panel::Queue) && self.logged_in {
-				cmds.push(Command::GetQueue { limit: queue::WIDE });
+				cmds.push(Command::GetQueue);
 			}
 		}
 	}
@@ -418,22 +418,11 @@ impl State {
 		effects.push(Effect::Library(library::Request::SetLiked(uri, liked)));
 	}
 
-	fn queue_jump(&mut self, index: usize, cmds: &mut Vec<Command>) {
-		if !self.queue_edit.busy()
-			&& let Some(target) = self.upcoming.get(index).map(|entry| entry.item.uri.clone())
-		{
-			if !self.active {
-				cmds.push(Command::Activate);
-			}
-			self.queue_edit.jump(index, &target, self.volume, Instant::now());
-			cmds.extend(self.queue_edit.take_commands());
-		}
-	}
-
-	fn queue_row(&mut self, index: usize, cmds: &mut Vec<Command>) {
+	fn queue_row(&mut self, index: usize, next: bool, cmds: &mut Vec<Command>) {
 		if let Some(track) = self.library.rows().get(index).filter(|track| track.uri.starts_with("spotify:track:")) {
-			cmds.push(Command::AddToQueue { uri: track.uri.clone() });
-			self.show_toast(format!("Added “{}” to the queue", track.name));
+			let (uri, name) = (track.uri.clone(), track.name.clone());
+			cmds.extend(self.queue_tracks(vec![uri], next));
+			self.show_toast(format!("Added “{name}” to the queue"));
 		}
 	}
 

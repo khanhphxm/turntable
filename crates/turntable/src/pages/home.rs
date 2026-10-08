@@ -77,7 +77,6 @@ impl Shell {
 			}
 		}
 		let recents = h.recents.clone();
-		let top = h.top_artists.clone().unwrap_or_default();
 		let followed = h.followed.clone().unwrap_or_default();
 		let albums = h.albums.clone();
 		let playlists: Vec<Tile> = lib.playlists.iter().map(Tile::playlist).collect();
@@ -87,7 +86,6 @@ impl Shell {
 		let mut shelves: Vec<Div> = Vec::new();
 		for (key, title, tiles) in [
 			("recents", "Recents", &recents),
-			("top", "Your top artists", &top),
 			("followed", "Artists you follow", &followed),
 			("albums", "Your albums", &albums),
 			("playlists", "Your playlists", &playlists),

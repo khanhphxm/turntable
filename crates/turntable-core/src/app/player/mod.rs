@@ -16,7 +16,7 @@ use std::{
 };
 
 use crate::{
-	app::{State, config::Paths, queue as queue_edit},
+	app::{State, config::Paths},
 	engine::{Client, Engine, Incoming},
 	library::{self, covers},
 	sources::lyrics,
@@ -104,7 +104,6 @@ pub struct Controller {
 	followed:             Option<(String, Option<usize>)>,
 	last_item:            String,
 	restore:              restore::Restore,
-	queue_reply:          bool,
 	visible:              bool,
 	poll_at:              Option<Instant>,
 	poll_inflight:        bool,
@@ -148,6 +147,7 @@ impl Controller {
 		let state = State {
 			signed_in: crate::engine::has_sign_in(&paths.config),
 			device_name,
+			volume: settings.prefs.device.volume,
 			sys: crate::app::system::System { name_override: opts.device_name, ..crate::app::system::System::default() },
 			eq: settings.eq,
 			eq_preset: settings.eq_preset.clone(),
@@ -186,7 +186,6 @@ impl Controller {
 			discard_start: false,
 			followed: None,
 			last_item: String::new(),
-			queue_reply: false,
 			visible: true,
 			poll_at: None,
 			poll_inflight: false,
@@ -262,7 +261,6 @@ impl Controller {
 			self.audio_retry_at,
 			self.visible.then(|| self.state.next_lyric_at()).flatten(),
 			self.poll_at,
-			self.state.queue_edit.deadline(),
 			self.state.rules_deadline(),
 			self.output_retry_at,
 			self.system_at,
@@ -297,11 +295,6 @@ impl Controller {
 			if !query.is_empty() {
 				self.library.send(library::Request::Search(query));
 			}
-		}
-		match self.state.queue_edit.due(now) {
-			queue_edit::Due::Nothing => {},
-			queue_edit::Due::Rebuild => changed |= self.rebuild_queue(),
-			queue_edit::Due::GiveUp => changed |= self.give_up_queue(),
 		}
 		if self.state.rules_deadline().is_some_and(|at| now >= at) {
 			for command in self.state.rules_due(now) {
@@ -377,6 +370,26 @@ mod tests {
 		app::{Anchor, LyricsState, Panel},
 		sources::external::Lyrics,
 	};
+
+	#[test]
+	fn startup_volume_uses_saved_preference_until_the_player_reports() -> Result<(), Box<dyn std::error::Error>> {
+		let root = std::env::temp_dir().join(format!("turntable-startup-volume-{}", std::process::id()));
+		let paths = Paths { config: root.join("config"), cache: root.join("cache") };
+		std::fs::create_dir_all(&paths.config)?;
+		let mut settings = crate::app::settings::Settings::default();
+		settings.prefs.device.volume = 37;
+		settings.save(&paths.config)?;
+		let mut controller = Controller::new(&paths, Options { web_api: false, ..Options::default() }, Arc::new(|| {}))?;
+		assert_eq!(controller.state().volume, 37, "bar must not look muted before the engine starts");
+		controller.state.apply(crate::engine::Event::AuthState { logged_in: true, is_active: false, device_name: "Starting".into() });
+		controller.state.apply(crate::engine::Event::PlaybackChanged { status: crate::engine::Status::Buffering });
+		assert_eq!(controller.state().volume, 37, "startup events do not erase the saved volume");
+		controller.state.apply(crate::engine::Event::VolumeChanged { volume: 61 });
+		assert_eq!(controller.state().volume, 61, "the actual player volume takes precedence");
+		drop(controller);
+		std::fs::remove_dir_all(root)?;
+		Ok(())
+	}
 
 	#[test]
 	fn deadlines_pick_the_earliest_timer_and_hidden_lyrics_do_not_tick() {

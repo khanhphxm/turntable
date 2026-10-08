@@ -29,6 +29,8 @@ impl Shell {
 		let listeners = o.and_then(|o| o.monthly_listeners);
 		let avatar = o.and_then(|o| o.avatar.clone()).or(l.cover_url.clone());
 		let meta = div().when_some(listeners, |s, n| s.child(format!("{} monthly listeners", grouped(n)))).into_any_element();
+		// Spotify's kicker: "Verified Artist" with its blue badge.
+		let verified = o.is_some_and(|o| o.verified);
 		let follow = outline_button("follow", if l.followed == Some(true) { "Following" } else { "Follow" })
 			.on_click(cx.listener(|this, _, _, cx| this.send(Msg::ToggleFollow, cx)));
 		let open = self.st().open_shelves.contains("popular");
@@ -101,81 +103,131 @@ impl Shell {
 		let about = l.about.as_ref().and_then(|a| a.summary.clone().or(a.description.clone())).or(o.and_then(|o| o.biography.clone()));
 		let header_img = o.and_then(|o| o.header.clone().or(o.gallery.first().cloned()));
 		let more_than = l.tracks.len() > POPULAR;
+		let rank = o.and_then(|o| o.world_rank);
+		let cities: Vec<(String, u64)> =
+			o.map(|o| o.cities.iter().take(5).map(|c| (format!("{}, {}", c.name, c.country), c.listeners)).collect()).unwrap_or_default();
+		// Spotify's "Latest release" sits beside Popular: the newest release as a card.
+		let latest = o.and_then(|o| o.latest_release.as_ref()).map(Tile::album);
 		// The name, from whichever source answered first (the listing's, the artist's, the overview's).
 		let name = Some(l.title.clone())
 			.filter(|t| !t.is_empty())
 			.or_else(|| l.artist.as_ref().map(|a| a.name.clone()))
 			.or_else(|| self.known_artist_name(&route))
 			.unwrap_or_default();
-		page.child(self.page_header(&route, avatar.as_deref(), tint, "Artist".into(), name.into(), meta, cx))
-			.child(
-				self.wash(tint).child(self.action_bar(l.context_uri.clone(), follow, cx)).child(
+		page.child(self.page_header(
+			&route,
+			avatar.as_deref(),
+			tint,
+			if verified { "Verified Artist" } else { "Artist" }.into(),
+			name.into(),
+			meta,
+			cx,
+		))
+		.child(
+			self.wash(tint).child(self.action_bar(l.context_uri.clone(), follow, cx)).child(
+				div()
+					.px_6()
+					.flex()
+					.gap_8()
+					.child(
+						div()
+							.flex_1()
+							.min_w_0()
+							.flex()
+							.flex_col()
+							.gap_2()
+							.child(section_title("Popular"))
+							.when(l.tracks.is_empty() && !l.popular_loaded, |s| {
+								s.child(div().h(px(5. * 56.)).text_color(theme::subdued()).child("Loading…"))
+							})
+							.children(popular)
+							.when(more_than, |s| {
+								s.child(
+									div()
+										.id("see-more")
+										.pl(px(16.))
+										.pt_2()
+										.text_size(px(14.))
+										.font_weight(FontWeight::BOLD)
+										.text_color(theme::subdued())
+										.hover(|s| s.text_color(theme::text()))
+										.cursor_pointer()
+										.on_click(cx.listener(|this, _, _, cx| this.send(Msg::ToggleShelf("popular"), cx)))
+										.child(if open { "Show less" } else { "See more" }),
+								)
+							}),
+					)
+					.when_some(latest.filter(|_| self.main_w >= 900.), |s, t| {
+						s.child(
+							div()
+								.w(px(theme::CARD_W))
+								.flex_none()
+								.flex()
+								.flex_col()
+								.gap_2()
+								.child(section_title("Latest release"))
+								.child(div().mx(px(-12.)).child(self.card("latest", &t, cx))),
+						)
+					}),
+			),
+		)
+		.child(div().px_3().pt_8().flex().flex_col().gap_8().children(shelves))
+		.when_some(about, |s, text| {
+			let img = header_img.as_deref().and_then(|u| self.image(Some(u), 672, cx));
+			s.child(
+				div().px_6().pt_8().pb_10().flex().flex_col().gap_4().child(section_title("About")).child(
 					div()
-						.px_6()
-						.flex()
-						.flex_col()
-						.gap_2()
-						.child(section_title("Popular"))
-						.when(l.tracks.is_empty() && !l.popular_loaded, |s| {
-							s.child(div().h(px(5. * 56.)).text_color(theme::subdued()).child("Loading…"))
+						.max_w(px(672.))
+						.rounded(px(8.))
+						.overflow_hidden()
+						.bg(theme::raised())
+						.child(match img {
+							Some(src) => div()
+								.h(px(320.))
+								.child(gpui_kit::img(src).size_full().object_fit(gpui_kit::ObjectFit::Cover).rounded_t(px(8.))),
+							None => div().h(px(120.)).bg(linear_gradient(
+								180.,
+								linear_color_stop(theme::alpha(rgb(tint), 0.6), 0.),
+								linear_color_stop(theme::raised(), 1.),
+							)),
 						})
-						.children(popular)
-						.when(more_than, |s| {
-							s.child(
-								div()
-									.id("see-more")
-									.pl(px(16.))
-									.pt_2()
-									.text_size(px(14.))
-									.font_weight(FontWeight::BOLD)
-									.text_color(theme::subdued())
-									.hover(|s| s.text_color(theme::text()))
-									.cursor_pointer()
-									.on_click(cx.listener(|this, _, _, cx| this.send(Msg::ToggleShelf("popular"), cx)))
-									.child(if open { "Show less" } else { "See more" }),
-							)
-						}),
+						.child(
+							div()
+								.p_6()
+								.flex()
+								.flex_col()
+								.gap_2()
+								.when_some(listeners, |s, n| {
+									s.child(
+										div()
+											.text_size(px(16.))
+											.font_weight(FontWeight::BOLD)
+											.child(format!("{} monthly listeners", grouped(n))),
+									)
+								})
+								.when_some(rank, |s, r| {
+									s.child(div().text_size(px(14.)).text_color(theme::subdued()).child(format!("#{r} in the world")))
+								})
+								.child(div().text_size(px(16.)).text_color(theme::subdued()).line_clamp(4).child(text))
+								// Where people listen: Spotify's top cities.
+								.when(!cities.is_empty(), |s| {
+									s.child(div().pt_4().flex().flex_col().gap_3().children(cities.iter().map(|(city, n)| {
+										div()
+											.flex()
+											.flex_col()
+											.child(div().text_size(px(16.)).font_weight(FontWeight::BOLD).child(city.clone()))
+											.child(
+												div()
+													.text_size(px(14.))
+													.text_color(theme::subdued())
+													.child(format!("{} listeners", grouped(*n))),
+											)
+									})))
+								}),
+						),
 				),
 			)
-			.child(div().px_3().pt_8().flex().flex_col().gap_8().children(shelves))
-			.when_some(about, |s, text| {
-				let img = header_img.as_deref().and_then(|u| self.image(Some(u), 672, cx));
-				s.child(
-					div().px_6().pt_8().pb_10().flex().flex_col().gap_4().child(section_title("About")).child(
-						div()
-							.max_w(px(672.))
-							.rounded(px(8.))
-							.overflow_hidden()
-							.bg(theme::raised())
-							.child(match img {
-								Some(src) => div()
-									.h(px(320.))
-									.child(gpui_kit::img(src).size_full().object_fit(gpui_kit::ObjectFit::Cover).rounded_t(px(8.))),
-								None => div().h(px(120.)).bg(linear_gradient(
-									180.,
-									linear_color_stop(theme::alpha(rgb(tint), 0.6), 0.),
-									linear_color_stop(theme::raised(), 1.),
-								)),
-							})
-							.child(
-								div()
-									.p_6()
-									.flex()
-									.flex_col()
-									.gap_2()
-									.when_some(listeners, |s, n| {
-										s.child(
-											div()
-												.text_size(px(16.))
-												.font_weight(FontWeight::BOLD)
-												.child(format!("{} monthly listeners", grouped(n))),
-										)
-									})
-									.child(div().text_size(px(16.)).text_color(theme::subdued()).line_clamp(4).child(text)),
-							),
-					),
-				)
-			})
+		})
 	}
 
 	/// Cards for `tiles`, ids prefixed with `key`: only as many as fit one row of the main view

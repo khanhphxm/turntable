@@ -411,6 +411,48 @@ impl<'ct> ConnectState {
         Ok(())
     }
 
+    /// turntable: edit occurrences in place, retaining context metadata and shuffle order.
+    pub fn edit_queue(&mut self, edit: crate::QueueEdit) -> Result<(), Error> {
+        match edit {
+            crate::QueueEdit::Add { tracks, next } => {
+                let at = if next { 0 } else {
+                    self.next_tracks().iter().position(|t| !t.is_queue()).unwrap_or(self.next_tracks().len())
+                };
+                let tracks = tracks.into_iter().map(|(uid, uri)| {
+                    let mut track = ProvidedTrack { uid, uri, ..Default::default() };
+                    track.set_provider(Provider::Queue);
+                    track.set_from_queue(true);
+                    track
+                });
+                self.next_tracks_mut().splice(at..at, tracks);
+            }
+            crate::QueueEdit::Remove { uid } => {
+                if let Some(at) = self.next_tracks().iter().position(|t| t.uid == uid) {
+                    self.next_tracks_mut().remove(at);
+                }
+            }
+            crate::QueueEdit::Move { uid, before } => {
+                let source = self.next_tracks().iter().position(|t| t.uid == uid && t.is_queue());
+                let destination = match &before {
+                    Some(uid) => self.next_tracks().iter().position(|t| t.uid == *uid && t.is_queue()),
+                    None => Some(self.next_tracks().iter().take_while(|t| t.is_queue()).count()),
+                };
+                if let (Some(from), Some(to)) = (source, destination) {
+                    let track = self.next_tracks_mut().remove(from);
+                    self.next_tracks_mut().insert(if from < to { to - 1 } else { to }, track);
+                }
+            }
+            crate::QueueEdit::Clear => self.next_tracks_mut().retain(|t| !t.is_queue()),
+            crate::QueueEdit::Jump { .. } => unreachable!("Spirc handles jumps"),
+        }
+        if self.context.is_some() {
+            self.fill_up_next_tracks()?;
+        }
+        self.update_queue_revision();
+        self.update_restrictions();
+        Ok(())
+    }
+
     pub fn add_to_queue(&mut self, mut track: ProvidedTrack, rev_update: bool) {
         track.uid = format!("q{}", self.queue_count);
         self.queue_count += 1;
@@ -427,13 +469,86 @@ impl<'ct> ConnectState {
             next_tracks.push(track)
         }
 
-        while next_tracks.len() > SPOTIFY_MAX_NEXT_TRACKS_SIZE {
-            next_tracks.pop();
-        }
-
+        // User queue length is independent of the bounded context preview. Never discard
+        // queued songs (or an already-resolved context tail) when an album is added.
         if rev_update {
             self.update_queue_revision();
         }
         self.update_restrictions();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{QueueEdit, core::{Session, config::SessionConfig}, state::{ConnectConfig, context::StateContext, options::ShuffleState}};
+
+    fn state() -> ConnectState {
+        let session = Session::new(SessionConfig::default(), None);
+        ConnectState::new(ConnectConfig::default(), &session)
+    }
+
+    fn context_track(index: usize) -> ProvidedTrack {
+        let mut track = ProvidedTrack { uid: format!("c{index}"), uri: format!("spotify:track:c{index}"), ..Default::default() };
+        track.set_provider(Provider::Context);
+        track
+    }
+
+    fn uids(state: &ConnectState) -> Vec<&str> {
+        state.next_tracks().iter().map(|t| t.uid.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn native_queue_edits_preserve_duplicate_occurrences_and_context() -> Result<(), Error> {
+        let mut state = state();
+        state.set_track(context_track(0));
+        state.player_mut().next_tracks = vec![context_track(1), context_track(2)];
+        let tracks = vec![("a".into(), "spotify:track:same".into()), ("b".into(), "spotify:track:same".into())];
+        state.edit_queue(QueueEdit::Add { tracks, next: false })?;
+        assert_eq!(uids(&state), ["a", "b", "c1", "c2"]);
+        state.edit_queue(QueueEdit::Move { uid: "b".into(), before: Some("a".into()) })?;
+        assert_eq!(uids(&state), ["b", "a", "c1", "c2"]);
+        state.edit_queue(QueueEdit::Move { uid: "b".into(), before: None })?;
+        assert_eq!(uids(&state), ["a", "b", "c1", "c2"]);
+        state.edit_queue(QueueEdit::Remove { uid: "a".into() })?;
+        assert_eq!(uids(&state), ["b", "c1", "c2"]);
+        state.edit_queue(QueueEdit::Add { tracks: vec![("next".into(), "spotify:track:next".into())], next: true })?;
+        assert_eq!(uids(&state), ["next", "b", "c1", "c2"]);
+        state.edit_queue(QueueEdit::Move { uid: "c1".into(), before: Some("b".into()) })?;
+        assert_eq!(uids(&state), ["next", "b", "c1", "c2"]);
+        state.edit_queue(QueueEdit::Clear)?;
+        assert_eq!(uids(&state), ["c1", "c2"]);
+        assert_eq!(state.current_track(|t| t.uid.as_str()), "c0");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn batches_larger_than_context_preview_are_not_truncated() -> Result<(), Error> {
+        let mut state = state();
+        state.player_mut().next_tracks = vec![context_track(1)];
+        let tracks = (0..150).map(|i| (format!("q{i}"), format!("spotify:track:q{i}"))).collect();
+        state.edit_queue(QueueEdit::Add { tracks, next: false })?;
+        assert_eq!(state.next_tracks().len(), 151);
+        assert_eq!(state.next_tracks().last().map(|t| t.uid.as_str()), Some("c1"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn context_preview_matches_native_shuffle_and_edits_leave_it_intact() -> Result<(), Error> {
+        let mut state = state();
+        state.set_track(context_track(0));
+        state.context = Some(StateContext {
+            tracks: (0..20).map(context_track).collect::<Vec<_>>().into(),
+            metadata: Default::default(), restrictions: None, index: Default::default(),
+        });
+        state.set_shuffle(true);
+        state.shuffle_restore(ShuffleState { seed: 123456789, initial_track: "spotify:track:c0".into() })?;
+        let shuffled: Vec<_> = state.next_tracks().iter().map(|t| t.uid.clone()).collect();
+        assert_ne!(shuffled, (1..20).map(|i| format!("c{i}")).collect::<Vec<_>>());
+        state.edit_queue(QueueEdit::Add { tracks: vec![("a".into(), "spotify:track:a".into())], next: false })?;
+        state.edit_queue(QueueEdit::Clear)?;
+        assert_eq!(uids(&state), shuffled.iter().map(String::as_str).collect::<Vec<_>>());
+        assert!(state.shuffling_context());
+        Ok(())
     }
 }

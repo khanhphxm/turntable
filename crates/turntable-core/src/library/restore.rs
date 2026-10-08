@@ -1,15 +1,18 @@
-//! Recently-played is a startup fallback only when Connect supplies no paused player.
-//! Position checkpoints are private, account-scoped config files; a different recent track
-//! never borrows the saved position. Reads and writes run on the existing library worker.
+//! Startup fallback when Connect supplies no paused player: native session history first,
+//! otherwise Web API history, with account-scoped cached track metadata when offline.
+//! Position checkpoints are private config files; only a matching track borrows the saved
+//! position. Reads and writes run on the library worker, independently of the current page.
 
 use std::{
 	fs, io,
 	path::{Path, PathBuf},
+	sync::{Mutex, PoisonError},
 };
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::{session::Reader, snapshot::Store};
 use crate::{
 	app::{config, connect::entity_of},
 	engine::{Entity, LastPlayback, Options},
@@ -52,10 +55,27 @@ pub(super) fn recent(
 	config: &Path,
 	account: &str,
 	client: &spotify::Client,
+	player: Option<&Reader>,
 	playlists: &[spotify::Playlist],
+	snapshots: &Mutex<Store>,
 ) -> spotify::Result<Option<LastPlayback>> {
-	let Some((track, context)) = client.recently_played(1)?.into_iter().next() else { return Ok(None) };
-	Ok(Some(from_recent(&track, context.as_ref(), playlists, read(config, account).as_ref())))
+	let saved = read(config, account);
+	let recent = match player.filter(|player| player.matches(account)) {
+		Some(player) => player.recently_played(1),
+		None => client.recently_played(1),
+	}
+	.map(|recent| recent.first().map(|(track, context)| from_recent(track, context.as_ref(), playlists, saved.as_ref())));
+	match recent {
+		Err(error @ (spotify::Error::AuthRequired | spotify::Error::AuthExpired)) => Err(error),
+		Ok(Some(playback)) => Ok(Some(playback)),
+		result => {
+			let cached = snapshots
+				.lock()
+				.unwrap_or_else(PoisonError::into_inner)
+				.recent_track(account, saved.as_ref().map(|saved| saved.uri.as_str()));
+			if let Some(track) = cached { Ok(Some(from_recent(&track, None, playlists, saved.as_ref()))) } else { result.map(|_| None) }
+		},
+	}
 }
 
 fn from_recent(
@@ -120,5 +140,35 @@ mod tests {
 		assert!(read(dir.path(), "other").is_none());
 		fs::write(path(dir.path(), "alex"), b"broken").unwrap();
 		assert!(read(dir.path(), "alex").is_none());
+	}
+
+	#[test]
+	fn cache_only_restore_uses_matching_cached_metadata_and_position_without_auth_or_io() {
+		let directory = tempfile::tempdir().unwrap();
+		let client = spotify::Client::open(std::sync::Arc::new(|| panic!("cache-only restore must not request a Web API token")), false);
+		let mut store = Store::new(directory.path());
+		store.record(&crate::library::Response::Connected {
+			me:        spotify::User { id: "alex".into(), display_name: None },
+			playlists: Vec::new(),
+		});
+		store.record(&crate::library::Response::Home(crate::library::Home {
+			recent_tracks: vec![track("spotify:track:newer"), track("spotify:track:saved")],
+			..crate::library::Home::default()
+		}));
+		let snapshots = Mutex::new(store);
+		remember(directory.path(), PlaybackPosition {
+			account:     "alex".into(),
+			uri:         "spotify:track:saved".into(),
+			context_uri: "spotify:playlist:context".into(),
+			position_ms: 42_000,
+		})
+		.unwrap();
+		let restored = recent(directory.path(), "alex", &client, None, &[], &snapshots).unwrap().unwrap();
+		assert_eq!(restored.item.uri, "spotify:track:saved");
+		assert_eq!(restored.item.name(), "Last song");
+		assert_eq!(restored.item.duration_ms(), 248_000);
+		assert_eq!(restored.position_ms, 42_000);
+		assert_eq!(restored.context.uri, "spotify:playlist:context");
+		assert!(recent(directory.path(), "another-account", &client, None, &[], &snapshots).is_err());
 	}
 }

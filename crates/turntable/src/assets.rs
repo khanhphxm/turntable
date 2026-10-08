@@ -33,6 +33,7 @@ icons! {
 	Close => "close",
 	Computer => "computer",
 	Device => "device",
+	Disc => "disc",
 	Down => "down",
 	Ellipsis => "ellipsis",
 	External => "external",

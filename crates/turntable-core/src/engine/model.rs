@@ -1,6 +1,7 @@
 //! The player's vocabulary: what plays (entities), what changes (events) and what the UI asks
 //! for (commands). The engine translates librespot's events and connect state into these.
 
+pub use librespot_connect::QueueEdit;
 // ---------------------------------------------------------------- entities
 
 #[derive(Debug, Clone, Default)]
@@ -178,16 +179,15 @@ pub enum Event {
 	ContextChanged { context: Entity },
 	OptionsChanged { options: Options },
 	PositionSync { position: Position },
-	QueueChanged { upcoming: Vec<QueueEntry> },
+	QueueChanged { upcoming: Vec<QueueEntry>, revision: u64 },
 }
 
 // ---------------------------------------------------------------- commands
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
-	GetQueue {
-		limit: u32,
-	},
+	/// Request the complete native upcoming queue; snapshots also arrive after every change.
+	GetQueue,
 	Play {
 		uri: Option<String>,
 	},
@@ -209,8 +209,10 @@ pub enum Command {
 	SetRepeatTrack {
 		enabled: bool,
 	},
-	AddToQueue {
-		uri: String,
+	/// Native queue mutation; revision acknowledges optimistic state without restarting playback.
+	EditQueue {
+		revision: u64,
+		edit:     QueueEdit,
 	},
 	/// Transfers the account's player through the session; `device` empty means this device.
 	Transfer {

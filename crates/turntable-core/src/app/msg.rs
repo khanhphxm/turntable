@@ -100,12 +100,21 @@ pub enum Msg {
 	AddToLiked(String),
 	/// Remove a row's track URI from Liked Songs (never changes owned playlists).
 	RemoveFromLiked(String),
-	/// Queue row `n` of the current listing after the current track.
+	/// Append row `n` of the current listing to the user queue.
 	QueueRow(usize),
-	/// Take upcoming song `n` out of the queue (the rebuild goes out once the clicking pauses).
+	/// Insert row `n` at the front of the user queue, without starting it now.
+	QueuePlayNext(usize),
+	/// Queue playable URIs in order (`next`: insert at front instead of append).
+	QueueTracks {
+		uris: Vec<String>,
+		next: bool,
+	},
+	/// Remove absolute upcoming row `n`, immediately and without restarting playback.
 	QueueRemove(usize),
-	/// Move upcoming song `n` one place up (-1) or down (+1).
+	/// Move upcoming queued row `n` one place up (-1) or down (+1).
 	QueueMove(usize, i8),
+	/// Drag a user-queued row to its final absolute upcoming index; cannot cross into context.
+	QueueMoveTo(usize, usize),
 	/// Clear the songs queued by hand.
 	QueueClear,
 	/// Play upcoming song `n` now.

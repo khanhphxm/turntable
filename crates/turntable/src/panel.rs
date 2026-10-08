@@ -4,8 +4,9 @@
 use std::time::Duration;
 
 use gpui_kit::{
-	Animation, AnimationExt as _, AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _,
-	StatefulInteractiveElement as _, Styled as _, StyledImage as _, div, ease_out_quint, prelude::FluentBuilder as _, px,
+	Animation, AnimationExt as _, AnyElement, AppContext as _, Context, Div, FontWeight, InteractiveElement as _, IntoElement,
+	ParentElement as _, StatefulInteractiveElement as _, Styled as _, StyledImage as _, div, ease_out_quint, prelude::FluentBuilder as _,
+	px,
 };
 use turntable_core::{
 	LyricsState, Msg, Panel, Route,
@@ -230,8 +231,11 @@ impl Shell {
 			.into_any_element()
 	}
 
-	/// A compact track line: cover, title, artists. `jump` is its queue position (`None`: now playing).
+	/// A compact track line: cover, title, artists. `key` is its index in `State.upcoming`
+	/// (`usize::MAX`: now playing). Rows the user queued can be removed and dragged to reorder.
 	fn queue_row(&self, key: usize, e: &Entity, current: bool, cx: &mut Context<'_, Self>) -> AnyElement {
+		let mine = !current && self.st().upcoming.get(key).is_some_and(|q| q.source == "queue");
+		let name = e.name().to_owned();
 		let playing = current && self.st().playing();
 		let url = e.cover(CoverSize::Small).map(str::to_owned);
 		div()
@@ -263,12 +267,35 @@ impl Shell {
 			)
 			.child(
 				div()
+					.flex_1()
 					.min_w_0()
 					.flex()
 					.flex_col()
 					.child(div().text_size(px(16.)).truncate().when(current, |s| s.text_color(theme::accent())).child(e.name().to_owned()))
 					.child(div().text_size(px(14.)).text_color(theme::subdued()).truncate().child(e.creators())),
 			)
+			.when(!current, |s| {
+				s.child(div().invisible().group_hover("queue-row", |s| s.visible()).child(icon_button(
+					("queue-remove", key),
+					Icon::Close,
+					px(14.),
+					false,
+					cx.listener(move |this, _, _, cx| {
+						cx.stop_propagation();
+						this.send(Msg::QueueRemove(key), cx);
+					}),
+				)))
+			})
+			// The user's queued songs reorder by dragging, as in Spotify's queue.
+			.when(mine, |row| {
+				row.on_drag(crate::components::DraggedQueue { from: key, title: name }, |d, _, _, cx| cx.new(|_| d.clone()))
+					.drag_over::<crate::components::DraggedQueue>(|s, _, _, _| s.border_t_2().border_color(theme::accent()))
+					.on_drop(cx.listener(move |this, d: &crate::components::DraggedQueue, _, cx| {
+						if d.from != key {
+							this.send(Msg::QueueMoveTo(d.from, key), cx);
+						}
+					}))
+			})
 			.into_any_element()
 	}
 

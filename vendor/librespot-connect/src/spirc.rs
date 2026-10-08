@@ -72,6 +72,7 @@ struct SpircTask {
     player: Arc<Player>,
     mixer: Arc<dyn Mixer>,
     snapshots: Option<mpsc::UnboundedSender<StateSnapshot>>,
+    queue_revision: u64,
 
     /// the state management object
     connect_state: ConnectState,
@@ -136,8 +137,39 @@ enum SpircCommand {
     Activate,
     Transfer(Option<TransferRequest>),
     Load(LoadRequest),
-    // turntable: queue a track the way a remote's "add to queue" does.
-    AddToQueue(String),
+    // turntable: local queue mutations preserve context, playback and options.
+    EditQueue { revision: u64, edit: QueueEdit },
+}
+
+/// Native queue operations. Track identity is an occurrence UID, never a URI.
+#[derive(Debug, Clone, PartialEq)]
+pub enum QueueEdit {
+    /// Insert tracks in order, at the front when `next`, otherwise after queued tracks.
+    Add {
+        /// Ordered (unique occurrence UID, playable URI) pairs.
+        tracks: Vec<(String, String)>,
+        /// Insert before all user-queued songs rather than appending.
+        next: bool,
+    },
+    /// Remove one upcoming occurrence (queued or from the context).
+    Remove {
+        /// The occurrence to remove.
+        uid: String,
+    },
+    /// Move a queued occurrence before another; `None` means the end of the user queue.
+    Move {
+        /// The queued occurrence to move.
+        uid: String,
+        /// The queued occurrence to insert before, or the end of the user queue.
+        before: Option<String>,
+    },
+    /// Remove user-queued songs only.
+    Clear,
+    /// Skip directly to an upcoming occurrence without decoding intermediate songs.
+    Jump {
+        /// The upcoming occurrence to start.
+        uid: String,
+    },
 }
 
 /// turntable: what the connect state holds besides the player events, sent after every change.
@@ -155,6 +187,8 @@ pub struct StateSnapshot {
     pub repeat_track: bool,
     /// Upcoming tracks: (uid, uri, provider: "context" | "queue" | "autoplay").
     pub next: Vec<(String, String, String)>,
+    /// Last native queue edit applied, for optimistic UI reconciliation.
+    pub queue_revision: u64,
     /// turntable: the account-wide player and device list, received passively from Dealer.
     pub cluster: Option<Cluster>,
     /// This is registration's response (including a failed/empty cluster read).
@@ -256,6 +290,7 @@ impl Spirc {
             player,
             mixer,
             snapshots,
+            queue_revision: 0,
 
             connect_state,
             connect_established: false,
@@ -410,9 +445,9 @@ impl Spirc {
         Ok(self.commands.send(SpircCommand::SetPosition(position_ms))?)
     }
 
-    /// turntable: adds a track (`spotify:track:…`) to the queue.
-    pub fn add_to_queue(&self, uri: String) -> Result<(), Error> {
-        Ok(self.commands.send(SpircCommand::AddToQueue(uri))?)
+    /// Applies an in-process queue edit without a Web API request or playback restart.
+    pub fn edit_queue(&self, revision: u64, edit: QueueEdit) -> Result<(), Error> {
+        Ok(self.commands.send(SpircCommand::EditQueue { revision, edit })?)
     }
 
     /// Load a new context and replace the current.
@@ -715,12 +750,20 @@ impl SpircTask {
             SpircCommand::SetPosition(position) => self.handle_seek(position),
             SpircCommand::SetVolume(volume) => self.set_volume(volume),
             SpircCommand::Load(command) => self.handle_load(command, None, None).await?,
-            SpircCommand::AddToQueue(uri) => {
-                let track = librespot_protocol::player::ProvidedTrack {
-                    uri,
-                    ..Default::default()
-                };
-                self.connect_state.add_to_queue(track, true)
+            SpircCommand::EditQueue { revision, edit } => {
+                if let QueueEdit::Jump { uid } = edit {
+                    if let Some(index) = self.connect_state.player().next_tracks.iter().position(|t| t.uid == uid) {
+                        // Advance state only; decode just the selected song.
+                        for _ in 0..=index {
+                            self.connect_state.next_track()?;
+                        }
+                        self.load_track(self.connect_state.is_playing(), 0, false)?;
+                    }
+                } else {
+                    self.connect_state.edit_queue(edit)?;
+                    self.handle_preload_next_track();
+                }
+                self.queue_revision = revision;
             }
         };
 
@@ -1863,11 +1906,12 @@ impl SpircTask {
             shuffle: options.is_some_and(|o| o.shuffling_context),
             repeat_context: options.is_some_and(|o| o.repeating_context),
             repeat_track: options.is_some_and(|o| o.repeating_track),
+            queue_revision: self.queue_revision,
             next: state
                 .player()
                 .next_tracks
                 .iter()
-                .take(50)
+                .filter(|t| t.uri.starts_with("spotify:track:") || t.uri.starts_with("spotify:episode:"))
                 .map(|t| (t.uid.clone(), t.uri.clone(), t.provider.clone()))
                 .collect(),
             cluster: None,

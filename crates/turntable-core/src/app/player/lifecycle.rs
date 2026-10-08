@@ -7,7 +7,7 @@ use std::{
 
 use super::{AUDIO_RETRY, AppEvent, Controller, HEALTH_EVERY, NO_AUDIO, SYSTEM_EVERY, retry_wait};
 use crate::{
-	app::{Panel, config::Paths, queue},
+	app::{Panel, config::Paths},
 	engine::{Command, Engine, EngineConfig},
 };
 
@@ -122,7 +122,7 @@ impl Controller {
 		self.reconcile_output();
 		if !self.state.prefs.playback.autoplay && self.state.logged_in {
 			// What follows the song playing decides whether it is the last.
-			self.send_player(Command::GetQueue { limit: u32::try_from(queue::DEFAULT_QUEUE).unwrap_or(10) });
+			self.send_player(Command::GetQueue);
 		}
 		self.save_settings();
 	}
