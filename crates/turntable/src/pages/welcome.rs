@@ -25,6 +25,14 @@ impl Shell {
 			.child(div().text_size(px(16.)).text_color(theme::subdued()).child("A lightweight Spotify player. Spotify Premium required."))
 			.child(
 				div()
+					.id("welcome-network")
+					.cursor_pointer()
+					.text_color(theme::subdued())
+					.on_click(cx.listener(|this, _, _, cx| this.open(crate::shell::Page::Settings, cx)))
+					.child("Network settings"),
+			)
+			.child(
+				div()
 					.id("sign-in")
 					.mt_4()
 					.h(px(48.))

@@ -201,4 +201,6 @@ pub enum Effect {
 	/// Apply what the settings drive outside the state (the audio stage and device, the sources
 	/// that may be asked) and save the settings.
 	ApplyPrefs,
+	/// Replace HTTP pools and restart the native session, including an unfinished sign-in.
+	ReconfigureNetwork,
 }

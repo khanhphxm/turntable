@@ -105,6 +105,27 @@ impl Controller {
 		self.save_settings();
 	}
 
+	/// Cancel old authorization before rebuilding: a late callback must not use the old route.
+	pub(super) fn reconfigure_network(&mut self) {
+		if let Err(error) = crate::net::configure_proxy(&self.state.prefs.network.proxy) {
+			self.state.notice = Some(error.into());
+			return;
+		}
+		let restart = self.state.signed_in || self.state.starting;
+		self.account_generation = self.account_generation.wrapping_add(1);
+		self.start_authorization.cancel();
+		self.start_authorization = crate::engine::StartAuthorization::default();
+		self.library.reconfigure_network(self.account_generation);
+		self.stop_engine();
+		self.state.starting = false;
+		self.discard_start = false;
+		self.state.disconnected("Network settings changed.".into());
+		self.save_settings();
+		if restart {
+			self.start_engine();
+		}
+	}
+
 	/// Notes what the engine that just started was started with.
 	pub(super) fn on_engine_started(&mut self) {
 		self.health_at = Instant::now() + HEALTH_EVERY;
@@ -123,8 +144,12 @@ impl Controller {
 		self.state.sign_in_error = None;
 		self.state.notice = Some("Starting the player…".into());
 		self.retry_start_at = None;
-		let launch =
-			Launch { name: self.engine_name(), volume: self.state.prefs.device.volume, cache_mb: self.state.prefs.device.cache_mb };
+		let launch = Launch {
+			name:     self.engine_name(),
+			volume:   self.state.prefs.device.volume,
+			cache_mb: self.state.prefs.device.cache_mb,
+			proxy:    self.state.prefs.network.proxy.clone(),
+		};
 		// The output starts now (it plays silence-free nothing until audio arrives); the decoder
 		// gets the other end once the player is online.
 		let (writer, feed) = crate::audio::channel();
@@ -413,6 +438,7 @@ struct Launch {
 	name:     String,
 	volume:   u8,
 	cache_mb: u32,
+	proxy:    String,
 }
 
 fn start_engine(
@@ -428,6 +454,7 @@ fn start_engine(
 		state_dir:   paths.config.clone(),
 		cache_dir:   paths.cache.join("player"),
 		cache_mb:    launch.cache_mb,
+		proxy:       launch.proxy.clone(),
 	};
 	Engine::start(&config, writer, progress, authorization).map_err(|error| {
 		if error.get_ref().is_some_and(|source| source.is::<crate::engine::SignInTimedOut>()) {

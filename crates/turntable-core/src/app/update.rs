@@ -183,7 +183,7 @@ impl State {
 			Msg::SetText(field, text) => self.set_text(field, text, &mut effects),
 			Msg::Edit { from, to, text } => self.edit_input(from, to, text, &mut effects),
 			Msg::Submit => return self.submit_input(),
-			Msg::Pref(pref) => effects.extend(self.set_pref(pref)),
+			Msg::Pref(pref) => effects.extend(self.set_pref(&pref)),
 			Msg::Sleep(choice) => self.set_sleep(choice, Instant::now()),
 		}
 		effects.splice(0..0, cmds.into_iter().map(Effect::Player));

@@ -92,6 +92,7 @@ impl Controller {
 				// `open` waits for nothing slow, but run it off the UI loop anyway.
 				Effect::OpenUrl(url) => drop(thread::spawn(move || crate::spotify::open_browser(&url))),
 				Effect::ApplyPrefs => self.apply_prefs(),
+				Effect::ReconfigureNetwork => self.reconfigure_network(),
 			}
 		}
 		// The audio stage follows the visible volume immediately; persistence does not block it.

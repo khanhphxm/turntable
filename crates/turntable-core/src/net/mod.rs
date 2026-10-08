@@ -11,10 +11,14 @@
 
 pub mod cache;
 pub mod par;
+pub mod proxy;
+#[cfg(test)]
+pub(crate) mod proxy_tests;
 pub mod trace;
 
 use std::{sync::LazyLock, time::Duration};
 
+use parking_lot::RwLock;
 use ureq::{Agent, RequestBuilder};
 
 /// Bytes of each input and output buffer. A response head larger than this is refused.
@@ -25,8 +29,23 @@ const IDLE_PER_HOST: usize = 3;
 /// How long an idle connection stays pooled.
 const IDLE_AGE: Duration = Duration::from_secs(20);
 
-static AGENT: LazyLock<Agent> = LazyLock::new(|| {
-	Agent::config_builder()
+static AGENT: LazyLock<RwLock<Agent>> = LazyLock::new(|| RwLock::new(build_agent(None)));
+
+/// Replaces the pool, so subsequent metadata, lyrics and image requests cannot reuse
+/// connections established with the previous proxy. In-flight requests finish normally.
+pub(crate) fn configure_proxy(value: &str) -> Result<(), &'static str> {
+	let proxy = proxy::parse(value)?;
+	let proxy = proxy.map(|url| ureq::Proxy::new(url.as_str())).transpose().map_err(|_error| "Invalid proxy host or credentials.")?;
+	*AGENT.write() = build_agent(proxy);
+	Ok(())
+}
+
+fn build_agent(proxy: Option<ureq::Proxy>) -> Agent {
+	let mut builder = Agent::config_builder();
+	if let Some(proxy) = proxy {
+		builder = builder.proxy(Some(proxy));
+	}
+	builder
 		.http_status_as_error(false)
 		.input_buffer_size(BUFFER)
 		.output_buffer_size(BUFFER)
@@ -36,7 +55,7 @@ static AGENT: LazyLock<Agent> = LazyLock::new(|| {
 		.max_idle_age(IDLE_AGE)
 		.build()
 		.into()
-});
+}
 
 /// How one caller talks: its time limits, the name it gives, and whether an error status is an `Err`.
 #[derive(Clone, Copy, Debug)]
@@ -69,5 +88,5 @@ impl Profile {
 
 /// The shared agent (a handle: cloning shares the pool).
 pub fn agent() -> Agent {
-	AGENT.clone()
+	AGENT.read().clone()
 }

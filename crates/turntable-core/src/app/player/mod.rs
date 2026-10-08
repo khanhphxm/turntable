@@ -159,11 +159,12 @@ impl Controller {
 			std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
 		}
 		crate::net::trace::init();
+		let settings = crate::app::settings::Settings::load(&paths.config);
+		crate::net::configure_proxy(&settings.prefs.network.proxy).map_err(str::to_owned)?;
 		let (tx, rx) = mpsc::channel();
 		let output_worker = output::Worker::spawn(tx.clone(), wake.clone()).map_err(|error| error.to_string())?;
 		let images = spawn_covers(paths, tx.clone(), wake.clone());
 		let saver = spawn_saver(paths, tx.clone(), wake.clone())?;
-		let settings = crate::app::settings::Settings::load(&paths.config);
 		let device_name = opts.device_name.clone().unwrap_or_else(|| settings.prefs.device.name.clone());
 		let library = {
 			let (tx, wake) = (tx.clone(), wake.clone());

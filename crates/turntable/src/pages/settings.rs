@@ -2,9 +2,12 @@
 //! the right.
 
 use gpui_kit::{
-	AnyElement, Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-	StatefulInteractiveElement as _, Styled as _,
-	component::{input::Input, switch::Switch},
+	AnyElement, AppContext as _, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
+	StatefulInteractiveElement as _, Styled as _, Window,
+	component::{
+		input::{Input, InputEvent, InputState},
+		switch::Switch,
+	},
 	div,
 	prelude::FluentBuilder as _,
 	px,
@@ -142,6 +145,7 @@ impl Shell {
 					self.toggle("mono", p.audio.mono, Pref::Mono, cx).into_any_element(),
 				),
 			]),
+			("Network", vec![("Proxy".into(), "Leave empty to use your system's proxy", self.proxy_setting(cx).into_any_element())]),
 			("Display", vec![
 				(
 					"Play counts".into(),
@@ -160,6 +164,30 @@ impl Shell {
 				div().text_size(px(14.)).text_color(theme::subdued()).child(format!("Connect name: {device}")).into_any_element(),
 			)]),
 		]
+	}
+
+	pub(crate) fn network_proxy_input(value: &str, window: &mut Window, cx: &mut Context<'_, Self>) -> Entity<InputState> {
+		let input = cx.new(|cx| InputState::new(window, cx).placeholder("http://host:8080"));
+		input.update(cx, |input, cx| input.set_value(value.to_owned(), window, cx));
+		cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
+			if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+				this.send(Msg::Pref(Pref::Proxy(input.read(cx).value().to_string())), cx);
+			}
+			cx.notify();
+		})
+		.detach();
+		input
+	}
+
+	fn proxy_setting(&self, cx: &mut Context<'_, Self>) -> Div {
+		let error = turntable_core::net::proxy::parse(&self.proxy_input.read(cx).value()).err();
+		div()
+			.w(px(300.))
+			.flex()
+			.flex_col()
+			.gap_2()
+			.child(Input::new(&self.proxy_input))
+			.when_some(error, |view, error| view.child(div().text_size(px(12.)).text_color(gpui_kit::rgb(0x00ff_7777)).child(error)))
 	}
 
 	/// Spotify's "Search in Settings": a magnifier that opens into a field, filtering the rows.

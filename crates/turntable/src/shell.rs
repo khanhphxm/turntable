@@ -172,6 +172,8 @@ pub struct Shell {
 	/// Settings' search field, and whether it's open.
 	pub settings_query:       Entity<InputState>,
 	pub settings_search_open: bool,
+	/// Network proxy draft; committed on Enter or blur, never on each keystroke.
+	pub proxy_input:          Entity<InputState>,
 	/// The folders opened in Your Library, outermost first (empty: the whole library).
 	pub library_folder:       Vec<String>,
 	/// Your Library's and the right panel's widths, set by dragging their edges.
@@ -250,6 +252,7 @@ impl Shell {
 		.detach();
 		let search = search_input(window, cx);
 		let folder_name = folder_name_input(window, cx);
+		let proxy_input = Self::network_proxy_input(&core.state().prefs.network.proxy, window, cx);
 		let eq_graph = crate::eqgraph::EqGraph::new(cx, core.state().eq.gains_db, core.state().eq.enabled);
 		cx.subscribe(&eq_graph, |this, _, e: &crate::eqgraph::BandChanged, cx| this.send(Msg::EqBand(e.band, e.step), cx)).detach();
 		cx.subscribe(&eq_graph, |this, _, e: &crate::eqgraph::BandTyped, cx| this.send(Msg::EqSet(e.band, e.db), cx)).detach();
@@ -289,6 +292,7 @@ impl Shell {
 			library_wide: false,
 			settings_query: cx.new(|cx| InputState::new(window, cx).placeholder("Search in Settings")),
 			settings_search_open: false,
+			proxy_input,
 			library_folder: Vec::new(),
 			library_w: theme::SIDEBAR_W,
 			panel_w: theme::RIGHT_W,
@@ -642,6 +646,25 @@ pub fn run_core(shell: &Entity<Shell>, wake: smol::channel::Receiver<()>, cx: &m
 impl Render for Shell {
 	fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
 		if !self.st().signed_in {
+			if self.page == Page::Settings {
+				return div()
+					.size_full()
+					.flex()
+					.flex_col()
+					.bg(theme::base())
+					.text_color(theme::text())
+					.child(
+						div()
+							.id("settings-back-to-sign-in")
+							.p_4()
+							.cursor_pointer()
+							.on_click(cx.listener(|this, _, _, cx| this.open(Page::Core(Route::Home), cx)))
+							.child("Back to sign in"),
+					)
+					.child(div().flex_1().min_h_0().child(self.settings_page(cx)))
+					.children(crate::topbar::window_titlebar(window))
+					.into_any_element();
+			}
 			return self.welcome_page(window, cx).into_any_element();
 		}
 		self.scale = window.scale_factor();

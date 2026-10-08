@@ -7,17 +7,24 @@ use crate::app::{Effect, Panel, State, settings::Pref};
 
 impl State {
 	/// Makes a change from the settings page.
-	pub fn set_pref(&mut self, pref: Pref) -> Vec<Effect> {
+	pub fn set_pref(&mut self, pref: &Pref) -> Vec<Effect> {
 		match pref {
+			Pref::Proxy(value) => {
+				if crate::net::proxy::parse(value).is_err() || value.trim() == self.prefs.network.proxy {
+					return vec![];
+				}
+				self.prefs.set(pref);
+				return vec![Effect::ReconfigureNetwork];
+			},
 			Pref::NowPlayingView(on) => {
-				self.now_playing_view = on;
+				self.now_playing_view = *on;
 				// Turned off, it also goes from where it was opened by hand.
-				if !on && self.panel == Some(Panel::NowPlaying) {
+				if !*on && self.panel == Some(Panel::NowPlaying) {
 					self.panel = None;
 				}
 			},
 			other => {
-				self.prefs.set(&other);
+				self.prefs.set(other);
 			},
 		}
 		vec![Effect::ApplyPrefs]
@@ -28,6 +35,20 @@ impl State {
 mod tests {
 	use super::*;
 	use crate::app::Msg;
+
+	#[test]
+	fn proxy_changes_validate_and_restart_only_when_changed() {
+		let mut state = State::default();
+		assert!(state.set_pref(&Pref::Proxy("socks5://host:1080".into())).is_empty());
+		assert_eq!(state.prefs.network.proxy, "");
+		assert!(matches!(state.set_pref(&Pref::Proxy(" http://user:pass@host:8080 ".into())).as_slice(), [Effect::ReconfigureNetwork]));
+		assert_eq!(state.prefs.network.proxy, "http://user:pass@host:8080");
+		assert!(state.set_pref(&Pref::Proxy("http://user:pass@host:8080".into())).is_empty());
+		assert!(state.set_pref(&Pref::Proxy("not a proxy".into())).is_empty());
+		assert_eq!(state.prefs.network.proxy, "http://user:pass@host:8080");
+		assert!(matches!(state.set_pref(&Pref::Proxy(String::new())).as_slice(), [Effect::ReconfigureNetwork]));
+		assert_eq!(state.prefs.network.proxy, "");
+	}
 
 	#[test]
 	fn the_now_playing_view_is_the_states_own_flag() {

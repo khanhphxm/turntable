@@ -117,8 +117,12 @@ fn cover(dir: &Path, url: &str) -> Option<(Vec<u8>, String)> {
 }
 
 fn fetch(url: &str) -> Option<(Vec<u8>, String)> {
+	fetch_with_agent(url, &crate::net::agent())
+}
+
+fn fetch_with_agent(url: &str, agent: &ureq::Agent) -> Option<(Vec<u8>, String)> {
 	let span = trace::start();
-	let fetched = PROFILE.get(url).call().ok().and_then(|mut response| {
+	let fetched = PROFILE.apply(agent.get(url)).call().ok().and_then(|mut response| {
 		let mime = response.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("image/jpeg").to_owned();
 		let bytes = response.body_mut().with_config().limit(BODY_LIMIT).read_to_vec().ok()?;
 		Some((bytes, mime))
@@ -188,6 +192,15 @@ fn prune(dir: &Path, limit: u64) {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn cover_download_uses_configured_proxy() {
+		let proxy = crate::net::proxy_tests::LocalProxy::spawn();
+		let (bytes, mime) = fetch_with_agent("http://synthetic.invalid/cover.png", &proxy.agent()).unwrap();
+		assert_eq!(bytes, crate::net::proxy_tests::IMAGE);
+		assert_eq!(mime, "image/png");
+		proxy.finish();
+	}
 
 	#[test]
 	fn images_are_told_apart_by_their_first_bytes() {

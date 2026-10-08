@@ -53,6 +53,16 @@ pub struct Prefs {
 	pub audio:    Audio,
 	pub device:   Device,
 	pub display:  Display,
+	pub network:  Network,
+}
+
+/// Network preferences are applied before sign-in and shared by every transport.
+/// Credentials in a proxy URL are stored in settings.json; keep that file private.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Network {
+	/// HTTP CONNECT URL; empty uses system/environment defaults.
+	pub proxy: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -162,6 +172,7 @@ pub enum Pref {
 	NowPlayingView(bool),
 	Compact(bool),
 	PlayCounts(bool),
+	Proxy(String),
 }
 
 impl Prefs {
@@ -177,6 +188,7 @@ impl Prefs {
 			Pref::StartupVolume(volume) => self.device.volume = (*volume).min(100),
 			Pref::Compact(on) => self.display.compact = *on,
 			Pref::PlayCounts(on) => self.display.play_counts = *on,
+			Pref::Proxy(proxy) => self.network.proxy = proxy.trim().to_owned(),
 			Pref::NowPlayingView(_) => return false,
 		}
 		true

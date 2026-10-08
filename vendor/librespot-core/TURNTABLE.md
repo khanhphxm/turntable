@@ -9,6 +9,7 @@ Session changes in `src/session.rs` let turntable own the Premium requirement:
 - Re-export the existing `AuthenticationError` from `src/lib.rs`, so the application can match Spotify's `PremiumAccountRequired` response without string matching.
 - Remove the now-unfulfilled `#[expect(deprecated)]` on `Credentials::with_blob` in `src/authentication.rs`; no authentication behavior changes.
 - Add an optional `Cache::set_credentials_writer` host hook. turntable serializes atomic/private credential saves with a cancellable account-start authorization; sign-out cancels it before removing credentials, so unfinished OAuth/Spirc authentication cannot recreate the sign-in or overwrite a newer account.
+- Support HTTP CONNECT proxy Basic authentication in the native AP/dealer tunnel and shared HTTP client. Force CONNECT for proxied HTTP requests so proxy credentials reach only the proxy, remove URL credentials from the connector address, include the CONNECT Host header, and never log the proxy URL (which can contain a password).
 
 The workspace patches crates.io to this copy. turntable's `engine::SignInError` and application lifecycle enforce the gate; this patch itself neither authorizes playback nor starts it.
 

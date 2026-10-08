@@ -74,6 +74,8 @@ pub struct EngineConfig {
 	pub cache_dir:   PathBuf,
 	/// The audio cache's size limit; 0 is no cache at all.
 	pub cache_mb:    u32,
+	/// HTTP CONNECT proxy; empty preserves environment defaults.
+	pub proxy:       String,
 }
 
 /// The browser sign-in's registered loopback redirect.
@@ -203,12 +205,16 @@ impl Engine {
 		let limit = (config.cache_mb > 0).then(|| u64::from(config.cache_mb) << 20);
 		let mut cache = Cache::new(Some(&config.state_dir), Some(&config.state_dir), audio.as_ref(), limit).map_err(io::Error::other)?;
 		authorization.guard_cache(&mut cache, &config.state_dir);
-		let session_config = SessionConfig { device_id: device_id(&config.state_dir)?, ..SessionConfig::default() };
+		let session_config = SessionConfig {
+			device_id: device_id(&config.state_dir)?,
+			proxy: crate::net::proxy::session(&config.proxy).map_err(io::Error::other)?,
+			..SessionConfig::default()
+		};
 		let credentials = match cache.credentials() {
 			Some(c) => c,
 			None => {
 				progress("Sign in to Spotify in your browser…");
-				oauth::sign_in(&session_config.client_id, &runtime, authorization)?
+				oauth::sign_in(&session_config.client_id, &runtime, authorization, &config.proxy)?
 			},
 		};
 		authorization.check()?;

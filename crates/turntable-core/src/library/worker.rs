@@ -185,6 +185,11 @@ impl Worker {
 		let _ = self.tx.send(Inbox::Session(self.generation.load(Ordering::Acquire), session));
 		self.urgent.send_replace(());
 	}
+	/// Invalidate old-route work without forgetting this account's cached library.
+	pub(crate) fn reconfigure_network(&self, generation: u64) {
+		self.generation.store(generation, Ordering::Release);
+		self.set_session(None);
+	}
 
 	/// Invalidates queued and in-flight work before synchronously clearing account caches.
 	pub fn forget(&self, generation: u64) {

@@ -71,6 +71,45 @@ fn frame(cx: &mut VisualTestContext) {
 }
 
 #[test]
+fn proxy_settings_work_before_sign_in_and_reject_invalid_drafts() {
+	let (shell, mut cx, _directory) = setup();
+	cx.update(|_, cx| {
+		shell.update(cx, |shell, cx| {
+			shell.send(Msg::SignOut, cx);
+			shell.open(Page::Settings, cx);
+		});
+	});
+	frame(&mut cx);
+	cx.update(|window, cx| {
+		let input = shell.read(cx).proxy_input.clone();
+		input.update(cx, |input, cx| {
+			input.set_value("socks5://host:1080", window, cx);
+			input.focus(window, cx);
+		});
+	});
+	frame(&mut cx);
+	cx.simulate_keystrokes("enter");
+	frame(&mut cx);
+	cx.read_entity(&shell, |shell, cx| {
+		assert_eq!(shell.page, Page::Settings);
+		assert!(!shell.st().signed_in);
+		assert!(shell.st().prefs.network.proxy.is_empty());
+		assert!(turntable_core::net::proxy::parse(&shell.proxy_input.read(cx).value()).is_err());
+	});
+	cx.update(|window, cx| {
+		let input = shell.read(cx).proxy_input.clone();
+		input.update(cx, |input, cx| input.set_value("http://user:pass@localhost:8080", window, cx));
+	});
+	cx.simulate_keystrokes("enter");
+	frame(&mut cx);
+	cx.read_entity(&shell, |shell, _| {
+		assert_eq!(shell.st().prefs.network.proxy, "http://user:pass@localhost:8080");
+		assert!(!shell.st().starting, "changing a proxy before sign-in must not authenticate");
+	});
+	cx.update(|_, cx| shell.update(cx, |shell, cx| shell.send(Msg::Pref(turntable_core::app::settings::Pref::Proxy(String::new())), cx)));
+}
+
+#[test]
 fn search_typing_stays_on_the_current_page_and_enter_navigates() {
 	let (shell, mut cx, _directory) = setup();
 	cx.update(|window, cx| {

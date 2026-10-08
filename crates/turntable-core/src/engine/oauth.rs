@@ -9,7 +9,7 @@ use std::{
 
 use oauth2::{
 	AuthUrl, AuthorizationCode, ClientId, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope, TokenResponse as _, TokenUrl,
-	basic::BasicClient, reqwest, url::Url,
+	basic::BasicClient, url::Url,
 };
 
 use super::{NETWORK_TIMEOUT, OAUTH_REDIRECT, OAUTH_SCOPES, StartAuthorization, start::SignInTimedOut};
@@ -23,6 +23,7 @@ pub(super) fn sign_in(
 	client_id: &str,
 	runtime: &tokio::runtime::Runtime,
 	authorization: &StartAuthorization,
+	proxy: &str,
 ) -> io::Result<super::Credentials> {
 	if authorization.deadline().is_none() {
 		authorization.set_deadline(Some(Instant::now() + SIGN_IN_TIMEOUT));
@@ -53,11 +54,7 @@ pub(super) fn sign_in(
 	authorization.check()?;
 	// No detached token-exchange thread: dropping this future closes an in-flight request.
 	let token = runtime.block_on(async {
-		let http = reqwest::Client::builder()
-			.timeout(NETWORK_TIMEOUT)
-			.redirect(reqwest::redirect::Policy::none())
-			.build()
-			.map_err(io::Error::other)?;
+		let http = crate::net::proxy::oauth(proxy, NETWORK_TIMEOUT)?;
 		tokio::select! {
 			biased;
 			error = cancelled(authorization) => Err(error),

@@ -7,9 +7,9 @@ use crate::proxytunnel;
 
 pub async fn connect(host: &str, port: u16, proxy: Option<&Url>) -> io::Result<TcpStream> {
     let socket = if let Some(proxy_url) = proxy {
-        info!("Using proxy \"{proxy_url}\"");
+        info!("Using HTTP CONNECT proxy");
 
-        let socket_addr = proxy_url.socket_addrs(|| None).and_then(|addrs| {
+        let socket_addr = proxy_url.socket_addrs(|| Some(80)).and_then(|addrs| {
             addrs.into_iter().next().ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotFound,
@@ -19,7 +19,7 @@ pub async fn connect(host: &str, port: u16, proxy: Option<&Url>) -> io::Result<T
         })?;
         let socket = TcpStream::connect(&socket_addr).await?;
 
-        proxytunnel::proxy_connect(socket, host, &port.to_string()).await?
+        proxytunnel::proxy_connect(socket, host, &port.to_string(), proxy_url).await?
     } else {
         let socket_addr = (host, port).to_socket_addrs()?.next().ok_or_else(|| {
             io::Error::new(
