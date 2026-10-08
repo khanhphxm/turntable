@@ -45,7 +45,8 @@ impl Queue {
 
 fn priority(message: &Inbox) -> u8 {
 	match message {
-		Inbox::Session(_, _) | Inbox::Request(_, Request::Connect | Request::ForgetSnapshot) => 0,
+		Inbox::Session(_, _)
+		| Inbox::Request(_, Request::Connect | Request::ForgetSnapshot | Request::PlaybackCheckpoint(_) | Request::RememberPlayback(_)) => 0,
 		Inbox::Request(_, request) if foreground(request) => 1,
 		Inbox::Request(_, Request::Prefetch(_)) => 3,
 		Inbox::Request(_, _) => 2,
@@ -67,6 +68,7 @@ pub(super) fn foreground(request: &Request) -> bool {
 			| Request::Playback
 			| Request::LastPlayback
 			| Request::RememberPlayback(_)
+			| Request::PlaybackCheckpoint(_)
 			| Request::Prefetch(_)
 	)
 }
@@ -75,6 +77,13 @@ pub(super) fn foreground(request: &Request) -> bool {
 mod tests {
 	use super::*;
 	use crate::library::Route;
+
+	#[test]
+	fn disk_checkpoint_reads_do_not_wait_for_a_library_session() {
+		let mut queue = Queue::default();
+		queue.push(Inbox::Request(0, Request::PlaybackCheckpoint("alex".into())));
+		assert!(matches!(queue.pop(false), Some(Inbox::Request(0, Request::PlaybackCheckpoint(account))) if account == "alex"));
+	}
 
 	#[test]
 	fn navigation_waits_for_session_and_overtakes_startup_metadata() {

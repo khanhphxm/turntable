@@ -1181,6 +1181,8 @@ impl SpircTask {
                             playing_track: play.options.skip_to.and_then(|s| s.try_into().ok()),
                             context_options,
                         },
+                        upcoming: None,
+                        current_uri: None,
                     },
                     play.context.pages.pop(),
                     fallback_index,
@@ -1498,6 +1500,21 @@ impl SpircTask {
                 .set_current_track(index.unwrap_or_default())?;
             self.connect_state.reset_playback_to_position(index)?;
             self.add_autoplay_resolving_when_required();
+        }
+
+        // A queued current song need not appear anywhere in the saved context.
+        if let Some(uri) = cmd.current_uri {
+            self.connect_state.set_track(crate::protocol::player::ProvidedTrack {
+                uri,
+                provider: "context".into(),
+                ..Default::default()
+            });
+        }
+
+        // turntable: loading a checkpoint must not regenerate or reshuffle its saved queue.
+        if let Some(upcoming) = cmd.upcoming {
+            self.connect_state.set_next_tracks(upcoming);
+            self.connect_state.update_queue_revision();
         }
 
         if self.connect_state.current_track(MessageField::is_some) {

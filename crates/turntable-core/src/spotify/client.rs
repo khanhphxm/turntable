@@ -65,6 +65,14 @@ pub enum PlayStart {
 	Tracks { uris: Vec<String>, offset_uri: Option<String> },
 	/// A list played from its first track at `position_ms`: a queue rebuilt after an edit.
 	List { uris: Vec<String>, position_ms: u64 },
+	/// Explicitly resume a passive checkpoint, preserving its context and ordered occurrences.
+	Restored {
+		uri:         String,
+		context_uri: String,
+		position_ms: u64,
+		/// Ordered (occurrence UID, playable URI, provider) triples.
+		upcoming:    Vec<(String, String, String)>,
+	},
 }
 
 /// A transport command for the device that is playing (Spotify's `/me/player/*` endpoints).

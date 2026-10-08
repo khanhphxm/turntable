@@ -74,10 +74,20 @@ impl State {
 	}
 
 	pub(super) fn queue_jump(&mut self, index: usize, cmds: &mut Vec<Command>) {
-		if let Some(entry) = self.upcoming.get(index) {
-			let uid = entry.uid.clone();
-			self.upcoming.drain(..=index);
-			cmds.push(self.queue_edit.command(QueueEdit::Jump { uid }));
+		if index >= self.upcoming.len() {
+			return;
+		}
+		let entry = self.upcoming.drain(..=index).next_back();
+		let Some(entry) = entry else { return };
+		if self.queue_restored && !self.active {
+			cmds.push(Command::Load(crate::spotify::PlayStart::Restored {
+				uri:         entry.item.uri,
+				context_uri: self.context.uri.clone(),
+				position_ms: 0,
+				upcoming:    self.upcoming.iter().map(|entry| (entry.uid.clone(), entry.item.uri.clone(), entry.source.clone())).collect(),
+			}));
+		} else {
+			cmds.push(self.queue_edit.command(QueueEdit::Jump { uid: entry.uid }));
 		}
 	}
 

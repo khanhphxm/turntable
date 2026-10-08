@@ -146,6 +146,8 @@ pub struct State {
 	pub volume:                        u8,
 	pub options:                       Options,
 	pub upcoming:                      Vec<QueueEntry>,
+	/// Passive disk queue: do not replace it with the inactive engine's empty startup list.
+	pub(crate) queue_restored:         bool,
 	/// Queue edits not yet in the player's own list (see `queue`).
 	pub queue_edit:                    queue::Edit,
 	/// The now-playing song's lyrics once asked for, with the URI of its track.

@@ -100,6 +100,7 @@ impl Controller {
 			audio.set_volume(self.state.volume);
 		}
 		self.reconcile_poll();
+		self.remember_playback(!self.state.playing());
 		true
 	}
 
@@ -235,6 +236,9 @@ impl Controller {
 		let creator_changed = matches!(&event, Event::MetadataChanged { entity }
 			if entity.uri == self.state.item.uri && entity.decorations.creators.first().map(|creator| creator.entity.uri.as_str())
 				!= self.state.item.decorations.creators.first().map(|creator| creator.entity.uri.as_str()));
+		if matches!(&event, Event::QueueChanged { upcoming, .. } if !upcoming.is_empty() || self.state.active) {
+			self.restore.queue_changed = true;
+		}
 		let changed = self.state.apply(event);
 		if self.state.playing() && self.playback_interrupted {
 			self.playback_interrupted = false;
@@ -271,6 +275,9 @@ impl Controller {
 		}
 		if let library::Response::LastPlayback { account, playback } = response {
 			return self.on_recent_playback(account, playback);
+		}
+		if let library::Response::PlaybackCheckpoint { account, position } = response {
+			return self.on_playback_checkpoint(&account, position);
 		}
 		if matches!(
 			response,

@@ -24,6 +24,20 @@ pub(super) fn request(start: PlayStart, current: (bool, bool, bool)) -> LoadRequ
 		PlayStart::List { uris, position_ms } => {
 			LoadRequest::from_tracks(uris, options(position_ms, Some(PlayingTrack::Index(0)), ConnectOptions::default()))
 		},
+		PlayStart::Restored { uri, context_uri, position_ms, upcoming } => {
+			let request = if context_uri.is_empty() {
+				LoadRequest::from_tracks(vec![uri.clone()], options(position_ms, Some(PlayingTrack::Index(0)), context_options))
+			} else {
+				LoadRequest::from_context_uri(context_uri, options(position_ms, Some(PlayingTrack::Uri(uri.clone())), context_options))
+			};
+			request.with_checkpoint(
+				uri,
+				upcoming
+					.into_iter()
+					.map(|(uid, uri, provider)| librespot_protocol::player::ProvidedTrack { uid, uri, provider, ..Default::default() })
+					.collect(),
+			)
+		},
 	}
 }
 
@@ -68,5 +82,29 @@ mod tests {
 		assert!(load.start_playing);
 		assert_eq!(load.seek_to, 17_000);
 		assert!(matches!(load.playing_track, Some(PlayingTrack::Index(0))));
+	}
+
+	#[test]
+	fn checkpoint_resume_loads_context_position_and_exact_occurrences() {
+		let load = request(
+			PlayStart::Restored {
+				uri:         "spotify:track:last".into(),
+				context_uri: "spotify:playlist:context".into(),
+				position_ms: 17_000,
+				upcoming:    vec![
+					("first".into(), "spotify:track:same".into(), "queue".into()),
+					("second".into(), "spotify:track:same".into(), "context".into()),
+				],
+			},
+			(true, false, false),
+		);
+		assert!(load.start_playing);
+		assert_eq!(load.seek_to, 17_000);
+		assert!(matches!(&load.playing_track, Some(PlayingTrack::Uri(uri)) if uri == "spotify:track:last"));
+		let upcoming = load.upcoming.unwrap();
+		assert_eq!(
+			upcoming.iter().map(|track| (track.uid.as_str(), track.uri.as_str(), track.provider.as_str())).collect::<Vec<_>>(),
+			vec![("first", "spotify:track:same", "queue"), ("second", "spotify:track:same", "context")]
+		);
 	}
 }

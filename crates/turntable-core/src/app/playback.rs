@@ -62,9 +62,9 @@ impl State {
 			},
 			Command::Load(start) => {
 				let position_ms = match start {
-					crate::spotify::PlayStart::Context { position_ms, .. } | crate::spotify::PlayStart::List { position_ms, .. } => {
-						*position_ms
-					},
+					crate::spotify::PlayStart::Context { position_ms, .. }
+					| crate::spotify::PlayStart::List { position_ms, .. }
+					| crate::spotify::PlayStart::Restored { position_ms, .. } => *position_ms,
 					crate::spotify::PlayStart::Tracks { .. } => 0,
 				};
 				(Status::Playing, position_ms, 0.0)
@@ -201,8 +201,12 @@ impl State {
 			Event::OptionsChanged { options } => self.options = options,
 			Event::PositionSync { position } => self.playback_position(position),
 			Event::QueueChanged { upcoming, revision } => {
+				if self.queue_restored && !self.active && upcoming.is_empty() {
+					return false;
+				}
 				if self.queue_edit.reconcile(revision) {
 					self.upcoming = upcoming;
+					self.queue_restored = false;
 				}
 			},
 		}

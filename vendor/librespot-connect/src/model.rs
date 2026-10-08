@@ -9,6 +9,10 @@ use std::ops::Deref;
 pub struct LoadRequest {
     pub(super) context: PlayContext,
     pub(super) options: LoadRequestOptions,
+    /// turntable: exact upcoming occurrences for an explicit checkpoint resume.
+    pub upcoming: Option<Vec<crate::protocol::player::ProvidedTrack>>,
+    /// turntable: the saved current track may be queued and absent from its context.
+    pub current_uri: Option<String>,
 }
 
 impl Deref for LoadRequest {
@@ -93,6 +97,8 @@ impl LoadRequest {
         Self {
             context: PlayContext::Uri(context_uri),
             options,
+            upcoming: None,
+            current_uri: None,
         }
     }
 
@@ -104,7 +110,16 @@ impl LoadRequest {
         Self {
             context: PlayContext::Tracks(tracks),
             options,
+            upcoming: None,
+            current_uri: None,
         }
+    }
+
+    /// Resume a saved player after resolving its context, retaining the exact current track and queue.
+    pub fn with_checkpoint(mut self, current_uri: String, upcoming: Vec<crate::protocol::player::ProvidedTrack>) -> Self {
+        self.current_uri = Some(current_uri);
+        self.upcoming = Some(upcoming);
+        self
     }
 }
 

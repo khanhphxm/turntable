@@ -367,7 +367,8 @@ fn serve(context: RequestContext<'_>, request: Request) {
 			output(add_context_to_playlist(reader, route));
 		},
 		Request::RememberPlayback(position) => remember_playback(config, position, deliver),
-		Request::ForgetSnapshot => forget_library(snapshots, session, player, added, refresh_added, deliver),
+		Request::PlaybackCheckpoint(account) => playback_checkpoint(config, account, deliver),
+		Request::ForgetSnapshot => forget_library(config, snapshots, session, player, added, refresh_added, deliver),
 		other => {
 			let speculative = matches!(other, Request::Prefetch(_));
 			let Some(s) = session.as_mut() else {
@@ -461,6 +462,7 @@ fn pins_response(account: &str, operation: &str, result: std::io::Result<Vec<Str
 
 /// Pending native requests have finished before this account's caches are removed.
 fn forget_library(
+	config: &Path,
 	snapshots: &Mutex<Store>,
 	session: &mut Option<Session>,
 	player: &mut Option<Reader>,
@@ -469,6 +471,9 @@ fn forget_library(
 	deliver: &dyn Fn(Response),
 ) {
 	snapshots.lock().clear();
+	if let Err(error) = super::restore::clear(config) {
+		deliver(Response::Error { route: None, message: format!("Couldn't forget playback checkpoint: {error}") });
+	}
 	*session = None;
 	*player = None;
 	*refresh_added = false;
@@ -479,6 +484,11 @@ fn remember_playback(config: &Path, position: super::PlaybackPosition, deliver: 
 	if let Err(error) = super::restore::remember(config, position) {
 		deliver(Response::Error { route: None, message: format!("Couldn't save playback position: {error}") });
 	}
+}
+
+fn playback_checkpoint(config: &Path, account: String, deliver: &dyn Fn(Response)) {
+	let position = super::restore::read(config, &account);
+	deliver(Response::PlaybackCheckpoint { account, position });
 }
 
 fn is_write(request: &Request) -> bool {
@@ -807,6 +817,7 @@ fn run(
 		| Request::ForgetSnapshot
 		| Request::RememberPlayback(_)
 		| Request::LastPlayback
+		| Request::PlaybackCheckpoint(_)
 		| Request::Pins
 		| Request::SetPinned { .. }
 		| Request::FolderExpansion

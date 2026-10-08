@@ -358,6 +358,7 @@ impl Library {
 			| Response::Devices(_)
 			| Response::Playback(_)
 			| Response::LastPlayback { .. }
+			| Response::PlaybackCheckpoint { .. }
 			| Response::Transferred
 			| Response::ControlFailed { .. }
 			| Response::PlayerError(_) => {},

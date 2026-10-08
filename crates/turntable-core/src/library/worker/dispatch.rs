@@ -176,4 +176,44 @@ mod tests {
 		runner.process(Inbox::Request(1, Request::ForgetSnapshot));
 		assert!(snapshots.lock().connected().is_none());
 	}
+
+	#[test]
+	fn queue_checkpoint_round_trip_is_scoped_and_signout_rejects_late_writes() {
+		let directory = tempfile::tempdir().unwrap();
+		let live = Arc::new(AtomicU64::new(0));
+		let snapshots = Arc::new(Mutex::new(Store::new(directory.path())));
+		let (tx, rx) = mpsc::channel();
+		let (_, urgent) = watch::channel(());
+		let mut runner = Runner::new(
+			directory.path().join("config"),
+			directory.path(),
+			false,
+			snapshots,
+			Arc::new(move |_, response| tx.send(response).unwrap()),
+			urgent,
+			live.clone(),
+		);
+		let checkpoint = crate::library::PlaybackPosition {
+			account:     "alex".into(),
+			uri:         "spotify:track:last".into(),
+			context_uri: "spotify:playlist:context".into(),
+			position_ms: 2_000,
+			upcoming:    vec![crate::library::QueuedTrack {
+				uid:    "next".into(),
+				uri:    "spotify:track:next".into(),
+				source: "queue".into(),
+			}],
+		};
+		runner.process(Inbox::Request(0, Request::RememberPlayback(checkpoint.clone())));
+		runner.process(Inbox::Request(0, Request::PlaybackCheckpoint("alex".into())));
+		assert!(matches!(rx.recv().unwrap(), Response::PlaybackCheckpoint { position: Some(saved), .. } if saved == checkpoint));
+		runner.process(Inbox::Request(0, Request::PlaybackCheckpoint("other".into())));
+		assert!(matches!(rx.recv().unwrap(), Response::PlaybackCheckpoint { account, position: None } if account == "other"));
+		live.store(1, Ordering::Release);
+		runner.process(Inbox::Request(1, Request::ForgetSnapshot));
+		runner.process(Inbox::Request(0, Request::RememberPlayback(checkpoint)));
+		runner.process(Inbox::Request(1, Request::PlaybackCheckpoint("alex".into())));
+		assert!(rx.try_iter().any(|response| matches!(response, Response::PlaybackCheckpoint { position: None, .. })));
+		assert!(!directory.path().join("config/playback").exists());
+	}
 }

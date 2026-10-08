@@ -1,7 +1,7 @@
 //! Startup fallback when Connect supplies no paused player: native session history first,
 //! otherwise Web API history, with account-scoped cached track metadata when offline.
-//! Position checkpoints are private config files; only a matching track borrows the saved
-//! position. Reads and writes run on the library worker, independently of the current page.
+//! Playback checkpoints include ordered queue occurrences and their providers, not artwork or
+//! decoded audio. Reads and writes run on the library worker, independently of the current page.
 
 use std::{
 	fs, io,
@@ -27,6 +27,22 @@ pub struct PlaybackPosition {
 	pub uri:         String,
 	pub context_uri: String,
 	pub position_ms: u64,
+	#[serde(default)]
+	pub upcoming:    Vec<QueuedTrack>,
+}
+
+/// Compact persisted queue identity; duplicate URIs remain distinct occurrences.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedTrack {
+	pub uid:    String,
+	pub uri:    String,
+	pub source: String,
+}
+
+impl QueuedTrack {
+	pub(crate) fn entry(self) -> crate::engine::QueueEntry {
+		crate::engine::QueueEntry { uid: self.uid, source: self.source, item: Entity { uri: self.uri, ..Entity::default() } }
+	}
 }
 
 #[derive(Serialize, Deserialize)]
@@ -46,9 +62,17 @@ pub(super) fn remember(config: &Path, position: PlaybackPosition) -> io::Result<
 	config::write_private(&file, &bytes)
 }
 
-fn read(config: &Path, account: &str) -> Option<PlaybackPosition> {
+pub(super) fn read(config: &Path, account: &str) -> Option<PlaybackPosition> {
 	let saved: Saved = serde_json::from_slice(&fs::read(path(config, account)).ok()?).ok()?;
 	(saved.version == VERSION && saved.position.account == account).then_some(saved.position)
+}
+
+/// Runs after older worker requests, so a queued checkpoint cannot recreate signed-out data.
+pub(super) fn clear(config: &Path) -> io::Result<()> {
+	match fs::remove_dir_all(config.join("playback")) {
+		Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+		result => result,
+	}
 }
 
 pub(super) fn recent(
@@ -114,6 +138,7 @@ mod tests {
 			uri:         "spotify:track:last".into(),
 			context_uri: "spotify:playlist:last".into(),
 			position_ms: 2_000,
+			upcoming:    Vec::new(),
 		};
 		let restored = from_recent(&track(&saved.uri), None, &[], Some(&saved));
 		assert_eq!(restored.position_ms, 2_000);
@@ -131,12 +156,48 @@ mod tests {
 			uri:         "spotify:track:last".into(),
 			context_uri: String::new(),
 			position_ms: 2_000,
+			upcoming:    vec![
+				QueuedTrack { uid: "first".into(), uri: "spotify:track:duplicate".into(), source: "queue".into() },
+				QueuedTrack { uid: "second".into(), uri: "spotify:track:duplicate".into(), source: "context".into() },
+				QueuedTrack { uid: "third".into(), uri: "spotify:episode:next".into(), source: "autoplay".into() },
+			],
 		};
 		remember(dir.path(), saved.clone()).unwrap();
 		assert_eq!(read(dir.path(), "alex"), Some(saved));
 		assert!(read(dir.path(), "other").is_none());
 		fs::write(path(dir.path(), "alex"), b"broken").unwrap();
 		assert!(read(dir.path(), "alex").is_none());
+	}
+
+	#[test]
+	fn sign_out_clears_all_account_checkpoints() {
+		let dir = tempfile::tempdir().unwrap();
+		for account in ["alex", "other"] {
+			remember(dir.path(), PlaybackPosition {
+				account:     account.into(),
+				uri:         "spotify:track:last".into(),
+				context_uri: "spotify:playlist:source".into(),
+				position_ms: 2_000,
+				upcoming:    vec![QueuedTrack { uid: "next".into(), uri: "spotify:track:next".into(), source: "queue".into() }],
+			})
+			.unwrap();
+		}
+		clear(dir.path()).unwrap();
+		assert!(read(dir.path(), "alex").is_none());
+		assert!(read(dir.path(), "other").is_none());
+		clear(dir.path()).unwrap();
+	}
+
+	#[test]
+	fn old_position_only_checkpoints_restore_an_empty_queue() {
+		let dir = tempfile::tempdir().unwrap();
+		fs::create_dir_all(dir.path().join("playback")).unwrap();
+		fs::write(
+			path(dir.path(), "alex"),
+			br#"{"version":1,"position":{"account":"alex","uri":"spotify:track:last","context_uri":"","position_ms":2000}}"#,
+		)
+		.unwrap();
+		assert!(read(dir.path(), "alex").unwrap().upcoming.is_empty());
 	}
 
 	#[test]
@@ -158,6 +219,7 @@ mod tests {
 			uri:         "spotify:track:saved".into(),
 			context_uri: "spotify:playlist:context".into(),
 			position_ms: 42_000,
+			upcoming:    Vec::new(),
 		})
 		.unwrap();
 		let restored = recent(directory.path(), "alex", &client, None, &[], &snapshots).unwrap().unwrap();

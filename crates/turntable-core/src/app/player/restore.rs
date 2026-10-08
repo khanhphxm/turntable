@@ -5,31 +5,35 @@ use std::time::{Duration, Instant};
 use super::Controller;
 use crate::{
 	engine::{LastPlayback, Status},
-	library::{self, PlaybackPosition},
+	library::{self, PlaybackPosition, QueuedTrack},
 };
 
 const CHECKPOINT_EVERY: Duration = Duration::from_secs(5);
 
 pub(super) struct Restore {
-	pub(super) pending:      bool,
-	pub(super) idle_cluster: bool,
-	account:                 Option<String>,
-	fallback:                bool,
-	requested:               bool,
-	remembered:              Option<PlaybackPosition>,
-	remember_at:             Instant,
+	pub(super) pending:       bool,
+	pub(super) idle_cluster:  bool,
+	account:                  Option<String>,
+	fallback:                 bool,
+	requested:                bool,
+	remembered:               Option<PlaybackPosition>,
+	remember_at:              Instant,
+	checkpoint_pending:       bool,
+	pub(super) queue_changed: bool,
 }
 
 impl Restore {
 	pub(super) fn new(signed_in: bool) -> Self {
 		Self {
-			pending:      signed_in,
-			idle_cluster: false,
-			account:      None,
-			fallback:     !signed_in,
-			requested:    false,
-			remembered:   None,
-			remember_at:  Instant::now(),
+			pending:            signed_in,
+			idle_cluster:       false,
+			account:            None,
+			fallback:           !signed_in,
+			requested:          false,
+			remembered:         None,
+			remember_at:        Instant::now(),
+			checkpoint_pending: false,
+			queue_changed:      false,
 		}
 	}
 }
@@ -41,9 +45,10 @@ impl Controller {
 		self.restore.idle_cluster = !update.playback.as_ref().is_some_and(|player| player.status == Status::Playing);
 		self.restore.fallback = startup && update.playback.is_none() && !update.local_active;
 		self.state.recent_searches.load(&self.paths.config, Some(update.account.clone()));
-		self.restore.account = Some(update.account);
+		self.restore_account(update.account);
 		let was_item = self.last_item.clone();
 		let changed = self.state.apply_connect_state(update.devices, update.playback, update.local_active);
+		let changed = self.restore_queue() || changed;
 		self.item_changed(&was_item);
 		self.remember_playback(!self.state.playing());
 		self.request_last_playback();
@@ -53,7 +58,9 @@ impl Controller {
 	pub(super) fn on_restore_unavailable(&mut self, account: String) {
 		self.restore.pending = false;
 		self.state.recent_searches.load(&self.paths.config, (!account.is_empty()).then(|| account.clone()));
-		self.restore.account = (!account.is_empty()).then_some(account);
+		if !account.is_empty() {
+			self.restore_account(account);
+		}
 		self.restore.fallback = self.state.item.uri.is_empty();
 		self.request_last_playback();
 		self.probe();
@@ -77,18 +84,62 @@ impl Controller {
 		if self.restore.account.as_ref().is_some_and(|native| *native != account) || self.restore.pending || !self.restore.fallback {
 			return false;
 		}
-		self.restore.account = Some(account);
+		self.restore_account(account);
 		self.restore.fallback = false;
 		let was_item = self.last_item.clone();
 		let changed = playback.is_some_and(|playback| self.state.restore_playback(playback));
+		let changed = self.restore_queue() || changed;
 		self.item_changed(&was_item);
 		self.remember_playback(true);
 		changed
 	}
 
+	fn restore_account(&mut self, account: String) {
+		if self.restore.account.as_ref() == Some(&account) {
+			return;
+		}
+		self.restore.account = Some(account.clone());
+		self.restore.remembered = None;
+		self.restore.checkpoint_pending = true;
+		self.library.send(library::Request::PlaybackCheckpoint(account));
+	}
+
+	pub(super) fn on_playback_checkpoint(&mut self, account: &str, position: Option<PlaybackPosition>) -> bool {
+		if self.restore.account.as_deref() != Some(account) || !self.restore.checkpoint_pending {
+			return false;
+		}
+		self.restore.checkpoint_pending = false;
+		self.restore.remembered = position.filter(|saved| saved.account == account);
+		let changed = self.restore_queue();
+		self.remember_playback(true);
+		changed
+	}
+
+	/// Restore display data only. A later explicit Play loads the preserved occurrences;
+	/// a live player, newer queue snapshot or user edit always wins over this disk read.
+	fn restore_queue(&mut self) -> bool {
+		let Some(saved) = &self.restore.remembered else { return false };
+		if self.restore.queue_changed
+			|| self.state.active
+			|| self.state.playing()
+			|| self.state.connect.remote.is_some()
+			|| !self.state.upcoming.is_empty()
+			|| saved.uri != self.state.item.uri
+		{
+			return false;
+		}
+		self.state.upcoming = saved.upcoming.iter().cloned().map(QueuedTrack::entry).collect();
+		self.state.queue_restored = !self.state.upcoming.is_empty();
+		self.state.queue_restored
+	}
+
 	pub(super) fn remember_playback(&mut self, force: bool) {
 		let Some(account) = &self.restore.account else { return };
-		if self.state.item.uri.is_empty() || self.state.status == Status::Idle || (!force && Instant::now() < self.restore.remember_at) {
+		if self.restore.checkpoint_pending
+			|| self.state.item.uri.is_empty()
+			|| self.state.status == Status::Idle
+			|| (!force && Instant::now() < self.restore.remember_at)
+		{
 			return;
 		}
 		let position_ms = self.state.position_ms();
@@ -98,6 +149,12 @@ impl Controller {
 				&& saved.uri == self.state.item.uri
 				&& saved.context_uri == self.state.context.uri
 				&& saved.position_ms == position_ms
+				&& saved.upcoming.len() == self.state.upcoming.len()
+				&& saved
+					.upcoming
+					.iter()
+					.zip(&self.state.upcoming)
+					.all(|(saved, entry)| saved.uid == entry.uid && saved.uri == entry.item.uri && saved.source == entry.source)
 		}) {
 			return;
 		}
@@ -106,13 +163,19 @@ impl Controller {
 			uri: self.state.item.uri.clone(),
 			context_uri: self.state.context.uri.clone(),
 			position_ms,
+			upcoming: self
+				.state
+				.upcoming
+				.iter()
+				.map(|entry| QueuedTrack { uid: entry.uid.clone(), uri: entry.item.uri.clone(), source: entry.source.clone() })
+				.collect(),
 		};
 		self.library.send(library::Request::RememberPlayback(position.clone()));
 		self.restore.remembered = Some(position);
 	}
 
 	pub(super) fn checkpoint_deadline(&self) -> Option<Instant> {
-		(self.state.playing() && self.restore.account.is_some()).then_some(self.restore.remember_at)
+		(self.state.playing() && self.restore.account.is_some() && !self.restore.checkpoint_pending).then_some(self.restore.remember_at)
 	}
 }
 
@@ -143,6 +206,90 @@ mod tests {
 			position_ms: 2_000,
 			options: PlaybackOptions::default(),
 		}
+	}
+
+	fn checkpoint() -> PlaybackPosition {
+		PlaybackPosition {
+			account:     "alex".into(),
+			uri:         "spotify:track:last".into(),
+			context_uri: "spotify:playlist:context".into(),
+			position_ms: 2_000,
+			upcoming:    vec![
+				QueuedTrack { uid: "first".into(), uri: "spotify:track:duplicate".into(), source: "queue".into() },
+				QueuedTrack { uid: "second".into(), uri: "spotify:track:duplicate".into(), source: "context".into() },
+				QueuedTrack { uid: "third".into(), uri: "spotify:episode:next".into(), source: "autoplay".into() },
+			],
+		}
+	}
+
+	#[test]
+	fn checkpoint_queue_waits_for_matching_account_and_track_without_autoplay() {
+		let (mut controller, _root) = controller();
+		controller.on_restore_unavailable("alex".into());
+		assert!(!controller.on_playback_checkpoint("other", Some(checkpoint())));
+		assert!(controller.restore.checkpoint_pending);
+		assert!(!controller.on_playback_checkpoint("alex", Some(checkpoint())));
+		assert!(controller.state.upcoming.is_empty(), "wait for the fallback's track identity");
+		assert!(controller.on_recent_playback("alex".into(), Some(playback())));
+		assert_eq!(
+			controller
+				.state
+				.upcoming
+				.iter()
+				.map(|entry| (entry.uid.as_str(), entry.item.uri.as_str(), entry.source.as_str()))
+				.collect::<Vec<_>>(),
+			vec![
+				("first", "spotify:track:duplicate", "queue"),
+				("second", "spotify:track:duplicate", "context"),
+				("third", "spotify:episode:next", "autoplay")
+			]
+		);
+		assert_eq!(controller.state.status, Status::Paused);
+		assert_eq!(controller.state.anchor.speed, 0.0);
+		assert!(!controller.state.active);
+		assert!(!controller.state.apply(crate::engine::Event::QueueChanged { upcoming: Vec::new(), revision: 0 }));
+		let effects = controller.state.update(Msg::TogglePlay);
+		let [Effect::Player(Command::Load(start))] = effects.as_slice() else { panic!("expected explicit resume") };
+		assert!(matches!(start, crate::spotify::PlayStart::Restored { position_ms: 2_000, upcoming, context_uri, .. }
+			if upcoming.len() == 3 && context_uri == "spotify:playlist:context"));
+		controller.sign_out();
+		assert!(controller.state.upcoming.is_empty());
+		assert!(!controller.on_playback_checkpoint("alex", Some(checkpoint())));
+		assert!(!controller.state.queue_restored);
+	}
+
+	#[test]
+	fn a_newer_queue_edit_or_live_player_wins_over_the_disk_read() {
+		for live in [false, true] {
+			let (mut controller, _root) = controller();
+			controller.on_restore_unavailable("alex".into());
+			controller.state.restore_playback(playback());
+			if live {
+				controller.state.active = true;
+			} else {
+				controller.restore.queue_changed = true;
+			}
+			assert!(!controller.on_playback_checkpoint("alex", Some(checkpoint())));
+			assert!(controller.state.upcoming.is_empty());
+		}
+	}
+
+	#[test]
+	fn passive_queue_edits_checkpoint_immediately_and_jump_loads_the_chosen_occurrence() {
+		let (mut controller, _root) = controller();
+		controller.on_restore_unavailable("alex".into());
+		controller.state.restore_playback(playback());
+		assert!(controller.on_playback_checkpoint("alex", Some(checkpoint())));
+		controller.dispatch(Msg::QueueRemove(0));
+		assert_eq!(controller.state.upcoming.len(), 2);
+		assert!(!controller.state.queue_edit.busy());
+		assert!(controller.state.toast.is_none(), "passive edits do not require a running player");
+		assert_eq!(controller.restore.remembered.as_ref().unwrap().upcoming.len(), 2);
+		assert_eq!(controller.state.status, Status::Paused);
+		let effects = controller.state.update(Msg::QueueJump(0));
+		assert!(matches!(effects.as_slice(), [Effect::Player(Command::Load(crate::spotify::PlayStart::Restored {
+			uri, position_ms: 0, upcoming, ..
+		}))] if uri == "spotify:track:duplicate" && upcoming.len() == 1 && upcoming.first().is_some_and(|entry| entry.0 == "third")));
 	}
 
 	#[test]

@@ -94,6 +94,8 @@ pub enum Request {
 	Playback,
 	/// Last played track/context; requested only if the session has no paused player state.
 	LastPlayback,
+	/// Read this verified account's local checkpoint, even without a library connection.
+	PlaybackCheckpoint(String),
 	/// Persist a position checkpoint without any network request.
 	RememberPlayback(super::PlaybackPosition),
 	/// Move playback to the device `id`, playing or staying paused.
@@ -227,6 +229,11 @@ pub enum Response {
 	LastPlayback {
 		account:  String,
 		playback: Option<crate::engine::LastPlayback>,
+	},
+	/// Disk-only startup queue read; the account also scopes a missing checkpoint.
+	PlaybackCheckpoint {
+		account:  String,
+		position: Option<super::PlaybackPosition>,
 	},
 	/// Playback was moved to the device asked for.
 	Transferred,

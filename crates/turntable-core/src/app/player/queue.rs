@@ -5,6 +5,20 @@ use crate::engine::Command;
 
 impl Controller {
 	pub(super) fn send_player(&mut self, cmd: Command) {
+		if matches!(cmd, Command::EditQueue { .. } | Command::Load(_)) {
+			self.restore.queue_changed = true;
+		}
+		if matches!(cmd, Command::EditQueue { .. }) {
+			self.remember_playback(true);
+		}
+		if matches!(cmd, Command::EditQueue { .. }) && self.state.queue_restored && !self.state.active {
+			// Keep edits local until the user explicitly resumes this passive queue.
+			self.state.queue_edit.cancel();
+			return;
+		}
+		if matches!(cmd, Command::Load(_)) && self.state.queue_restored {
+			self.state.queue_edit = crate::app::queue::Edit::default();
+		}
 		let id = self.state.playback_command_id(&cmd);
 		let queue_edit = matches!(cmd, Command::Load(_) | Command::EditQueue { .. });
 		if self.client.is_none() && id == 0 && !queue_edit {

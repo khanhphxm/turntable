@@ -57,6 +57,6 @@ pub use artist::Popularity;
 pub use folders::{Folder, RootEntry, TreeEntry};
 pub use model::{Conn, Entry, Home, Kind, Listing, PAGE, PlaylistOccurrence, Route, RowTarget, Sort, Tile, View};
 pub use protocol::{Request, Response};
-pub use restore::PlaybackPosition;
+pub use restore::{PlaybackPosition, QueuedTrack};
 pub use state::Library;
 pub use worker::Worker;

@@ -238,7 +238,18 @@ impl State {
 				// An explicit load resumes exactly what is shown, without a transfer that
 				// could choose a different track or position from a later account state.
 				let position_ms = self.position_ms();
-				let start = if self.context.uri.is_empty() {
+				let start = if self.queue_restored {
+					crate::spotify::PlayStart::Restored {
+						uri: self.item.uri.clone(),
+						context_uri: self.context.uri.clone(),
+						position_ms,
+						upcoming: self
+							.upcoming
+							.iter()
+							.map(|entry| (entry.uid.clone(), entry.item.uri.clone(), entry.source.clone()))
+							.collect(),
+					}
+				} else if self.context.uri.is_empty() {
 					crate::spotify::PlayStart::List { uris: vec![self.item.uri.clone()], position_ms }
 				} else {
 					crate::spotify::PlayStart::Context {
