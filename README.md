@@ -1,21 +1,26 @@
-# turntable
+<p align="center">
+  <img src="packaging/icon.svg" width="128" height="128" alt="Turntable icon">
+</p>
 
-A lightweight, native Spotify player for macOS, Linux and Windows.
-Built with [GPUI](https://www.gpui.rs/) and [librespot](https://github.com/librespot-org/librespot).
-Spotify Premium required: turntable signs out of accounts that aren't.
+<h1 align="center">Turntable</h1>
+
+<p align="center">
+  A fast, native Spotify player for macOS, Linux and Windows.<br>
+  Built with <a href="https://www.gpui.rs/">GPUI</a> and <a href="https://github.com/librespot-org/librespot">librespot</a>. Requires Spotify Premium.
+</p>
 
 <!-- screenshot: home -->
 
 ## Features
 
-- Home, search, your library (with folders and pins), artists, albums and playlists
-- Create, rename and edit playlists; right-click anything in Your Library for Spotify's actions
+- Your whole library: playlists, folders, albums, artists and Liked Songs
+- Search
+- Create and edit playlists
+- Now Playing panel, full-screen view and miniplayer
+- Synced lyrics
 - Spotify Connect: play here or on your other devices
-- Queue, synced lyrics, artist bios
-- Full-size and full-screen Now Playing, and a miniplayer
-- 10-band equalizer, loudness normalization, mono audio
-- Media keys and system Now Playing controls
-- A **✓** on songs already in Liked Songs or one of your playlists
+- Equalizer, loudness normalization and crossfade
+- Media keys and keyboard shortcuts
 
 <!-- screenshot: album -->
 <!-- screenshot: lyrics -->
@@ -27,7 +32,8 @@ brew install --cask khanhphxm/tap/turntable   # macOS
 brew install khanhphxm/tap/turntable          # Linux
 ```
 
-Or download an archive from [Releases](https://github.com/khanhphxm/turntable/releases).
+Or download the macOS disk image, Windows installer or Linux package from
+[Releases](https://github.com/khanhphxm/turntable/releases).
 
 ## Build from source
 
@@ -50,9 +56,10 @@ sudo apt install clang cmake pkg-config libssl-dev libdbus-1-dev libasound2-dev 
 
 ## Privacy
 
-turntable talks only to Spotify. Play counts, listeners and artist pages come from Spotify's
-web player, which can be turned off in **Settings → Sources**.
+Turntable talks only to Spotify. Your sign-in stays on your computer.
 
 ## License
 
-[MIT](LICENSE). Not affiliated with Spotify.
+[MIT](LICENSE). Icons from [Lucide](https://lucide.dev) (ISC).
+Turntable is not affiliated with, endorsed or sponsored by Spotify. Spotify is a trademark of
+Spotify AB.
