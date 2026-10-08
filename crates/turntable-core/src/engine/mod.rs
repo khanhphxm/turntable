@@ -6,6 +6,8 @@
 //! events, plus the connect state (context, options, upcoming tracks) the vendored
 //! `librespot-connect` sends after every change.
 
+mod connect;
+mod load;
 mod model;
 #[cfg(test)]
 mod session_tests;
@@ -21,9 +23,7 @@ use std::{
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use librespot_connect::{
-	ConnectConfig, LoadContextOptions, LoadRequest, LoadRequestOptions, Options as ConnectOptions, PlayingTrack, Spirc, StateSnapshot,
-};
+use librespot_connect::{ConnectConfig, LoadRequest, LoadRequestOptions, Spirc, StateSnapshot};
 use librespot_core::{
 	SpotifyUri,
 	authentication::Credentials,
@@ -48,7 +48,7 @@ use tokio::{
 	sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
 };
 
-use crate::{audio::PcmWriter, spotify::PlayStart};
+use crate::audio::PcmWriter;
 
 /// What the player is started with.
 #[derive(Debug, Clone)]
@@ -109,7 +109,7 @@ pub struct Engine {
 	volume:  u8,
 }
 
-/// A read-only connection to the player's authenticated session and runtime.
+/// A connection for library I/O on the player's authenticated session and runtime.
 /// Library workers share this handle; it neither creates another session nor controls playback.
 #[derive(Clone)]
 pub struct SessionReader {
@@ -119,6 +119,11 @@ pub struct SessionReader {
 }
 
 impl SessionReader {
+	#[cfg(test)]
+	pub(crate) fn for_test(session: Session, runtime: tokio::runtime::Handle, stop: tokio::sync::watch::Receiver<bool>) -> Self {
+		Self { session, runtime, stop }
+	}
+
 	pub fn session(&self) -> &Session {
 		&self.session
 	}
@@ -234,7 +239,7 @@ impl Engine {
 		Some(Client { spirc: self.spirc.clone(), requests: tx, activating })
 	}
 
-	/// Shares session reads with a worker; stopping the engine cancels its in-flight I/O.
+	/// Shares authenticated library I/O; stopping the engine cancels its in-flight requests.
 	pub fn session_reader(&self) -> Option<SessionReader> {
 		Some(SessionReader {
 			session: self.session.clone(),
@@ -350,6 +355,10 @@ enum Request {
 	Activating,
 	/// A command sent while the device was being activated.
 	Deferred(Command),
+	Transfer {
+		device: String,
+		play:   bool,
+	},
 }
 
 impl Client {
@@ -357,6 +366,9 @@ impl Client {
 		match cmd {
 			Command::GetQueue { limit } => {
 				let _ = self.requests.send(Request::Queue(limit));
+			},
+			Command::Transfer { device, play } => {
+				let _ = self.requests.send(Request::Transfer { device, play });
 			},
 			// Takes playback over from wherever it is (or was last) and plays, like picking this
 			// device in Spotify and pressing play.
@@ -382,7 +394,7 @@ impl Client {
 /// reports it), so errors are dropped.
 fn dispatch(spirc: &Spirc, cmd: Command) {
 	let _ = match cmd {
-		Command::GetQueue { .. } | Command::Activate | Command::Load(_) => Ok(()),
+		Command::GetQueue { .. } | Command::Activate | Command::Load(_) | Command::Transfer { .. } => Ok(()),
 		Command::Play { uri: None } => spirc.play(),
 		Command::Play { uri: Some(uri) } => {
 			let options = LoadRequestOptions { start_playing: true, ..LoadRequestOptions::default() };
@@ -473,6 +485,7 @@ impl Forward {
 						self.send_queue().await;
 					},
 					Request::Activating => self.takeover_by = Some(tokio::time::Instant::now() + TAKEOVER_WAIT),
+					Request::Transfer { device, play } => self.transfer_device(&device, play).await,
 					Request::Deferred(cmd) => {
 						// The takeover may have landed while the command was on its way.
 						if self.activating.load(Ordering::Acquire) {
@@ -497,27 +510,7 @@ impl Forward {
 		if !self.state.active {
 			let _ = self.spirc.activate();
 		}
-		let (shuffle, repeat, repeat_track) = self.state.options;
-		let options =
-			|seek_to: u64, playing_track: Option<PlayingTrack>, shuffle: bool, repeat: bool, repeat_track: bool| LoadRequestOptions {
-				start_playing: true,
-				seek_to: u32::try_from(seek_to).unwrap_or(0),
-				context_options: Some(LoadContextOptions::Options(ConnectOptions { shuffle, repeat, repeat_track })),
-				playing_track,
-			};
-		let request = match start {
-			PlayStart::Context { uri, offset_uri, position_ms } => {
-				LoadRequest::from_context_uri(uri, options(position_ms, offset_uri.map(PlayingTrack::Uri), shuffle, repeat, repeat_track))
-			},
-			PlayStart::Tracks { uris, offset_uri } => {
-				LoadRequest::from_tracks(uris, options(0, offset_uri.map(PlayingTrack::Uri), shuffle, repeat, repeat_track))
-			},
-			// A rebuilt queue plays in its own order, from its first song; its edit restores repeat.
-			PlayStart::List { uris, position_ms } => {
-				LoadRequest::from_tracks(uris, options(position_ms, Some(PlayingTrack::Index(0)), false, false, false))
-			},
-		};
-		let _ = self.spirc.load(request);
+		let _ = self.spirc.load(load::request(start, self.state.options));
 	}
 
 	fn event(&mut self, event: Event) {
@@ -551,6 +544,23 @@ impl Forward {
 	}
 
 	async fn snapshot(&mut self, snap: StateSnapshot) {
+		if let Some(cluster) = snap.cluster {
+			self.cluster(&cluster, snap.initial_cluster).await;
+			return;
+		}
+		if snap.initial_cluster {
+			(self.deliver)(Incoming::LastPlayback {
+				account:           self.session.username(),
+				playback:          None,
+				playing_elsewhere: false,
+			});
+			return;
+		}
+		// An inactive local player has no loaded context. Its empty snapshots must not
+		// erase the account's passive bar or the options used by its next explicit load.
+		if !snap.active && !self.state.active {
+			return;
+		}
 		if snap.active != self.state.active {
 			self.state.active = snap.active;
 			self.event(Event::DeviceChanged { is_active: snap.active });

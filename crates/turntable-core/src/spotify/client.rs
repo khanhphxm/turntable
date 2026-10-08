@@ -45,6 +45,7 @@ pub struct Client {
 	http:    Http,
 	session: Mutex<Session>,
 	base:    String,
+	web_api: bool,
 	/// GETs in flight, by URL: a caller asking for one that is under way waits for it.
 	flights: Flights<String, Result<Arc<Vec<u8>>>>,
 	/// The last few GET answers (see [`RECENT_TTL`]). Any write empties it.
@@ -84,21 +85,23 @@ pub enum PlayerCommand {
 
 impl Client {
 	/// A client that authenticates with tokens from `source` (the player's Spotify session).
-	pub fn open(source: TokenSource) -> Self {
+	/// With `web_api` false, requests fail offline before token refresh or network I/O.
+	pub fn open(source: TokenSource, web_api: bool) -> Self {
 		// The UI harness points an isolated run (TURNTABLE_HOME) at its mock Web API;
 		// a normal run always talks to Spotify.
 		let base = crate::app::config::home_override()
 			.and_then(|_| std::env::var("TURNTABLE_API").ok())
 			.filter(|b| !b.is_empty())
 			.unwrap_or_else(|| API.to_owned());
-		Self::new(Session::new(source), base)
+		Self::new(Session::new(source), base, web_api)
 	}
 
-	fn new(session: Session, base: String) -> Self {
+	fn new(session: Session, base: String, web_api: bool) -> Self {
 		Self {
 			http: Http::new(),
 			session: Mutex::new(session),
 			base,
+			web_api,
 			flights: Flights::default(),
 			recent: Mutex::new(Cache::new(RECENT_ENTRIES, RECENT_TTL)),
 		}
@@ -391,6 +394,9 @@ impl Client {
 
 	/// [`Self::request`] for a copy held under `etag`.
 	fn fetch(&self, method: Method, path: &str, query: &[(&str, &str)], json: Option<&str>, etag: Option<&str>) -> Result<Fetched> {
+		if !self.web_api {
+			return Err(Error::Network("Spotify Web API disabled in cache-only mode".into()));
+		}
 		if method != Method::Get {
 			// What was read before this write may not hold after it.
 			self.recent.lock().unwrap_or_else(PoisonError::into_inner).clear();

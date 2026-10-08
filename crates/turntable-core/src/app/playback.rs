@@ -13,6 +13,22 @@ impl State {
 		self.anchor = Anchor { position_ms, at: Instant::now(), speed };
 	}
 
+	/// Restores the account's stopped player for the bar, without claiming Connect playback.
+	/// The frozen anchor is the position used by the next [`crate::Msg::TogglePlay`].
+	/// Live playback, here or on another device, always outranks a late startup read.
+	pub fn restore_playback(&mut self, playback: crate::engine::LastPlayback) -> bool {
+		if self.active || self.playing() || self.connect.remote.is_some() || playback.item.uri.is_empty() {
+			return false;
+		}
+		self.item = playback.item;
+		self.context = playback.context;
+		self.options = playback.options;
+		self.status = Status::Paused;
+		let duration_ms = self.duration_ms();
+		self.anchor_to(if duration_ms > 0 { playback.position_ms.min(duration_ms) } else { playback.position_ms }, 0.0);
+		true
+	}
+
 	/// Applies a player event. Returns whether anything visible changed.
 	pub fn apply(&mut self, event: Event) -> bool {
 		// While another device plays, its state comes from the Web API; this player's
@@ -98,6 +114,7 @@ impl State {
 		self.connected = false;
 		self.logged_in = false;
 		self.active = false;
+		self.connect.session = false;
 		self.status = Status::Idle;
 		self.anchor_to(self.position_ms(), 0.0);
 		self.notice = Some(reason);

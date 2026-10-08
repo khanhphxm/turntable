@@ -22,7 +22,7 @@ impl Controller {
 
 	/// Asks now what plays and where, if another device might be playing.
 	pub(super) fn probe(&mut self) {
-		if self.state.may_probe() {
+		if !self.restore.pending && !self.state.starting && self.state.may_probe() {
 			self.poll_playback();
 		}
 	}
@@ -70,6 +70,7 @@ impl Controller {
 				self.poll_failures = if result.is_ok() { 0 } else { self.poll_failures.saturating_add(1) };
 				let was_item = self.last_item.clone();
 				let changed = self.state.apply_playback(result, forced);
+				self.remember_playback(!self.state.playing());
 				self.item_changed(&was_item);
 				return changed;
 			},

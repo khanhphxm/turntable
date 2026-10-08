@@ -33,7 +33,7 @@ use crate::{
 };
 use futures_util::StreamExt;
 use librespot_protocol::context_page::ContextPage;
-use protobuf::MessageField;
+use protobuf::{Message as _, MessageField};
 use std::{
     future::Future,
     sync::Arc,
@@ -152,7 +152,12 @@ pub struct StateSnapshot {
     pub repeat_track: bool,
     /// Upcoming tracks: (uid, uri, provider: "context" | "queue" | "autoplay").
     pub next: Vec<(String, String, String)>,
+    /// turntable: the account-wide player and device list, received passively from Dealer.
+    pub cluster: Option<Cluster>,
+    /// This is registration's response (including a failed/empty cluster read).
+    pub initial_cluster: bool,
 }
+
 
 const CONTEXT_FETCH_THRESHOLD: usize = 2;
 
@@ -865,8 +870,12 @@ impl SpircTask {
                 error!("{why:?}");
                 None
             }
+        };
+        let available = cluster.is_some();
+        self.send_cluster_snapshot(cluster, true);
+        if !available {
+            return Err(SpircError::FailedDealerSetup.into());
         }
-        .ok_or(SpircError::FailedDealerSetup)?;
 
         debug!(
             "successfully put connect state for {} with connection-id {connection_id}",
@@ -875,30 +884,8 @@ impl SpircTask {
 
         self.connect_established = true;
 
-        let same_session = cluster.player_state.session_id == self.session.session_id()
-            || cluster.player_state.session_id.is_empty();
-        if !cluster.active_device_id.is_empty() || !same_session {
-            info!(
-                "active device is <{}> with session <{}>",
-                cluster.active_device_id, cluster.player_state.session_id
-            );
-            return Ok(());
-        } else if cluster.transfer_data.is_empty() {
-            debug!("got empty transfer state, do nothing");
-            return Ok(());
-        } else {
-            info!(
-                "trying to take over control automatically, session_id: {}",
-                cluster.player_state.session_id
-            )
-        }
-
-        use protobuf::Message;
-
-        match TransferState::parse_from_bytes(&cluster.transfer_data) {
-            Ok(transfer_state) => self.handle_transfer(transfer_state)?,
-            Err(why) => error!("failed to take over control: {why}"),
-        }
+        // turntable registers passively, like opening Spotify's paused bar. A cached
+        // transfer state must never activate this device or resume audio on startup.
 
         Ok(())
     }
@@ -974,6 +961,7 @@ impl SpircTask {
                 //  tried: providing session_id, playback_id, track-metadata "track_player"
                 self.update_state = true;
             }
+            self.send_cluster_snapshot(Some(cluster), false);
         } else if self.connect_state.is_active() {
             self.connect_state.became_inactive(&self.session).await?;
         }
@@ -1856,8 +1844,17 @@ impl SpircTask {
                 .take(50)
                 .map(|t| (t.uid.clone(), t.uri.clone(), t.provider.clone()))
                 .collect(),
+            cluster: None,
+            initial_cluster: false,
         };
         let _ = tx.send(snapshot);
+    }
+
+    /// turntable: forwards the existing Dealer payload; no additional read or playback command.
+    fn send_cluster_snapshot(&self, cluster: Option<Cluster>, initial_cluster: bool) {
+        if let Some(tx) = &self.snapshots {
+            let _ = tx.send(StateSnapshot { cluster, initial_cluster, ..StateSnapshot::default() });
+        }
     }
 
     fn set_volume(&mut self, volume: u16) {
@@ -1879,6 +1876,7 @@ impl SpircTask {
         }
     }
 }
+
 
 impl Drop for SpircTask {
     fn drop(&mut self) {

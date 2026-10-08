@@ -57,7 +57,7 @@ fn reply(status: &str, headers: &str, body: &str) -> String {
 
 fn client(base: String) -> Client {
 	let source: TokenSource = Arc::new(|| Ok(Token { access_token: "secret-at".into(), expires_at: now_unix() + 3600 }));
-	Client::new(Session::new(source), base)
+	Client::new(Session::new(source), base, true)
 }
 
 #[test]
@@ -350,4 +350,19 @@ fn playlist_row_write_contracts_keep_duplicates_and_final_move_indices() {
 	assert!(requests[1].starts_with("PUT /playlists/scratch/items HTTP/1.1"));
 	assert_eq!(body(1), serde_json::json!({ "range_start": 1, "range_length": 1, "insert_before": 5 }));
 	assert_eq!(body(2), serde_json::json!({ "range_start": 4, "range_length": 1, "insert_before": 1 }));
+}
+
+#[test]
+fn cache_only_refuses_reads_writes_and_conditional_requests_before_auth_or_io() {
+	let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+	listener.set_nonblocking(true).unwrap();
+	let base = format!("http://{}", listener.local_addr().unwrap());
+	let source: TokenSource = Arc::new(|| panic!("cache-only requests must not ask for access tokens"));
+	let client = Client::new(Session::new(source), base, false);
+	for method in [Method::Get, Method::Post, Method::Put, Method::Delete] {
+		assert!(matches!(client.request(method, "/me", &[], None), Err(Error::Network(message)) if message.contains("cache-only")));
+	}
+	assert!(matches!(client.fetch(Method::Get, "/me", &[], None, Some("etag")), Err(Error::Network(_))));
+	assert!(matches!(client.get_bytes("/me", &[]), Err(Error::Network(_))));
+	assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
 }

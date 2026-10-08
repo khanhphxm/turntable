@@ -45,6 +45,8 @@ pub struct Connect {
 	pub devices: DeviceList,
 	/// The device playing, when it isn't turntable's.
 	pub remote:  Option<Device>,
+	/// Dealer is supplying account-wide devices and playback; Web API polling is unnecessary.
+	pub session: bool,
 }
 
 impl State {
@@ -70,13 +72,13 @@ impl State {
 
 	/// Whether `GET /me/player` is worth asking now (the caller adds that the window shows).
 	pub fn wants_poll(&self) -> bool {
-		self.web_ready() && self.connect.remote.is_some() && !self.active
+		!self.connect.session && self.web_ready() && self.connect.remote.is_some() && !self.active
 	}
 
 	/// Whether a single poll could tell that another device plays: turntable isn't the active
 	/// one, and the Web API is there to ask.
 	pub fn may_probe(&self) -> bool {
-		self.web_ready() && !self.active
+		!self.connect.session && self.web_ready() && !self.active
 	}
 
 	/// The devices to offer besides the current one, this player first when it isn't current.
@@ -114,7 +116,7 @@ impl State {
 	}
 
 	pub fn refresh_devices(&mut self) -> Vec<Effect> {
-		if !self.web_ready() {
+		if self.connect.session || !self.web_ready() {
 			return Vec::new();
 		}
 		if matches!(self.connect.devices, DeviceList::Failed(_)) {
@@ -126,6 +128,9 @@ impl State {
 	/// Takes in the device list. Returns whether another device turns out to be playing, which
 	/// is worth a poll.
 	pub fn apply_devices(&mut self, result: Result<Vec<Device>, String>) -> bool {
+		if self.connect.session {
+			return false;
+		}
 		match result {
 			Ok(list) => {
 				let elsewhere =
@@ -140,17 +145,20 @@ impl State {
 		}
 	}
 
-	/// A click on a device of the menu: this player takes playback through the engine, another
-	/// device through the Web API, keeping playing or paused as it is.
+	/// A device click uses native Connect transfer when the session supplies its inventory,
+	/// otherwise the Web API, keeping playback playing or paused as it is.
 	pub fn pick_device(&mut self, id: &str) -> Vec<Effect> {
 		// A player Spotify hasn't listed yet is offered without an id.
 		let this = id.is_empty()
 			|| matches!(&self.connect.devices, DeviceList::Ready(list) if list.iter().any(|d| d.id == id && self.is_this_device(d)));
-		if this {
-			return if self.active { Vec::new() } else { vec![Effect::Player(Command::Activate)] };
-		}
-		if self.connect.remote.as_ref().is_some_and(|d| d.id == id) {
+		if (this && self.active) || self.connect.remote.as_ref().is_some_and(|device| device.id == id) {
 			return Vec::new();
+		}
+		if self.connect.session {
+			return vec![Effect::Player(Command::Transfer { device: id.to_owned(), play: self.playing() })];
+		}
+		if this {
+			return vec![Effect::Player(Command::Activate)];
 		}
 		vec![Effect::Library(Request::Transfer { id: id.to_owned(), play: self.playing() })]
 	}
@@ -159,6 +167,9 @@ impl State {
 	/// another device, so it outranks this player's idea of being the active device. Returns
 	/// whether anything visible changed.
 	pub fn apply_playback(&mut self, result: Result<Option<Playback>, String>, force: bool) -> bool {
+		if self.connect.session {
+			return false;
+		}
 		let Ok(playback) = result else { return false };
 		let Some(playback) = playback else {
 			// No device is active anywhere: whatever was playing elsewhere has stopped.
@@ -218,9 +229,49 @@ impl State {
 		self.anchor = Anchor { position_ms, at: Instant::now(), speed };
 	}
 
+	/// Applies the authenticated session's pushed device inventory and account player.
+	/// A paused startup player stays passive: it appears in the bar, not as remote playback.
+	pub fn apply_connect_state(
+		&mut self,
+		devices: Vec<Device>,
+		playback: Option<crate::engine::ClusterPlayback>,
+		local_active: bool,
+	) -> bool {
+		self.connect.session = true;
+		self.connect.devices = DeviceList::Ready(devices);
+		if local_active {
+			return true;
+		}
+		self.active = false;
+		let Some(player) = playback else {
+			if self.connect.remote.take().is_some() {
+				self.status = Status::Paused;
+				self.anchor_to(self.position_ms(), 0.0);
+			}
+			return true;
+		};
+		if player.status == Status::Playing || (self.connect.remote.is_some() && player.device.is_some()) {
+			self.connect.remote = player.device;
+			if let Some(volume) = self.connect.remote.as_ref().and_then(|device| device.volume_percent) {
+				self.volume = volume;
+			}
+			self.item = player.playback.item;
+			self.context = player.playback.context;
+			self.options = player.playback.options;
+			self.status = player.status;
+			self.anchor = Anchor::new(player.position.position_ms, player.position.timestamp_ms, player.position.speed);
+			self.upcoming.clear();
+		} else {
+			self.connect.remote = None;
+			self.status = Status::Paused;
+			self.restore_playback(player.playback);
+		}
+		true
+	}
+
 	/// Forgets the other device and the device list when the account goes away.
 	pub fn drop_remote_if_signed_out(&mut self) {
-		if !self.web_ready() {
+		if !self.web_ready() && !self.connect.session {
 			self.connect.remote = None;
 			self.connect.devices = DeviceList::Unknown;
 			self.connect.menu = false;
@@ -338,7 +389,7 @@ fn context_of(playback: &Playback, playlists: &[spotify::Playlist]) -> Entity {
 }
 
 /// A Web API track as the player entity the views are built on.
-fn entity_of(track: &Track) -> Entity {
+pub(crate) fn entity_of(track: &Track) -> Entity {
 	let covers = |images: &[spotify::Image]| -> Vec<Cover> {
 		[("small", 64), ("default", 300), ("large", 640)]
 			.into_iter()
@@ -544,5 +595,80 @@ mod tests {
 		s.library.conn = Conn::NeedsLogin;
 		s.drop_remote_if_signed_out();
 		assert!(s.remote().is_none());
+	}
+
+	fn native_player(device: Option<Device>, status: Status, position_ms: u64) -> crate::engine::ClusterPlayback {
+		let track: Track = serde_json::from_value(serde_json::json!({
+			"uri": "spotify:track:last", "name": "Last song", "duration_ms": 248_000,
+			"artists": [{"uri":"spotify:artist:band", "name":"Band"}],
+			"album": {"uri":"spotify:album:album", "name":"Album", "images":[{"url":"https://cover", "height":300}]}
+		}))
+		.unwrap();
+		crate::engine::ClusterPlayback {
+			playback: crate::engine::LastPlayback {
+				item: entity_of(&track),
+				context: Entity { uri: "spotify:playlist:context".into(), ..Entity::default() },
+				position_ms,
+				options: Options::default(),
+			},
+			device,
+			position: crate::engine::Position {
+				position_ms:  position_ms as f64,
+				timestamp_ms: 0.0,
+				speed:        if status == Status::Playing { 1.0 } else { 0.0 },
+			},
+			status,
+		}
+	}
+
+	#[test]
+	fn native_paused_bar_restores_all_projections_without_activation_or_web_effects() {
+		let mut state = ready();
+		let desktop = device("desktop", "Spotify desktop", "Computer", true);
+		state.apply_connect_state(vec![desktop.clone()], Some(native_player(Some(desktop), Status::Paused, 2_000)), false);
+		assert_eq!(state.item.uri, "spotify:track:last");
+		assert_eq!(state.item.name(), "Last song");
+		assert_eq!(state.item.creators(), "Band");
+		assert_eq!(state.cover_url(), Some("https://cover"));
+		assert_eq!(state.context.uri, "spotify:playlist:context");
+		assert_eq!(state.duration_ms(), 248_000);
+		assert_eq!(state.status, Status::Paused);
+		assert_eq!(state.anchor.position_ms, 2_000);
+		assert_eq!(state.anchor.speed, 0.0);
+		assert!(!state.active);
+		assert!(state.remote().is_none());
+		assert!(!state.may_probe());
+		assert!(!state.wants_poll());
+		assert!(state.update(Msg::DevicesMenu).is_empty());
+		assert!(
+			matches!(state.update(Msg::TogglePlay).as_slice(), [Effect::Player(Command::Load(spotify::PlayStart::Context { uri, offset_uri: Some(track), position_ms: 2_000 }))] if uri == "spotify:playlist:context" && track == "spotify:track:last")
+		);
+	}
+
+	#[test]
+	fn native_remote_updates_and_transfers_do_not_request_device_or_player_reads() {
+		let mut state = ready();
+		let phone = device("phone", "Phone", "Smartphone", true);
+		let speaker = device("speaker", "Speaker", "Speaker", false);
+		state.apply_connect_state(
+			vec![phone.clone(), speaker.clone()],
+			Some(native_player(Some(phone.clone()), Status::Playing, 17_000)),
+			false,
+		);
+		assert_eq!(state.remote().map(|device| device.name.as_str()), Some("Phone"));
+		assert!(state.playing());
+		assert!(!state.wants_poll());
+		assert!(state.refresh_devices().is_empty());
+		assert!(
+			matches!(state.pick_device("speaker").as_slice(), [Effect::Player(Command::Transfer { device, play: true })] if device == "speaker")
+		);
+		state.apply_connect_state(vec![phone.clone(), speaker], Some(native_player(Some(phone), Status::Paused, 18_000)), false);
+		assert_eq!(state.remote().map(|device| device.id.as_str()), Some("phone"));
+		assert_eq!(state.anchor.position_ms, 18_000);
+		assert!(matches!(state.pick_device("speaker").as_slice(), [Effect::Player(Command::Transfer { play: false, .. })]));
+		assert!(!state.apply_devices(Err("old Web API quota response".into())));
+		assert!(matches!(state.connect.devices, DeviceList::Ready(_)));
+		assert!(!state.apply_playback(Ok(None), false));
+		assert!(state.remote().is_some());
 	}
 }

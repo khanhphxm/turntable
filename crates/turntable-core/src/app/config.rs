@@ -2,8 +2,9 @@
 //!
 //! - config/state: Windows `%APPDATA%\turntable`; elsewhere `$XDG_CONFIG_HOME/turntable`
 //!   or `~/.config/turntable` (saved player sign-in, Connect device id, `client_id`,
-//!   `settings.json`, and the Web API's `token.json` where no OS credential store is
-//!   used; see `crate::spotify::token_store`).
+//!   `settings.json`, account-scoped last positions in `playback/<sha256(account)>.json`,
+//!   and the Web API's `token.json` where no OS credential store is used;
+//!   see `crate::spotify::token_store`).
 //! - cache: covers and the player's audio files under `player/files`.
 //!   Windows `%LOCALAPPDATA%\turntable`, macOS `~/Library/Caches/turntable`,
 //!   elsewhere `$XDG_CACHE_HOME/turntable` or `~/.cache/turntable`.

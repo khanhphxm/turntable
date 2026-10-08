@@ -83,6 +83,8 @@ pub struct Shell {
 	pub now_playing:   Option<crate::nowplaying::NowPlaying>,
 	/// The open "Edit details" dialog's fields.
 	pub details:       Option<crate::dialogs::DetailsInputs>,
+	/// The empty-playlist finder's field (for the playlist last shown).
+	pub finder:        Option<crate::pages::finder::Finder>,
 	/// The toast last shown, and the one whose time is up (the core never clears toasts).
 	pub toast_shown:   Option<u32>,
 	pub toast_gone:    Option<u32>,
@@ -161,6 +163,7 @@ impl Shell {
 			lyrics_line: None,
 			now_playing: None,
 			details: None,
+			finder: None,
 			toast_shown: None,
 			toast_gone: None,
 		};

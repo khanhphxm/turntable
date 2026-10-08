@@ -212,6 +212,11 @@ pub enum Command {
 	AddToQueue {
 		uri: String,
 	},
+	/// Transfers the account's player through the session; `device` empty means this device.
+	Transfer {
+		device: String,
+		play:   bool,
+	},
 	Activate,
 	/// Plays a context or a list of tracks here (activating this device when it isn't).
 	Load(crate::spotify::PlayStart),
@@ -228,10 +233,50 @@ impl Command {
 	}
 }
 
+/// An account's last player state, read without loading audio or activating this device.
+#[derive(Debug, Clone)]
+pub struct LastPlayback {
+	pub item:        Entity,
+	pub context:     Entity,
+	pub position_ms: u64,
+	pub options:     Options,
+}
+
+/// A player reported by the account-wide Connect cluster, not this device's decoder.
+#[derive(Debug)]
+pub struct ClusterPlayback {
+	pub playback: LastPlayback,
+	pub device:   Option<crate::spotify::Device>,
+	pub position: Position,
+	pub status:   Status,
+}
+
+/// Passive, pushed account state from the authenticated session. Device menus and remote
+/// bars use this instead of Web API polling while the session remains connected.
+#[derive(Debug)]
+pub struct ConnectState {
+	pub account:      String,
+	pub devices:      Vec<crate::spotify::Device>,
+	pub playback:     Option<ClusterPlayback>,
+	pub local_active: bool,
+	pub initial:      bool,
+}
+
 /// What the engine reports to its client.
 #[derive(Debug)]
 pub enum Incoming {
 	Event(Event),
+	/// Startup's passive Connect cluster read. `None` permits the recently-played fallback;
+	/// a playing remote device instead keeps its normal remote transport controls.
+	LastPlayback {
+		account:           String,
+		playback:          Option<LastPlayback>,
+		playing_elsewhere: bool,
+	},
+	/// A passive account/player/device update from the session's Dealer subscription.
+	ConnectState(ConnectState),
+	/// A requested native player command failed; the session may remain usable.
+	CommandFailed(String),
 	/// The player stopped (its session ended); the client is done.
 	Closed(String),
 }

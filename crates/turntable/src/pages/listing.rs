@@ -1,7 +1,7 @@
 //! A playlist, album or Liked Songs: header, action bar, then the track table (virtualised;
 //! the next page loads as the end comes into view).
 
-use gpui_kit::{AnyElement, Context, FontWeight, IntoElement, ParentElement as _, Styled as _, div, list, prelude::FluentBuilder as _, px};
+use gpui_kit::{AnyElement, Context, FontWeight, IntoElement, ParentElement as _, Styled as _, Window, div, list, prelude::FluentBuilder as _, px};
 use turntable_core::{Msg, Route, spotify::id_of};
 
 use crate::{
@@ -25,15 +25,17 @@ impl Shell {
 			}
 			self.list_for = Some((route, rows));
 		}
+		// The footer's height follows the finder and its results: measure it afresh each frame.
+		self.list.remeasure_items(rows + 1..rows + 2);
 		list(
 			self.list.clone(),
-			cx.processor(move |this, ix: usize, _, cx| {
+			cx.processor(move |this, ix: usize, window, cx| {
 				if ix == 0 {
 					return this.listing_header(cx);
 				}
 				let i = ix - 1;
 				let Some(t) = this.st().library.listing.as_ref().and_then(|l| l.tracks.get(i)).cloned() else {
-					return this.listing_footer(cx);
+					return this.listing_footer(window, cx);
 				};
 				let plays = this.st().library.listing.as_ref().and_then(|l| l.plays.get(i).copied());
 				let (column, plays) = if album {
@@ -49,16 +51,16 @@ impl Shell {
 		.size_full()
 	}
 
-	fn listing_footer(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
+	fn listing_footer(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> AnyElement {
 		let Some(l) = self.st().library.listing.as_ref() else {
 			return div().into_any_element();
 		};
-		let text = if l.loading && l.tracks.is_empty() {
-			Some("Loading…")
-		} else if l.tracks.is_empty() && l.editable {
-			Some("Nothing here yet. Right-click a song anywhere and choose Add to playlist.")
-		} else {
-			None
+		let text = (l.loading && l.tracks.is_empty()).then_some("Loading…");
+		let empty = l.tracks.is_empty();
+		// The user's own playlist ends with the finder (open while it's empty).
+		let own = match &self.st().library.route {
+			Route::Playlist(id) if l.editable && !l.loading => Some(id.clone()),
+			_ => None,
 		};
 		let more = l.next_offset.is_some();
 		let loading = l.loading;
@@ -74,6 +76,7 @@ impl Shell {
 			.text_color(theme::subdued())
 			.when_some(text, |s, t| s.child(t))
 			.when(more, |s| s.child("Loading more…"))
+			.when_some(own.filter(|_| !more), |s, id| s.child(self.finder(&id, empty, window, cx)))
 			.into_any_element()
 	}
 

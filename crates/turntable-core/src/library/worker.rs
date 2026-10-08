@@ -38,7 +38,8 @@ enum Inbox {
 impl Worker {
 	/// Starts the worker. Disk listings can also be delivered by `send`, without waiting for
 	/// an in-flight network request; every snapshot is followed by the worker's fresh answer.
-	pub fn spawn(config_dir: PathBuf, cache_dir: &Path, deliver: impl Fn(Response) + Send + Sync + 'static) -> Self {
+	/// `web_api` false keeps native session reads enabled but refuses Web API traffic.
+	pub fn spawn(config_dir: PathBuf, cache_dir: &Path, web_api: bool, deliver: impl Fn(Response) + Send + Sync + 'static) -> Self {
 		let (tx, rx) = mpsc::channel::<Inbox>();
 		let snapshots = Arc::new(Mutex::new(Store::new(cache_dir)));
 		let deliver: Arc<dyn Fn(Response) + Send + Sync> = Arc::new(deliver);
@@ -80,6 +81,7 @@ impl Worker {
 							&mut player,
 							&mut added,
 							&mut refresh_added,
+							web_api,
 							request,
 							deliver.as_ref(),
 						);
@@ -230,6 +232,7 @@ fn serve(
 	player: &mut Option<Reader>,
 	added: &mut Membership,
 	refresh_added: &mut bool,
+	web_api: bool,
 	request: Request,
 	deliver: &dyn Fn(Response),
 ) {
@@ -241,9 +244,9 @@ fn serve(
 		}
 	};
 	match request {
-		Request::Connect => connect(config, snapshots, session, player, &output),
+		Request::Connect => connect(config, snapshots, session, player, web_api, &output),
 		Request::Login => match spotify::login(config, |url| deliver(Response::LoginUrl(url.to_owned()))) {
-			Ok(()) => connect(config, snapshots, session, player, &output),
+			Ok(()) => connect(config, snapshots, session, player, web_api, &output),
 			Err(e) => deliver(Response::LoginFailed(e.user_message())),
 		},
 		Request::RememberPlayback(position) => {
@@ -330,6 +333,7 @@ fn connect(
 	snapshots: &Arc<Mutex<Store>>,
 	session: &mut Option<Session>,
 	player: &mut Option<Reader>,
+	web_api: bool,
 	deliver: &dyn Fn(Response),
 ) {
 	if !config.join("client_id").is_file() {
@@ -354,7 +358,7 @@ fn connect(
 		store.load(user_id.as_deref());
 		(store.connected(), store.home())
 	};
-	let client = Client::open(account.source());
+	let client = Client::open(account.source(), web_api);
 	let has_snapshot = cached.is_some();
 	if let Some(Response::Connected { me, playlists }) = cached {
 		*session = Some(Session::new(client, me.clone(), playlists.clone(), snapshots.clone()));
@@ -483,35 +487,14 @@ fn run(
 			response
 		},
 		Request::RenamePlaylist(id, changes) => {
-			match &mut s.player {
-				Some(player) if changes.public.is_none() => player.rename_playlist(&id, &changes)?,
-				_ => s.client.rename_playlist(&id, &changes)?,
-			}
-			if let Some(name) = &changes.name {
-				added.renamed(&format!("spotify:playlist:{id}"), name, deliver);
-			}
-			if let Some(public) = changes.public
-				&& let Some(playlist) = s.playlists.iter_mut().find(|playlist| playlist.id == id)
-			{
-				playlist.public = Some(public);
-			}
+			let response = rename_playlist(s, added, id, &changes, deliver)?;
 			*refresh_added = true;
-			s.forget(&Route::Playlist(id));
-			s.playlists = s.load_playlists()?;
-			Response::Playlists(s.playlists.clone())
+			response
 		},
 		Request::AddToPlaylist(id, name, uris) => {
-			match &mut s.player {
-				Some(player) => player.add_to_playlist(&id, &uris)?,
-				None => {
-					let borrowed: Vec<&str> = uris.iter().map(String::as_str).collect();
-					s.client.add_to_playlist(&id, &borrowed)?;
-				},
-			}
-			added.appended(&format!("spotify:playlist:{id}"), &uris, deliver);
+			let response = append_playlist(s, added, id, &name, &uris, deliver)?;
 			*refresh_added = true;
-			s.forget(&Route::Playlist(id));
-			Response::Done(format!("Added to {name}"))
+			response
 		},
 		Request::RemoveFromPlaylist(id, uri, row) => {
 			match &mut s.player {
@@ -523,15 +506,7 @@ fn run(
 			s.forget(&Route::Playlist(id.clone()));
 			Response::Removed(id, uri, row)
 		},
-		Request::MovePlaylistRow(id, from, to) => {
-			match &mut s.player {
-				Some(player) => player.move_playlist_row(&id, from, to)?,
-				None => s.client.move_playlist_row(&id, from, to)?,
-			}
-			s.forget(&Route::Playlist(id.clone()));
-			// Membership is order-independent: reordering needs no index refresh.
-			Response::Moved(id, from, to)
-		},
+		Request::MovePlaylistRow(id, from, to) => move_playlist_row(s, id, from, to)?,
 		Request::QueueContext(route) => {
 			let listing = open(s, &route, 0)?;
 			Response::Queue(listing.tracks.into_iter().filter(|t| !t.is_local).map(|t| t.uri).collect(), listing.title)
@@ -640,4 +615,58 @@ fn create_playlist(s: &mut Session, name: &str, uris: &[String]) -> spotify::Res
 	playlist.normalize(&s.me, s.me_name.as_deref());
 	s.playlists.insert(0, playlist.clone());
 	Ok(Response::Created(playlist))
+}
+
+fn rename_playlist(
+	s: &mut Session,
+	added: &mut Membership,
+	id: String,
+	changes: &spotify::PlaylistChanges,
+	deliver: &dyn Fn(Response),
+) -> spotify::Result<Response> {
+	match &mut s.player {
+		Some(player) if changes.public.is_none() => player.rename_playlist(&id, changes)?,
+		_ => s.client.rename_playlist(&id, changes)?,
+	}
+	if let Some(name) = &changes.name {
+		added.renamed(&format!("spotify:playlist:{id}"), name, deliver);
+	}
+	if let Some(public) = changes.public
+		&& let Some(playlist) = s.playlists.iter_mut().find(|playlist| playlist.id == id)
+	{
+		playlist.public = Some(public);
+	}
+	s.forget(&Route::Playlist(id));
+	s.playlists = s.load_playlists()?;
+	Ok(Response::Playlists(s.playlists.clone()))
+}
+
+fn append_playlist(
+	s: &mut Session,
+	added: &mut Membership,
+	id: String,
+	name: &str,
+	uris: &[String],
+	deliver: &dyn Fn(Response),
+) -> spotify::Result<Response> {
+	match &mut s.player {
+		Some(player) => player.add_to_playlist(&id, uris)?,
+		None => {
+			let borrowed: Vec<&str> = uris.iter().map(String::as_str).collect();
+			s.client.add_to_playlist(&id, &borrowed)?;
+		},
+	}
+	added.appended(&format!("spotify:playlist:{id}"), uris, deliver);
+	s.forget(&Route::Playlist(id));
+	Ok(Response::Done(format!("Added to {name}")))
+}
+
+fn move_playlist_row(s: &mut Session, id: String, from: u32, to: u32) -> spotify::Result<Response> {
+	match &mut s.player {
+		Some(player) => player.move_playlist_row(&id, from, to)?,
+		None => s.client.move_playlist_row(&id, from, to)?,
+	}
+	s.forget(&Route::Playlist(id.clone()));
+	// Membership is order-independent: reordering needs no index refresh.
+	Ok(Response::Moved(id, from, to))
 }

@@ -8,6 +8,7 @@ mod metadata;
 #[cfg(test)]
 mod network_tests;
 mod queue;
+mod restore;
 
 use std::{
 	sync::{Arc, mpsc},
@@ -22,12 +23,23 @@ use crate::{
 };
 
 /// Overrides supplied by the application host.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Options {
 	/// Overrides the persisted Spotify Connect device name for this launch.
 	pub device_name: Option<String>,
+	/// Allow Spotify Web API requests (true by default). False serves saved library
+	/// snapshots and refuses API reads/writes before token refresh or network I/O.
+	/// Native Session/pathfinder reads and artwork downloads remain enabled.
+	pub web_api:     bool,
 }
 
+impl Default for Options {
+	fn default() -> Self {
+		Self { device_name: None, web_api: true }
+	}
+}
+
+#[expect(clippy::large_enum_variant, reason = "player/Dealer snapshots travel by value to avoid allocating for every playback update")]
 enum AppEvent {
 	Progress(String),
 	EngineReady(Result<Engine, String>),
@@ -90,6 +102,7 @@ pub struct Controller {
 	/// Last presented lyrics: a changed line invalidates the host's view.
 	followed:             Option<(String, Option<usize>)>,
 	last_item:            String,
+	restore:              restore::Restore,
 	queue_reply:          bool,
 	visible:              bool,
 	poll_at:              Option<Instant>,
@@ -106,6 +119,11 @@ impl Controller {
 	/// Creates the controller and starts library/cover workers. A saved playback
 	/// sign-in starts the engine asynchronously; otherwise [`crate::Msg::SignIn`] starts it.
 	/// Lyrics are fetched lazily when their panel is opened.
+	/// Registration restores the account's last paused track/context/position into the bar,
+	/// but never transfers playback or activates this device. Session cluster pushes also
+	/// supply Connect devices and remote playback without Web API polling. If no last player
+	/// is available, recently-played and this account's saved position supply the fallback.
+	/// The next [`crate::Msg::TogglePlay`] explicitly loads the shown track here at its anchor.
 	///
 	/// Creates the config/cache directories, returning their filesystem errors as text.
 	pub fn new(paths: &Paths, opts: Options, wake: Arc<dyn Fn() + Send + Sync>) -> Result<Self, String> {
@@ -120,7 +138,7 @@ impl Controller {
 		let device_name = opts.device_name.clone().unwrap_or_else(|| settings.prefs.device.name.clone());
 		let library = {
 			let (tx, wake) = (tx.clone(), wake.clone());
-			library::Worker::spawn(paths.config.clone(), &paths.cache, move |response| {
+			library::Worker::spawn(paths.config.clone(), &paths.cache, opts.web_api, move |response| {
 				if tx.send(AppEvent::Library(Box::new(response))).is_ok() {
 					wake();
 				}
@@ -140,6 +158,7 @@ impl Controller {
 		};
 		let mut controller = Self {
 			paths: paths.clone(),
+			restore: restore::Restore::new(state.signed_in),
 			state,
 			tx,
 			rx,
@@ -207,6 +226,7 @@ impl Controller {
 		while let Ok(event) = self.rx.try_recv() {
 			changed |= self.on_event(event);
 		}
+		self.remember_playback(false);
 		changed |= self.run_timers();
 		if self.poll_at.is_some_and(|at| Instant::now() >= at) {
 			self.poll_at = None;
@@ -237,6 +257,7 @@ impl Controller {
 			self.search_at,
 			self.retry_start_at,
 			self.library_retry_at,
+			self.checkpoint_deadline(),
 			self.audio_retry_at,
 			self.visible.then(|| self.state.next_lyric_at()).flatten(),
 			self.poll_at,
@@ -307,6 +328,7 @@ impl Controller {
 
 impl Drop for Controller {
 	fn drop(&mut self) {
+		self.remember_playback(true);
 		self.client = None;
 		self.audio = None;
 		self.engine = None;

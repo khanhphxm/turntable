@@ -2,6 +2,7 @@
 
 mod artist;
 pub mod eq;
+pub mod finder;
 mod home;
 mod listing;
 mod search;

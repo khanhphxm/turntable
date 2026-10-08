@@ -92,8 +92,14 @@ impl Controller {
 				self.refresh_network_notice();
 				self.start_failures = self.start_failures.saturating_add(1);
 				self.retry_start_at = Some(Instant::now() + retry_wait(self.start_failures));
+				self.restore_without_session();
 			},
 			AppEvent::Player(Incoming::Event(event)) => return self.on_player_event(event),
+			AppEvent::Player(Incoming::LastPlayback { account, playback, playing_elsewhere }) => {
+				return self.on_last_playback(account, playback, playing_elsewhere);
+			},
+			AppEvent::Player(Incoming::ConnectState(state)) => return self.on_connect_state(state),
+			AppEvent::Player(Incoming::CommandFailed(message)) => self.state.show_toast(message),
 			AppEvent::Player(Incoming::Closed(reason)) => {
 				debug_log(&format!("player stopped: {reason}"));
 				self.client = None;
@@ -142,6 +148,7 @@ impl Controller {
 			self.library.send(library::Request::Connect);
 		}
 		self.engine = Some(engine);
+		self.restore.pending = true;
 		self.on_engine_started();
 		self.connect();
 		true
@@ -174,6 +181,7 @@ impl Controller {
 			self.send_player(Command::GetQueue { limit: 20 });
 		}
 		self.item_changed(&was_item);
+		self.remember_playback(!self.state.playing());
 		if (was_active && !self.state.active) || (!was_logged_in && self.state.logged_in && !self.state.active) {
 			self.probe();
 		}
@@ -183,6 +191,9 @@ impl Controller {
 	fn on_library_response(&mut self, response: library::Response) -> bool {
 		if crate::net::trace::enabled() {
 			crate::net::trace::mark("resp", &response.label());
+		}
+		if let library::Response::LastPlayback { account, playback } = response {
+			return self.on_recent_playback(account, playback);
 		}
 		if matches!(
 			response,
@@ -231,7 +242,10 @@ impl Controller {
 			self.poll_forced = false;
 		}
 		if connected {
-			self.probe();
+			self.request_last_playback();
+			if !self.restore.idle_cluster {
+				self.probe();
+			}
 			if self.state.library.route == Route::Home {
 				self.library.send(library::Request::Home);
 			}

@@ -24,7 +24,8 @@ mod tests {
 		let wake = Arc::new(move || {
 			let _ = tx.send(());
 		});
-		let mut controller = Controller::new(&paths, Options { device_name: Some("Test host".into()) }, wake).unwrap();
+		let mut controller =
+			Controller::new(&paths, Options { device_name: Some("Test host".into()), ..Options::default() }, wake).unwrap();
 		assert_eq!(controller.state().device_name, "Test host");
 		assert!(!controller.state().signed_in);
 		rx.recv_timeout(Duration::from_secs(5)).unwrap();

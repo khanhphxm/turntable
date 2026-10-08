@@ -102,7 +102,7 @@ impl Shell {
 		if item.uri.is_empty() {
 			return note("Nothing playing");
 		}
-		let liked = st.liked();
+		let added = st.liked().map(|liked| liked || st.added(&item.uri));
 		let artist_id = item.decorations.creators.first().map(|c| id_of(&c.entity.uri).to_owned());
 		let artist = artist_id.as_ref().and_then(|id| st.library.artists.get(id).cloned());
 		let overview = artist_id.as_ref().and_then(|id| st.library.overviews.get(id).cloned());
@@ -186,13 +186,16 @@ impl Shell {
 								None => div().text_size(px(16.)).text_color(theme::subdued()).child(item.creators()).into_any_element(),
 							}),
 					)
-					.when_some(liked, |s, liked| {
+					.when_some(added, |s, added| {
 						s.child(
 							div()
 								.id("np-add")
 								.cursor_pointer()
-								.on_click(cx.listener(|this, _, _, cx| this.send(Msg::ToggleLike, cx)))
-								.child(added_badge(liked, px(24.))),
+								// ⊕ saves to Liked Songs; ✓ opens the playlist picker (where it can be taken out).
+								.on_click(cx.listener(move |this, _, _, cx| {
+									this.send(if added { Msg::AddNowPlayingToPlaylist } else { Msg::ToggleLike }, cx);
+								}))
+								.child(added_badge(added, px(24.))),
 						)
 					}),
 			)

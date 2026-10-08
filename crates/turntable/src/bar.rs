@@ -45,7 +45,8 @@ impl Shell {
 		let artist = item.decorations.creators.first().map(|c| id_of(&c.entity.uri).to_owned());
 		let album = item.decorations.parent.as_ref().map(|p| id_of(&p.entity.uri).to_owned());
 		let url = item.cover(CoverSize::Small).map(str::to_owned);
-		let liked = self.st().liked();
+		// Spotify's ✓: in Liked Songs or any of the user's playlists (None: not a track).
+		let added = self.st().liked().map(|liked| liked || self.st().added(&item.uri));
 		let from = self.st().played_from.clone();
 		side.child(
 			div()
@@ -74,7 +75,7 @@ impl Shell {
 					None => div().text_size(px(12.)).text_color(theme::subdued()).truncate().child(artists).into_any_element(),
 				}),
 		)
-		.when_some(liked, |s, liked| {
+		.when_some(added, |s, added| {
 			s.child(
 				div()
 					.id("bar-add")
@@ -84,8 +85,9 @@ impl Shell {
 					.items_center()
 					.justify_center()
 					.cursor_pointer()
-					.on_click(cx.listener(|this, _, _, cx| this.send(Msg::ToggleLike, cx)))
-					.child(added_badge(liked, px(16.))),
+					// ⊕ saves to Liked Songs; ✓ opens the playlist picker (where it can be taken out).
+					.on_click(cx.listener(move |this, _, _, cx| this.send(if added { Msg::AddNowPlayingToPlaylist } else { Msg::ToggleLike }, cx)))
+					.child(added_badge(added, px(16.))),
 			)
 		})
 	}
