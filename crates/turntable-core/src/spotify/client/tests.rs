@@ -366,3 +366,18 @@ fn cache_only_refuses_reads_writes_and_conditional_requests_before_auth_or_io() 
 	assert!(matches!(client.get_bytes("/me", &[]), Err(Error::Network(_))));
 	assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
 }
+
+#[test]
+fn creating_a_playlist_omits_description_and_preserves_json_null_as_absent() {
+	let response = r#"{"id":"scratch","name":"New Playlist","description":null,"owner":{"id":"me"}}"#;
+	let (base, seen, handle) = mock(vec![reply("201 Created", "", response)]);
+	let playlist = client(base).create_playlist("New Playlist").unwrap();
+	handle.join().unwrap();
+	assert_eq!(playlist.description, None);
+	let requests = seen.all();
+	assert_eq!(requests.len(), 1);
+	assert!(requests[0].starts_with("POST /me/playlists HTTP/1.1"));
+	let body: serde_json::Value = serde_json::from_str(requests[0].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+	assert_eq!(body, serde_json::json!({ "name": "New Playlist", "public": false }));
+	assert!(body.get("description").is_none());
+}

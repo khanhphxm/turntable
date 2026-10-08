@@ -210,12 +210,10 @@ impl Playlist {
 
 	/// Human-readable attribution, never an opaque account ID.
 	pub fn owner_name(&self) -> &str {
-		self.owner
-			.display_name
-			.as_deref()
-			.map(str::trim)
-			.filter(|name| !name.is_empty() && *name != self.owner.id)
-			.unwrap_or("Spotify user")
+		if self.owner.id == "spotify" {
+			return "Spotify";
+		}
+		self.owner.display_name.as_deref().map(str::trim).filter(|name| !name.is_empty()).unwrap_or("Spotify user")
 	}
 
 	/// Reuse the signed-in profile's name for owned playlists on every ingress.
@@ -223,12 +221,14 @@ impl Playlist {
 		if self.description.as_deref().is_some_and(|description| !Self::has_description(description)) {
 			self.description = None;
 		}
+		if self.owner.id == "spotify" && self.owner.display_name.as_deref() != Some("Spotify") {
+			self.owner.display_name = Some("Spotify".to_owned());
+		}
 		if self.owner.id == account
 			&& let Some(name) = display_name.filter(|name| !name.trim().is_empty())
+			&& self.owner.display_name.as_deref() != Some(name)
 		{
-			if self.owner.display_name.as_deref() != Some(name) {
-				self.owner.display_name = Some(name.to_owned());
-			}
+			self.owner.display_name = Some(name.to_owned());
 		}
 	}
 
@@ -653,6 +653,15 @@ mod tests {
 			assert_eq!(playlist.owner_name(), "Spotify user");
 			playlist.normalize("opaque-account-id", Some("Alex"));
 			assert_eq!(playlist.owner_name(), "Alex");
+		}
+	}
+
+	#[test]
+	fn spotify_owned_playlists_use_the_known_display_name() {
+		for name in [None, Some("spotify"), Some("Spotify")] {
+			let playlist: Playlist =
+				serde_json::from_value(serde_json::json!({ "id": "dj", "owner": { "id": "spotify", "display_name": name } })).unwrap();
+			assert_eq!(playlist.owner_name(), "Spotify");
 		}
 	}
 }

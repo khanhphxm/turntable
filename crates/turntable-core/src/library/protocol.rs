@@ -1,4 +1,6 @@
-//! Requests to the Web API worker and the responses it delivers to the application.
+//! Requests to the authenticated library worker and responses delivered to the app.
+//! Playlist edits prefer Playlist4 on the playback Session; visibility changes
+//! and edits without that Session use the Web API.
 
 use std::{collections::HashMap, sync::Arc};
 

@@ -109,6 +109,7 @@ async fn post(session: &Session, endpoint: &str, revision: &[u8], ops: Vec<Op>) 
 	let body = changes(&session.username(), revision, ops);
 	#[cfg(test)]
 	REQUESTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+	// Sync/resync flags describe the returned view, not whether the write applied.
 	session.spclient().request_with_protobuf(&Method::POST, endpoint, None, &body).await?;
 	Ok(())
 }
@@ -121,7 +122,7 @@ async fn root(session: &Session, offset: u32, length: u32) -> Result<SelectedLis
 }
 
 fn position(position: u32) -> spotify::Result<i32> {
-	i32::try_from(position).map_err(|_| spotify::Error::Parse("Playlist row is out of range".into()))
+	i32::try_from(position).map_err(|error| spotify::Error::Parse(format!("Playlist row is out of range: {error}")))
 }
 
 impl Reader {

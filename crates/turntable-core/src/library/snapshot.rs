@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use super::{Home, Listing, Response, Route, Tile};
 use crate::{
 	app::config,
-	spotify::{PlayContext, Playlist, User, id_of},
+	spotify::{PlayContext, Playlist, Track, User, id_of},
 };
 
 const VERSION: u32 = 1;
@@ -30,6 +30,9 @@ struct Snapshot {
 	me:        User,
 	playlists: Vec<Playlist>,
 	home:      Option<Home>,
+	/// Independent of Home's short TTL: private top-content reads may use the Web API daily.
+	#[serde(default)]
+	top:       TopShelves,
 	/// Least recently opened first; only playlists, albums and Liked Songs.
 	listings:  Vec<SavedListing>,
 }
@@ -38,6 +41,22 @@ struct Snapshot {
 struct SavedListing {
 	route:   Route,
 	listing: Listing,
+}
+
+/// Top artists/tracks change slowly. Persist attempts as well as successful results, so
+/// restarting after a rate limit or an outage cannot issue the same reads again that day.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub(super) struct TopShelves {
+	pub(super) checked_at: Option<u64>,
+	pub(super) artists:    Option<Vec<Tile>>,
+	pub(super) tracks:     Option<Vec<Track>>,
+}
+
+impl TopShelves {
+	pub(super) fn fresh(&self, now: u64) -> bool {
+		// Clock rollback must not permit another attempt inside the same 24-hour window.
+		self.checked_at.is_some_and(|at| now.saturating_sub(at) < 24 * 60 * 60)
+	}
 }
 
 pub(super) struct Store {
@@ -73,8 +92,14 @@ impl Store {
 		if bytes.len() > MAX_BYTES {
 			return None;
 		}
-		let snapshot: Snapshot = serde_json::from_slice(&bytes).ok()?;
-		(snapshot.version == VERSION && snapshot.me.id == user_id && snapshot.listings.len() <= LISTINGS_KEPT).then_some(snapshot)
+		let mut snapshot: Snapshot = serde_json::from_slice(&bytes).ok()?;
+		if snapshot.version != VERSION || snapshot.me.id != user_id || snapshot.listings.len() > LISTINGS_KEPT {
+			return None;
+		}
+		for playlist in &mut snapshot.playlists {
+			playlist.normalize(&snapshot.me.id, snapshot.me.display_name.as_deref());
+		}
+		Some(snapshot)
 	}
 
 	pub(super) fn connected(&self) -> Option<Response> {
@@ -84,6 +109,25 @@ impl Store {
 
 	pub(super) fn home(&self) -> Option<Home> {
 		self.data.as_ref()?.home.clone()
+	}
+
+	pub(super) fn top(&self, user: &str) -> TopShelves {
+		let Some(data) = self.data.as_ref().filter(|data| data.me.id == user) else { return TopShelves::default() };
+		if data.top.checked_at.is_none()
+			&& let Some(home) = &data.home
+		{
+			// Snapshots from before the daily cache still have useful shelf contents.
+			return TopShelves { artists: home.top_artists.clone(), tracks: home.top_tracks.clone(), ..TopShelves::default() };
+		}
+		data.top.clone()
+	}
+
+	pub(super) fn record_top(&mut self, user: &str, top: TopShelves) {
+		if self.enabled
+			&& let Some(data) = self.data.as_mut().filter(|data| data.me.id == user)
+		{
+			data.top = top;
+		}
 	}
 
 	/// Leaves an unknown recent tile in place while its metadata is being revalidated.
@@ -130,6 +174,7 @@ impl Store {
 						playlists: playlists.clone(),
 						home:      None,
 						listings:  Vec::new(),
+						top:       TopShelves::default(),
 					});
 				}
 			},
@@ -182,6 +227,17 @@ impl Store {
 			}
 		}
 		config::write_private(&path, &bytes)
+	}
+
+	/// A successful unfollow must survive even when the following refresh fails.
+	/// Remove only this playlist's library entry and saved page; keep the account,
+	/// unrelated playlists and other cached pages intact.
+	pub(super) fn remove_playlist(&mut self, id: &str) {
+		if let Some(data) = &mut self.data {
+			data.playlists.retain(|playlist| playlist.id != id);
+			data.listings.retain(|saved| !matches!(&saved.route, Route::Playlist(known) if known == id));
+		}
+		let _ = self.save();
 	}
 
 	pub(super) fn forget(&mut self, route: &Route) {
@@ -392,6 +448,82 @@ mod tests {
 		empty.navigate(Route::Home);
 		empty.apply(Response::Error { route: None, message: "simulated offline".into() });
 		assert!(empty.home.loaded, "even an uncached Home must stop spinning");
+		fs::remove_dir_all(dir).unwrap();
+	}
+
+	#[test]
+	fn daily_top_cache_survives_restarts_and_is_account_scoped() {
+		let dir = scratch("daily-top");
+		let mut store = Store::new(&dir);
+		connect(&mut store, "alex");
+		store.record_top("alex", TopShelves {
+			checked_at: Some(100_000),
+			artists:    Some(vec![Tile::liked()]),
+			tracks:     Some(Vec::new()),
+		});
+		store.save().unwrap();
+		let mut restored = Store::new(&dir);
+		restored.load(Some("alex"));
+		let top = restored.top("alex");
+		assert!(top.fresh(100_000 + 24 * 60 * 60 - 1));
+		assert!(!top.fresh(100_000 + 24 * 60 * 60));
+		assert!(top.fresh(99_999), "clock rollback does not cause another API attempt");
+		assert_eq!(top.artists.unwrap(), [Tile::liked()]);
+		assert_eq!(top.tracks, Some(Vec::new()));
+		assert!(restored.top("bo").checked_at.is_none());
+		restored.record_top("bo", TopShelves { checked_at: Some(200_000), ..TopShelves::default() });
+		assert_eq!(restored.top("alex").checked_at, Some(100_000));
+		restored.clear();
+		assert!(restored.top("alex").checked_at.is_none());
+		fs::remove_dir_all(dir).unwrap_or_else(|error| assert_eq!(error.kind(), io::ErrorKind::NotFound));
+	}
+
+	#[test]
+	fn playlist_removal_persists_before_refresh_without_touching_other_entries() {
+		let dir = scratch("remove-playlist");
+		let mut store = Store::new(&dir);
+		connect(&mut store, "alex");
+		let scratch: Playlist = serde_json::from_value(serde_json::json!({
+			"id": "scratch", "name": "turntable test", "owner": { "id": "alex" }
+		}))
+		.unwrap();
+		store.record(&Response::Created(scratch));
+		for id in ["p", "scratch"] {
+			store.record(&Response::Listing {
+				route:   Route::Playlist(id.into()),
+				offset:  0,
+				listing: Listing { title: id.into(), ..Listing::default() },
+			});
+		}
+		store.save().unwrap();
+		store.remove_playlist("scratch");
+		let mut restored = Store::new(&dir);
+		restored.load(Some("alex"));
+		let Response::Connected { me, playlists } = restored.connected().unwrap() else { panic!() };
+		assert_eq!(me.id, "alex");
+		assert_eq!(playlists.len(), 1);
+		assert_eq!(playlists[0].id, "p");
+		assert!(restored.listing(&Route::Playlist("scratch".into())).is_none());
+		assert_eq!(restored.listing(&Route::Playlist("p".into())).unwrap().title, "p");
+		fs::remove_dir_all(dir).unwrap();
+	}
+
+	#[test]
+	fn cached_spotify_playlist_owner_has_the_known_display_name() {
+		let dir = scratch("spotify-owner");
+		let mut store = Store::new(&dir);
+		connect(&mut store, "alex");
+		let spotify: Playlist = serde_json::from_value(serde_json::json!({
+			"id": "top", "name": "Your All-Time Top Songs", "owner": { "id": "spotify", "display_name": null }
+		}))
+		.unwrap();
+		store.record(&Response::Created(spotify));
+		store.save().unwrap();
+		let mut restored = Store::new(&dir);
+		restored.load(Some("alex"));
+		let Response::Connected { playlists, .. } = restored.connected().unwrap() else { panic!() };
+		assert_eq!(playlists[0].owner.display_name.as_deref(), Some("Spotify"));
+		assert_eq!(super::super::Entry::Playlist(&playlists[0]).sub(), "Playlist • Spotify");
 		fs::remove_dir_all(dir).unwrap();
 	}
 }

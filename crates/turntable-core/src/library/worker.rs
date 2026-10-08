@@ -174,6 +174,7 @@ impl Session {
 
 	fn attach(&mut self, player: Option<Reader>, deliver: &dyn Fn(Response)) {
 		self.player = player;
+		self.home = None;
 		self.pages.clear();
 		self.popular.clear();
 		if self.player.is_some()
@@ -575,6 +576,15 @@ fn set_followed(s: &mut Session, uri: &str, follow: bool) -> spotify::Result<Res
 		s.client.save(&[uri])?;
 	} else {
 		s.client.unsave(&[uri])?;
+	}
+	if !follow && uri.starts_with("spotify:playlist:") {
+		let id = id_of(uri);
+		s.playlists.retain(|playlist| playlist.id != id);
+		let route = Route::Playlist(id.to_owned());
+		s.pages.remove(&route);
+		if let Some(player) = &mut s.player { player.forget(&route); }
+		s.snapshots.lock().unwrap_or_else(PoisonError::into_inner).remove_playlist(id);
+		return Ok(Response::Playlists(s.playlists.clone()));
 	}
 	s.pages.clear();
 	if let Some(player) = &mut s.player {

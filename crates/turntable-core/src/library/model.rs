@@ -1,4 +1,4 @@
-//! Routes, library entries and page data shared by the application, views and Web API worker.
+//! Routes, entries and page data shared by the app, views and authenticated library worker.
 
 use serde::{Deserialize, Deserializer, Serialize, de};
 
