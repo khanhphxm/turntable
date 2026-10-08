@@ -1,13 +1,14 @@
-//! Audio output: decoded PCM -> ring buffer -> 10-band EQ -> output stage -> output device.
+//! Audio output: decoded PCM -> crossfade -> ring -> 10-band EQ -> output stage -> device.
 //!
-//! PCM is interleaved f32, 44.1 kHz, stereo. The decoder's thread pushes it into a
-//! lock-free ring ([`PcmWriter`]); the platform render thread drains the ring and runs
-//! the EQ, then the output stage (mono, volume normalization with a true-peak limiter,
-//! balance). Rendering never allocates or locks. macOS plays through CoreAudio and
-//! follows the system default unless the user picks a device. Linux writes raw PCM to
+//! PCM is interleaved f32, 44.1 kHz, stereo. The decoder's thread mixes natural
+//! transitions and pushes into a lock-free ring ([`PcmWriter`]); the platform
+//! render thread runs the EQ, then the output stage (mono, volume normalization
+//! with a true-peak limiter, balance). Rendering never allocates or locks.
+//! macOS plays through CoreAudio and follows the system default unless a device is picked. Linux writes raw PCM to
 //! `pw-cat`, `pacat` or `aplay`; Windows uses shared-mode WASAPI. Both use the system
 //! default output. Every backend stops when idle.
 
+mod crossfade;
 mod eq;
 mod leveler;
 #[cfg_attr(target_os = "macos", path = "coreaudio.rs")]
@@ -31,6 +32,7 @@ use std::{
 	time::Duration,
 };
 
+pub(crate) use crossfade::Crossfade;
 pub use eq::{BANDS_HZ, EqSettings, PRESETS};
 use eq::{Equalizer, Mailbox};
 use ring::Ring;
@@ -110,6 +112,8 @@ impl StageShared {
 struct Shared {
 	ring:       Ring,
 	mailbox:    Mailbox,
+	/// Natural-transition overlap in seconds, read by the decoder (not the callback).
+	crossfade:  AtomicU8,
 	stop:       AtomicBool,
 	ended:      AtomicBool,
 	#[cfg(test)]
@@ -146,6 +150,7 @@ impl Shared {
 		Self {
 			ring:                   Ring::new(),
 			mailbox:                Mailbox::new(),
+			crossfade:              AtomicU8::new(0),
 			stop:                   AtomicBool::new(false),
 			ended:                  AtomicBool::new(false),
 			#[cfg(test)]
@@ -175,6 +180,16 @@ pub fn channel() -> (PcmWriter, Feed) {
 }
 
 impl PcmWriter {
+	/// The currently requested natural-transition overlap, in seconds.
+	pub(crate) fn crossfade(&self) -> u8 {
+		self.0.crossfade.load(Ordering::Relaxed)
+	}
+
+	/// Drops queued old audio at the next render callback without discarding new PCM.
+	pub(crate) fn clear(&self) {
+		self.0.ring.discard_buffered();
+	}
+
 	/// Queues `samples` (whole stereo frames), blocking while the buffer is full: the output's
 	/// pace is the decoder's. Returns false once the player is gone (the samples are dropped).
 	pub fn write(&self, mut samples: &[f32]) -> bool {
@@ -257,6 +272,11 @@ impl Player {
 		st.mono.store(params.mono, Ordering::Relaxed);
 		st.balance.store(params.balance.to_bits(), Ordering::Relaxed);
 		st.volume_db.store(params.volume_db.to_bits(), Ordering::Relaxed);
+	}
+
+	/// Sets the overlap for the next natural transition. In-flight fades finish normally.
+	pub fn set_crossfade(&self, seconds: u8) {
+		self.shared.crossfade.store(seconds.min(12), Ordering::Relaxed);
 	}
 
 	/// Tells the stage the player's volume (0 to 100), so normalization leaves the knob alone.

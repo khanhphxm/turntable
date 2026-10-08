@@ -17,6 +17,8 @@ pub const CACHE_SIZES: [u32; 6] = [100, 250, 500, 1024, 2048, 0];
 pub const DEFAULT_VOLUME: u8 = 50;
 /// Balance steps from the middle to either side.
 pub const BALANCE_STEPS: i8 = 10;
+/// Longest overlap between naturally advancing songs, in seconds (0 disables it).
+pub const MAX_CROSSFADE: u8 = 12;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -60,14 +62,16 @@ pub struct Prefs {
 #[serde(default)]
 pub struct Playback {
 	/// Play recommended songs when what was chosen runs out; off pauses there instead.
-	pub autoplay: bool,
+	pub autoplay:  bool,
 	/// Songs marked explicit play; off skips them.
-	pub explicit: bool,
+	pub explicit:  bool,
+	/// Equal-power overlap in seconds; ordered adjacent album songs remain gapless.
+	pub crossfade: u8,
 }
 
 impl Default for Playback {
 	fn default() -> Self {
-		Self { autoplay: true, explicit: true }
+		Self { autoplay: true, explicit: true, crossfade: 0 }
 	}
 }
 
@@ -146,6 +150,7 @@ impl Prefs {
 	/// Brings hand-edited or newer settings files into the app's supported ranges.
 	pub fn sanitized(mut self) -> Self {
 		self.audio.balance = self.audio.balance.clamp(-BALANCE_STEPS, BALANCE_STEPS);
+		self.playback.crossfade = self.playback.crossfade.min(MAX_CROSSFADE);
 		self.device.volume = self.device.volume.min(100);
 		self.device.cache_mb = sanitize_cache(self.device.cache_mb);
 		self.device.name = sanitize_name(&self.device.name);
@@ -180,6 +185,8 @@ pub fn cache_label(mb: u32) -> String {
 pub enum Pref {
 	Autoplay(bool),
 	Explicit(bool),
+	/// Seconds of overlap on automatic transitions, clamped to `0..=MAX_CROSSFADE`.
+	Crossfade(u8),
 	Normalize(Normalize),
 	Mono(bool),
 	/// Steps from the middle, `-BALANCE_STEPS` to `BALANCE_STEPS`.
@@ -203,6 +210,7 @@ impl Prefs {
 		match pref {
 			Pref::Autoplay(on) => self.playback.autoplay = *on,
 			Pref::Explicit(on) => self.playback.explicit = *on,
+			Pref::Crossfade(seconds) => self.playback.crossfade = (*seconds).min(MAX_CROSSFADE),
 			Pref::Normalize(level) => self.audio.normalize = *level,
 			Pref::Mono(on) => self.audio.mono = *on,
 			Pref::Balance(steps) => self.audio.balance = (*steps).clamp(-BALANCE_STEPS, BALANCE_STEPS),
@@ -341,9 +349,11 @@ mod tests {
 	fn each_change_lands_in_its_own_preference_and_stays_in_range() {
 		let mut p = Prefs::default();
 		let out = Output { uid: "u".into(), name: "n".into() };
-		let checks: [(Pref, Check); 16] = [
+		let checks: [(Pref, Check); 18] = [
 			(Pref::Autoplay(false), |p| !p.playback.autoplay),
 			(Pref::Explicit(false), |p| !p.playback.explicit),
+			(Pref::Crossfade(255), |p| p.playback.crossfade == MAX_CROSSFADE),
+			(Pref::Crossfade(0), |p| p.playback.crossfade == 0),
 			(Pref::Normalize(Normalize::Quiet), |p| p.audio.normalize == Normalize::Quiet),
 			(Pref::Mono(true), |p| p.audio.mono),
 			(Pref::Balance(99), |p| p.audio.balance == BALANCE_STEPS),
@@ -367,6 +377,21 @@ mod tests {
 		let before = p.clone();
 		assert!(!p.set(&Pref::NowPlayingView(false)));
 		assert_eq!(p, before);
+	}
+
+	#[test]
+	fn crossfade_survives_restart_and_old_settings_keep_it_off() {
+		let dir = scratch("crossfade");
+		let mut settings = Settings::default();
+		assert_eq!(settings.prefs.playback.crossfade, 0);
+		settings.prefs.set(&Pref::Crossfade(6));
+		settings.save(&dir).unwrap();
+		assert_eq!(Settings::load(&dir).prefs.playback.crossfade, 6);
+		fs::write(dir.join("settings.json"), br#"{"playback":{"crossfade":255}}"#).unwrap();
+		assert_eq!(Settings::load(&dir).prefs.playback.crossfade, MAX_CROSSFADE);
+		fs::write(dir.join("settings.json"), br#"{"playback":{"autoplay":false}}"#).unwrap();
+		assert_eq!(Settings::load(&dir).prefs.playback.crossfade, 0);
+		fs::remove_dir_all(dir).unwrap();
 	}
 
 	#[test]

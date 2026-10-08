@@ -76,6 +76,8 @@ struct PlayerInternal {
 
     state: PlayerState,
     preload: PlayerPreload,
+    // turntable: an early end event has reserved this next track for an overlap.
+    pending_crossfade: Option<(SpotifyUri, u32)>,
     sink: Box<dyn Sink>,
     sink_status: SinkStatus,
     sink_event_callback: Option<SinkEventCallback>,
@@ -93,6 +95,8 @@ struct PlayerInternal {
     player_id: usize,
     play_request_id_generator: SeqGenerator<u64>,
     last_progress_update: Instant,
+    // turntable: stream_position_ms is the packet's start; overlap begins after it.
+    last_packet_duration_ms: u32,
 
     local_file_lookup: Arc<LocalFileLookup>,
 }
@@ -104,6 +108,7 @@ enum PlayerCommand {
         track_id: SpotifyUri,
         play: bool,
         position_ms: u32,
+        automatic: bool,
     },
     Preload {
         track_id: SpotifyUri,
@@ -191,6 +196,12 @@ pub enum PlayerEvent {
         play_request_id: u64,
         track_id: SpotifyUri,
     },
+    // turntable: advance Connect at the beginning, not the end, of an overlap.
+    Crossfade {
+        play_request_id: u64,
+        track_id: SpotifyUri,
+        next_track_id: SpotifyUri,
+    },
     // The player was unable to load the requested track.
     Unavailable {
         play_request_id: u64,
@@ -267,6 +278,9 @@ impl PlayerEvent {
                 play_request_id, ..
             }
             | EndOfTrack {
+                play_request_id, ..
+            }
+            | Crossfade {
                 play_request_id, ..
             }
             | Paused {
@@ -491,6 +505,7 @@ impl Player {
 
                 state: PlayerState::Stopped,
                 preload: PlayerPreload::None,
+                pending_crossfade: None,
                 sink: sink_builder(),
                 sink_status: SinkStatus::Closed,
                 sink_event_callback: None,
@@ -508,6 +523,7 @@ impl Player {
                 player_id,
                 play_request_id_generator: SeqGenerator::new(0),
                 last_progress_update: Instant::now(),
+                last_packet_duration_ms: 0,
 
                 local_file_lookup: Arc::new(local_file_lookup),
             };
@@ -552,6 +568,17 @@ impl Player {
             track_id,
             play: start_playing,
             position_ms,
+            automatic: false,
+        });
+    }
+
+    /// Loads the automatically selected successor without cutting the audio ring.
+    pub fn load_next(&self, track_id: SpotifyUri, start_playing: bool, position_ms: u32) {
+        self.command(PlayerCommand::Load {
+            track_id,
+            play: start_playing,
+            position_ms,
+            automatic: true,
         });
     }
 
@@ -590,7 +617,7 @@ impl Player {
         while let Some(event) = channel.recv().await {
             if matches!(
                 event,
-                PlayerEvent::EndOfTrack { .. } | PlayerEvent::Stopped { .. }
+                PlayerEvent::EndOfTrack { .. } | PlayerEvent::Crossfade { .. } | PlayerEvent::Stopped { .. }
             ) {
                 return;
             }
@@ -676,6 +703,22 @@ struct PlayerLoadedTrackData {
     duration_ms: u32,
     stream_position_ms: u32,
     is_explicit: bool,
+}
+
+/// turntable: the outgoing decoder and its download lifetime, handed to an opt-in sink.
+/// The regular player still decodes/attenuates the incoming track. Crossfade hooks
+/// are used only with decoder normalization disabled; the host's post-mix stage
+/// remains responsible for leveling and limiting both tracks together.
+pub struct CrossfadeSource {
+    track: PlayerLoadedTrackData,
+}
+
+impl CrossfadeSource {
+    pub fn next_packet(
+        &mut self,
+    ) -> crate::decoder::DecoderResult<Option<(AudioPacketPosition, AudioPacket)>> {
+        self.track.decoder.next_packet()
+    }
 }
 
 enum PlayerPreload {
@@ -1427,6 +1470,8 @@ impl Future for PlayerInternal {
                 }
             }
 
+            self.maybe_crossfade();
+
             if self.state.is_playing() {
                 self.ensure_sink_running();
 
@@ -1595,6 +1640,49 @@ impl Future for PlayerInternal {
 }
 
 impl PlayerInternal {
+    // turntable: reuse the already-preloaded decoder. Moving the outgoing decoder
+    // to the sink keeps both timelines advancing at output pace, with no tail
+    // read-ahead buffer, added latency or work on the real-time render callback.
+    fn maybe_crossfade(&mut self) {
+        if self.pending_crossfade.is_some()
+            || !self.config.gapless
+            || self.config.passthrough
+            || self.config.normalisation
+        {
+            return;
+        }
+        let (
+            PlayerState::Playing {
+                track_id,
+                play_request_id,
+                duration_ms,
+                stream_position_ms,
+                stream_loader_controller,
+                ..
+            },
+            PlayerPreload::Ready { track_id: next_track_id, loaded_track },
+        ) = (&self.state, &self.preload) else {
+            return;
+        };
+        let overlap = self.sink.crossfade_duration(track_id, next_track_id)
+            .min(*duration_ms)
+            .min(loaded_track.duration_ms);
+        let remaining = duration_ms.saturating_sub(stream_position_ms.saturating_add(self.last_packet_duration_ms));
+        if overlap == 0 || remaining > overlap || remaining == 0
+            || !stream_loader_controller.range_to_end_available()
+        {
+            return;
+        }
+        let event = PlayerEvent::Crossfade {
+            track_id: track_id.clone(),
+            play_request_id: *play_request_id,
+            next_track_id: next_track_id.clone(),
+        };
+        self.pending_crossfade = Some((next_track_id.clone(), remaining));
+        self.state.playing_to_end_of_track();
+        self.send_event(event);
+    }
+
     fn ensure_sink_running(&mut self) {
         if self.sink_status != SinkStatus::Running {
             trace!("== Starting sink ==");
@@ -1750,6 +1838,8 @@ impl PlayerInternal {
             Some((_, mut packet)) => {
                 if !packet.is_empty() {
                     if let AudioPacket::Samples(ref mut data) = packet {
+                        self.last_packet_duration_ms =
+                            (data.len() as u64 * 1000 / u64::from(SAMPLES_PER_SECOND)) as u32;
                         // Get the volume for the packet. In the case of hardware volume control
                         // this will always be 1.0 (no change).
                         let volume = self.volume_getter.attenuation_factor();
@@ -1881,6 +1971,7 @@ impl PlayerInternal {
         self.send_event(PlayerEvent::TrackChanged { audio_item });
 
         let position_ms = loaded_track.stream_position_ms;
+        self.last_packet_duration_ms = 0;
 
         let mut config = self.config.clone();
         if config.normalisation_type == NormalisationType::Auto {
@@ -2206,6 +2297,12 @@ impl PlayerInternal {
     }
 
     fn handle_command_seek(&mut self, position_ms: u32) -> PlayerResult {
+        self.last_packet_duration_ms = 0;
+        // turntable: a seek can cancel the early overlap event before Connect
+        // has loaded its successor. Reuse the outgoing decoder at the new seek.
+        if let PlayerState::EndOfTrack { track_id, play_request_id, .. } = &self.state {
+            return self.handle_command_load(track_id.clone(), Some(*play_request_id), true, position_ms);
+        }
         // When we are still loading, the user may immediately ask to
         // seek to another position yet the decoder won't be ready for
         // that. In this case just restart the loading process but
@@ -2278,17 +2375,42 @@ impl PlayerInternal {
                 track_id,
                 play,
                 position_ms,
-            } => self.handle_command_load(track_id, None, play, position_ms)?,
+                automatic,
+            } => {
+                if automatic {
+                    if let Some((next, duration_ms)) = self.pending_crossfade.take() {
+                        if next == track_id && matches!(self.state, PlayerState::EndOfTrack { .. }) {
+                            if let PlayerState::EndOfTrack { loaded_track, .. } =
+                                mem::replace(&mut self.state, PlayerState::Stopped)
+                            {
+                                self.sink.begin_crossfade(CrossfadeSource { track: loaded_track }, duration_ms);
+                            }
+                        }
+                    }
+                } else {
+                    self.pending_crossfade = None;
+                    self.sink.reset();
+                }
+                self.handle_command_load(track_id, None, play, position_ms)?;
+            }
 
             PlayerCommand::Preload { track_id } => self.handle_command_preload(track_id),
 
-            PlayerCommand::Seek(position_ms) => self.handle_command_seek(position_ms)?,
+            PlayerCommand::Seek(position_ms) => {
+                self.pending_crossfade = None;
+                self.sink.reset();
+                self.handle_command_seek(position_ms)?;
+            }
 
             PlayerCommand::Play => self.handle_play(),
 
             PlayerCommand::Pause => self.handle_pause(),
 
-            PlayerCommand::Stop => self.handle_player_stop(),
+            PlayerCommand::Stop => {
+                self.pending_crossfade = None;
+                self.sink.reset();
+                self.handle_player_stop();
+            }
 
             PlayerCommand::SetSession(session) => self.session = session,
 

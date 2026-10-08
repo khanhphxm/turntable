@@ -5,12 +5,17 @@
 //! player does comes back as the [`model`] events the UI already speaks: librespot's player
 //! events, plus the connect state (context, options, upcoming tracks) the vendored
 //! `librespot-connect` sends after every change.
+//!
+//! Natural playback overlaps use [`transition`]'s album-order policy and the
+//! core audio mixer; manual transport commands cut immediately. Gapless PCM,
+//! overlap PCM and ordinary PCM all pass through the same EQ/leveler/output.
 
 mod connect;
 mod load;
 mod model;
 #[cfg(test)]
 mod session_tests;
+mod transition;
 
 use std::{
 	collections::HashMap,
@@ -35,10 +40,7 @@ use librespot_core::{
 };
 use librespot_metadata::{Album, Artist, Episode, Metadata, Playlist, Track, image::Images};
 use librespot_playback::{
-	audio_backend::{Sink, SinkError, SinkResult},
 	config::{Bitrate, PlayerConfig},
-	convert::Converter,
-	decoder::AudioPacket,
 	mixer::{Mixer, MixerConfig, softmixer::SoftMixer},
 	player::{Player as Decoder, PlayerEvent},
 };
@@ -47,6 +49,7 @@ use tokio::{
 	runtime::Runtime,
 	sync::mpsc::{self, UnboundedReceiver, UnboundedSender},
 };
+use transition::{RingSink, Transitions};
 
 use crate::audio::PcmWriter;
 
@@ -98,15 +101,16 @@ const NETWORK_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct Engine {
 	/// Taken only by `Drop`, to shut it down by value.
-	runtime: Option<Runtime>,
-	session: Session,
-	spirc:   Arc<Spirc>,
-	streams: Option<Streams>,
+	runtime:     Option<Runtime>,
+	session:     Session,
+	spirc:       Arc<Spirc>,
+	streams:     Option<Streams>,
 	/// Spirc's task has ended (signed out elsewhere, the session dropped).
-	done:    Arc<AtomicBool>,
-	stop:    tokio::sync::watch::Sender<bool>,
-	name:    String,
-	volume:  u8,
+	done:        Arc<AtomicBool>,
+	stop:        tokio::sync::watch::Sender<bool>,
+	name:        String,
+	volume:      u8,
+	transitions: Arc<Transitions>,
 }
 
 /// A connection for library I/O on the player's authenticated session and runtime.
@@ -183,8 +187,13 @@ impl Engine {
 		let _context = runtime.enter();
 		let session = Session::new(session_config, Some(cache));
 		let mixer: Arc<dyn Mixer> = Arc::new(SoftMixer::open(MixerConfig::default()).map_err(io::Error::other)?);
+		let transitions = Arc::new(Transitions::default());
+		let sink_transitions = transitions.clone();
+		let output_volume = mixer.get_soft_volume();
 		let player_config = PlayerConfig { bitrate: Bitrate::Bitrate320, ..PlayerConfig::default() };
-		let decoder = Decoder::new(player_config, session.clone(), mixer.get_soft_volume(), move || Box::new(RingSink::new(writer)));
+		let decoder = Decoder::new(player_config, session.clone(), mixer.get_soft_volume(), move || {
+			Box::new(RingSink::new(writer, sink_transitions, output_volume))
+		});
 		let player = decoder.get_player_event_channel();
 		let (snap_tx, snapshots) = mpsc::unbounded_channel();
 		let connect = ConnectConfig {
@@ -214,6 +223,7 @@ impl Engine {
 			stop,
 			name: config.device_name.clone(),
 			volume: config.volume,
+			transitions,
 		})
 	}
 
@@ -233,6 +243,7 @@ impl Engine {
 			entities:      HashMap::new(),
 			state:         Tracker::default(),
 			pending_track: None,
+			transitions:   self.transitions.clone(),
 		};
 		let (name, volume) = (self.name.clone(), self.volume);
 		self.runtime.as_ref()?.spawn(forward.run(streams, requests, name, volume));
@@ -446,6 +457,7 @@ struct Forward {
 	state:         Tracker,
 	/// A track change seen in the last player event, to look up before telling the UI.
 	pending_track: Option<String>,
+	transitions:   Arc<Transitions>,
 }
 
 impl Forward {
@@ -569,6 +581,7 @@ impl Forward {
 				self.dispatch(cmd);
 			}
 		}
+		self.transitions.context(&snap.context_uri, snap.shuffle);
 		let options = (snap.shuffle, snap.repeat_context, snap.repeat_track);
 		if options != self.state.options {
 			self.state.options = options;
@@ -692,7 +705,9 @@ impl Forward {
 
 	/// What plays, by name: a playlist, an album, an artist, Liked Songs.
 	async fn context(&mut self, uri: &str) -> Entity {
-		if let Some(e) = self.entities.get(uri) {
+		if !uri.starts_with("spotify:album:")
+			&& let Some(e) = self.entities.get(uri)
+		{
 			return e.clone();
 		}
 		let name = if uri.ends_with(":collection") {
@@ -700,7 +715,10 @@ impl Forward {
 		} else {
 			match SpotifyUri::from_uri(uri) {
 				Ok(id @ SpotifyUri::Playlist { .. }) => Playlist::get(&self.session, &id).await.ok().map(|p| p.name().to_owned()),
-				Ok(id @ SpotifyUri::Album { .. }) => Album::get(&self.session, &id).await.ok().map(|a| a.name),
+				Ok(id @ SpotifyUri::Album { .. }) => Album::get(&self.session, &id).await.ok().map(|a| {
+					self.transitions.album(&a);
+					a.name
+				}),
 				Ok(id @ SpotifyUri::Artist { .. }) => Artist::get(&self.session, &id).await.ok().map(|a| a.name),
 				_ => None,
 			}
@@ -720,30 +738,4 @@ fn named(uri: String, name: String) -> Entity {
 
 fn uri_of(id: &SpotifyUri) -> String {
 	id.to_uri().unwrap_or_default()
-}
-
-// ---------------------------------------------------------------------- sink
-
-/// librespot's output: samples into the audio path's ring, blocking while it is full.
-struct RingSink {
-	writer:  PcmWriter,
-	samples: Vec<f32>,
-}
-
-impl RingSink {
-	fn new(writer: PcmWriter) -> Self {
-		Self { writer, samples: Vec::new() }
-	}
-}
-
-impl Sink for RingSink {
-	fn write(&mut self, packet: AudioPacket, _converter: &mut Converter) -> SinkResult<()> {
-		let AudioPacket::Samples(samples) = packet else {
-			return Err(SinkError::InvalidParams("raw packets (passthrough) are not supported".into()));
-		};
-		self.samples.clear();
-		#[expect(clippy::cast_possible_truncation, reason = "f64 samples in [-1, 1] to f32")]
-		self.samples.extend(samples.iter().map(|s| *s as f32));
-		if self.writer.write(&self.samples) { Ok(()) } else { Err(SinkError::OnWrite("the audio output is gone".into())) }
-	}
 }

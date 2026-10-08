@@ -97,7 +97,8 @@ pub struct Controller {
 	library_retry_at:     Option<Instant>,
 	playback_interrupted: bool,
 	last_tick:            (Instant, SystemTime),
-	asked_artists:        std::collections::HashSet<String>,
+	/// Deduplicate the current artist lookup without retaining every artist played.
+	asked_artist:         Option<String>,
 	discard_start:        bool,
 	/// Last presented lyrics: a changed line invalidates the host's view.
 	followed:             Option<(String, Option<usize>)>,
@@ -181,7 +182,7 @@ impl Controller {
 			library_retry_at: None,
 			playback_interrupted: false,
 			last_tick: (Instant::now(), SystemTime::now()),
-			asked_artists: std::collections::HashSet::new(),
+			asked_artist: None,
 			discard_start: false,
 			followed: None,
 			last_item: String::new(),

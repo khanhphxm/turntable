@@ -105,7 +105,14 @@ impl Controller {
 				// An in-process engine has one event stream: restart it, not its client.
 				return self.check_engine();
 			},
-			AppEvent::Library(response) => return self.on_library_response(*response),
+			AppEvent::Library(response) => {
+				if let library::Response::Artist(artist) = response.as_ref()
+					&& self.asked_artist.as_deref() == Some(crate::spotify::id_of(&artist.uri))
+				{
+					self.asked_artist = None;
+				}
+				return self.on_library_response(*response);
+			},
 			AppEvent::Lyrics(response) => {
 				if let Err(e) = &response.lyrics {
 					debug_log(&format!("lyrics for {}: {e}", response.uri));
@@ -114,7 +121,7 @@ impl Controller {
 			},
 			AppEvent::Image { url, bytes, mime } => {
 				self.images.loaded(&url);
-				self.state.images.entry(url).or_insert_with(|| std::sync::Arc::new(crate::app::Cover { bytes, mime }));
+				self.state.cache_image(url, crate::app::Cover { bytes, mime });
 			},
 			AppEvent::ImageFailed(url) => self.images.failed(url),
 			AppEvent::Devices => {

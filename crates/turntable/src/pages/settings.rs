@@ -3,7 +3,7 @@
 
 use gpui_kit::{
 	Context, Div, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _,
-	Styled as _, component::switch::Switch, div, px,
+	Styled as _, component::switch::Switch, div, prelude::FluentBuilder as _, px,
 };
 use turntable_core::{
 	Msg,
@@ -98,6 +98,7 @@ impl Shell {
 				.child(
 					group("Playback")
 						.child(setting("Sleep timer", "Pause the music after a while", self.sleep_menu(cx)))
+						.child(self.crossfade_setting(cx))
 						.child(setting(
 							"Autoplay",
 							"Keep playing similar songs when your music ends",
@@ -222,5 +223,38 @@ impl Shell {
 			}
 			menu
 		})
+	}
+}
+
+impl Shell {
+	/// Spotify's "Crossfade songs": a switch, and while it's on the length beside a slider.
+	fn crossfade_setting(&self, cx: &mut Context<'_, Self>) -> Div {
+		let seconds = self.st().prefs.playback.crossfade;
+		let on = seconds > 0;
+		div()
+			.flex()
+			.flex_col()
+			.child(setting(
+				"Crossfade songs",
+				"Blend the end of one song into the next",
+				Switch::new("crossfade-on").checked(on).on_click(cx.listener(|this, on: &bool, _, cx| {
+					// Spotify's default length when switched on.
+					this.send(Msg::Pref(Pref::Crossfade(if *on { 5 } else { 0 })), cx);
+				})),
+			))
+			.when(on, |s| {
+				s.child(
+					div()
+						.flex()
+						.items_center()
+						.gap_3()
+						.pb_2()
+						.text_size(px(12.))
+						.text_color(theme::subdued())
+						.child("0 s")
+						.child(div().flex_1().child(self.crossfade.clone()))
+						.child(div().w(px(36.)).child(format!("{seconds} s"))),
+				)
+			})
 	}
 }

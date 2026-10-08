@@ -35,6 +35,7 @@ impl Controller {
 	fn push_stage(&self) {
 		let Some(audio) = &self.audio else { return };
 		let a = &self.state.prefs.audio;
+		audio.set_crossfade(self.state.prefs.playback.crossfade);
 		audio.set_stage(&crate::audio::StageParams {
 			normalize: a.normalize,
 			mono:      a.mono,

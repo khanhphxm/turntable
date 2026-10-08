@@ -462,10 +462,47 @@ fn encoded_covers_keep_identity_and_missing_lookups_are_deduplicated() {
 	assert!(state.image(Some("https://cover")).is_none());
 	assert_eq!(state.take_missing_images(), ["https://cover".to_owned()].into_iter().collect());
 	assert!(state.take_missing_images().is_empty());
-	let cover = Arc::new(Cover { bytes: vec![1, 2, 3], mime: "image/jpeg".into() });
-	state.images.insert("https://cover".into(), cover.clone());
+	state.cache_image("https://cover".into(), Cover { bytes: vec![1, 2, 3], mime: "image/jpeg".into() });
+	let cover = state.image(Some("https://cover")).unwrap().clone();
+	state.cache_image("https://cover".into(), Cover { bytes: vec![4, 5, 6], mime: "image/jpeg".into() });
 	assert!(Arc::ptr_eq(state.image(Some("https://cover")).unwrap(), &cover));
 	assert!(state.take_missing_images().is_empty());
+}
+
+#[test]
+fn encoded_covers_evict_oldest_by_bytes_and_count_and_can_reload() {
+	let mut state = State::default();
+	for index in 0..20 {
+		state.cache_image(format!("cover-{index}"), Cover { bytes: vec![0; 1024 * 1024], mime: "image/jpeg".into() });
+	}
+	assert_eq!(state.image_cache_usage(), (16, 16 * 1024 * 1024));
+	assert!(state.image(Some("cover-0")).is_none());
+	assert_eq!(state.take_missing_images(), ["cover-0".to_owned()].into_iter().collect());
+	state.cache_image("cover-0".into(), Cover { bytes: vec![1], mime: "image/jpeg".into() });
+	assert_eq!(state.image(Some("cover-0")).unwrap().bytes, [1]);
+	assert!(state.image_cache_usage().1 <= 16 * 1024 * 1024);
+	let mut state = State::default();
+	for index in 0..600 {
+		state.cache_image(format!("cover-{index}"), Cover { bytes: vec![0], mime: "image/jpeg".into() });
+	}
+	assert_eq!(state.image_cache_usage(), (512, 512));
+	assert!(state.image(Some("cover-87")).is_none());
+	assert!(state.image(Some("cover-88")).is_some());
+}
+
+#[test]
+fn recently_used_encoded_covers_keep_identity_under_cache_pressure() {
+	use std::sync::Arc;
+	let mut state = State::default();
+	state.cache_image("visible".into(), Cover { bytes: vec![1], mime: "image/jpeg".into() });
+	let visible = state.image(Some("visible")).unwrap().clone();
+	for index in 0..600 {
+		assert!(Arc::ptr_eq(state.image(Some("visible")).unwrap(), &visible));
+		state.cache_image(format!("cover-{index}"), Cover { bytes: vec![0], mime: "image/jpeg".into() });
+	}
+	assert_eq!(state.image_cache_usage(), (512, 512));
+	assert!(Arc::ptr_eq(state.image(Some("visible")).unwrap(), &visible));
+	assert!(state.image(Some("cover-0")).is_none());
 }
 
 fn owned_tracks(uris: &[&str]) -> Result<library::Response, library::added::IndexError> {

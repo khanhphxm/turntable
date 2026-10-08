@@ -1,6 +1,8 @@
 use crate::config::AudioFormat;
 use crate::convert::Converter;
 use crate::decoder::AudioPacket;
+use crate::core::SpotifyUri;
+use crate::player::CrossfadeSource;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -30,6 +32,13 @@ pub trait Sink {
     fn stop(&mut self) -> SinkResult<()> {
         Ok(())
     }
+    // turntable: opt-in overlap hooks. Ordinary backends keep upstream gapless behavior.
+    fn crossfade_duration(&self, _current: &SpotifyUri, _next: &SpotifyUri) -> u32 {
+        0
+    }
+    fn begin_crossfade(&mut self, _outgoing: CrossfadeSource, _duration_ms: u32) {}
+    // A user load, seek or stop is a discontinuity, never an automatic overlap.
+    fn reset(&mut self) {}
     fn write(&mut self, packet: AudioPacket, converter: &mut Converter) -> SinkResult<()>;
 }
 

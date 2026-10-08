@@ -7,21 +7,33 @@ const CAPACITY: usize = 1 << 14;
 const MASK: usize = CAPACITY - 1;
 
 pub struct Ring {
-	buf:  Box<[AtomicU32]>,
+	buf:     Box<[AtomicU32]>,
 	/// Total samples consumed (written by the consumer only).
-	head: AtomicUsize,
+	head:    AtomicUsize,
 	/// Total samples produced (written by the producer only).
-	tail: AtomicUsize,
+	tail:    AtomicUsize,
+	/// Producer's requested cut point; only the consumer advances `head`.
+	discard: AtomicUsize,
 }
 
 impl Ring {
 	pub fn new() -> Ring {
-		Ring { buf: (0..CAPACITY).map(|_| AtomicU32::new(0)).collect(), head: AtomicUsize::new(0), tail: AtomicUsize::new(0) }
+		Ring {
+			buf:     (0..CAPACITY).map(|_| AtomicU32::new(0)).collect(),
+			head:    AtomicUsize::new(0),
+			tail:    AtomicUsize::new(0),
+			discard: AtomicUsize::new(0),
+		}
 	}
 
 	/// Samples currently buffered.
 	pub fn len(&self) -> usize {
 		self.tail.load(Ordering::Acquire).wrapping_sub(self.head.load(Ordering::Acquire))
+	}
+
+	/// Producer: cuts only samples queued before this call. New samples survive the cut.
+	pub fn discard_buffered(&self) {
+		self.discard.store(self.tail.load(Ordering::Relaxed), Ordering::Release);
 	}
 
 	/// Producer: appends as many samples as fit and returns the count.
@@ -39,8 +51,14 @@ impl Ring {
 
 	/// Consumer: moves up to `dst.len()` samples out and returns the count.
 	pub fn pop(&self, dst: &mut [f32]) -> usize {
-		let head = self.head.load(Ordering::Relaxed);
-		let avail = self.tail.load(Ordering::Acquire).wrapping_sub(head);
+		let mut head = self.head.load(Ordering::Relaxed);
+		let tail = self.tail.load(Ordering::Acquire);
+		let discard = self.discard.load(Ordering::Acquire);
+		// A mark behind the consumer (including counter wrap) must never move it back.
+		if discard.wrapping_sub(head) <= tail.wrapping_sub(head) {
+			head = discard;
+		}
+		let avail = tail.wrapping_sub(head);
 		let n = dst.len().min(avail);
 		let slots = self.buf.iter().skip(head & MASK).chain(self.buf.iter());
 		for (d, slot) in dst.iter_mut().take(n).zip(slots) {
@@ -74,6 +92,20 @@ mod tests {
 		assert_eq!(rest[CAPACITY - 100 - 1], (CAPACITY - 1) as f32);
 		assert_eq!(rest[CAPACITY - 100], CAPACITY as f32);
 		assert_eq!(r.len(), 0);
+	}
+
+	#[test]
+	fn a_skip_discards_old_pcm_but_preserves_the_next_tracks_first_frame() {
+		let ring = Ring::new();
+		ring.push(&[0.5; 128]);
+		ring.discard_buffered();
+		ring.push(&[0.25; 4]);
+		let mut out = [0.0; 8];
+		assert_eq!(ring.pop(&mut out), 4);
+		assert_eq!(&out[..4], &[0.25; 4]);
+		ring.push(&[0.75; 4]);
+		assert_eq!(ring.pop(&mut out), 4, "an old cut mark cannot rewind the consumer");
+		assert_eq!(&out[..4], &[0.75; 4]);
 	}
 
 	#[test]

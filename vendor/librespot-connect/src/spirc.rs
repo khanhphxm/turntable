@@ -78,6 +78,9 @@ struct SpircTask {
     connect_established: bool,
 
     play_request_id: Option<u64>,
+    // turntable: reject an overlap queued before a user's discontinuity until
+    // the decoder acknowledges the new load/seek (player events are FIFO).
+    crossfade_cancelled: bool,
     play_status: SpircPlayStatus,
 
     connection_id_update: BoxedStreamResult<String>,
@@ -258,6 +261,7 @@ impl Spirc {
             connect_established: false,
 
             play_request_id: None,
+            crossfade_cancelled: false,
             play_status: SpircPlayStatus::Stopped,
 
             connection_id_update,
@@ -702,7 +706,7 @@ impl SpircTask {
             SpircCommand::PlayPause => self.handle_play_pause(),
             SpircCommand::Pause => self.handle_pause(),
             SpircCommand::Prev => self.handle_prev()?,
-            SpircCommand::Next => self.handle_next(None)?,
+            SpircCommand::Next => self.handle_next(None, false)?,
             SpircCommand::VolumeUp => self.handle_volume_up(),
             SpircCommand::VolumeDown => self.handle_volume_down(),
             SpircCommand::Shuffle(shuffle) => self.handle_shuffle(shuffle)?,
@@ -733,6 +737,7 @@ impl SpircTask {
         // update play_request_id
         if let PlayerEvent::PlayRequestIdChanged { play_request_id } = event {
             self.play_request_id = Some(play_request_id);
+            self.crossfade_cancelled = false;
             return Ok(());
         }
 
@@ -756,7 +761,17 @@ impl SpircTask {
                     .repeat_track()
                     .then(|| self.connect_state.current_track(|t| t.uri.clone()));
 
-                self.handle_next(next_track)?
+                self.handle_next(next_track, true)?
+            }
+            // turntable: lock in the preloaded successor at the overlap boundary.
+            PlayerEvent::Crossfade { track_id, next_track_id, .. } => {
+                // A manual skip may already have changed Connect's track before
+                // the decoder's new request-id event reaches this task.
+                if !self.crossfade_cancelled
+                    && self.connect_state.current_track(|t| &t.uri) == &track_id.to_uri()?
+                {
+                    self.handle_next(Some(next_track_id.to_uri()?), true)?;
+                }
             }
             PlayerEvent::Loading { .. } => match self.play_status {
                 SpircPlayStatus::LoadingPlay { position_ms } => {
@@ -775,6 +790,7 @@ impl SpircTask {
                 }
             },
             PlayerEvent::Seeked { position_ms, .. } => {
+                self.crossfade_cancelled = false;
                 trace!("==> Seeked");
                 self.connect_state
                     .update_position(position_ms, self.now_ms())
@@ -846,7 +862,7 @@ impl SpircTask {
             PlayerEvent::Unavailable { track_id, .. } => {
                 self.handle_unavailable(&track_id)?;
                 if self.connect_state.current_track(|t| &t.uri) == &track_id.to_uri()? {
-                    self.handle_next(None)?
+                    self.handle_next(None, false)?
                 }
             }
             _ => return Ok(()),
@@ -1100,10 +1116,10 @@ impl SpircTask {
                     self.handle_shuffle(shuffle)?;
                 }
             }
-            SkipNext(skip_next) => self.handle_next(skip_next.track.map(|t| t.uri))?,
+            SkipNext(skip_next) => self.handle_next(skip_next.track.map(|t| t.uri), false)?,
             SkipPrev(_) => self.handle_prev()?,
             Resume(_) if matches!(self.play_status, SpircPlayStatus::Stopped) => {
-                self.load_track(true, 0)?
+                self.load_track(true, 0, false)?
             }
             Resume(_) => self.handle_play(),
         }
@@ -1231,7 +1247,7 @@ impl SpircTask {
             }
         }
 
-        self.load_track(is_playing, position.try_into()?)
+        self.load_track(is_playing, position.try_into()?, false)
     }
 
     async fn handle_disconnect(&mut self) -> Result<(), Error> {
@@ -1251,6 +1267,7 @@ impl SpircTask {
     }
 
     fn handle_stop(&mut self) {
+        self.crossfade_cancelled = true;
         self.player.stop();
         self.connect_state.update_position(0, self.now_ms());
         self.connect_state.clear_next_tracks();
@@ -1384,7 +1401,7 @@ impl SpircTask {
         }
 
         if self.connect_state.current_track(MessageField::is_some) {
-            self.load_track(cmd_options.start_playing, cmd_options.seek_to)?;
+            self.load_track(cmd_options.start_playing, cmd_options.seek_to, false)?;
         } else {
             info!("No active track, stopping");
             self.handle_stop()
@@ -1526,6 +1543,7 @@ impl SpircTask {
             warn!("tried to seek to {position_ms}ms of {duration}ms");
             return;
         }
+        self.crossfade_cancelled = true;
 
         self.connect_state
             .update_position(position_ms, self.now_ms());
@@ -1630,7 +1648,7 @@ impl SpircTask {
         self.context_resolver.add(resolve);
     }
 
-    fn handle_next(&mut self, track_uri: Option<String>) -> Result<(), Error> {
+    fn handle_next(&mut self, track_uri: Option<String>, automatic: bool) -> Result<(), Error> {
         let continue_playing = self.connect_state.is_playing();
 
         let current_uri = self.connect_state.current_track(|t| &t.uri);
@@ -1652,7 +1670,7 @@ impl SpircTask {
 
         if has_next_track {
             self.add_autoplay_resolving_when_required();
-            self.load_track(continue_playing, 0)
+            self.load_track(continue_playing, 0, automatic)
         } else {
             info!("Not playing next track because there are no more tracks left in queue.");
             self.handle_stop();
@@ -1672,7 +1690,7 @@ impl SpircTask {
                     self.connect_state.reset_playback_to_position(None)?;
                     self.handle_stop()
                 }
-                Some(_) => self.load_track(self.connect_state.is_playing(), 0)?,
+                Some(_) => self.load_track(self.connect_state.is_playing(), 0, false)?,
             }
         } else {
             self.handle_seek(0);
@@ -1786,7 +1804,10 @@ impl SpircTask {
         }
     }
 
-    fn load_track(&mut self, start_playing: bool, position_ms: u32) -> Result<(), Error> {
+    fn load_track(&mut self, start_playing: bool, position_ms: u32, automatic: bool) -> Result<(), Error> {
+        if !automatic {
+            self.crossfade_cancelled = true;
+        }
         if self.connect_state.current_track(MessageField::is_none) {
             debug!("current track is none, stopping playback");
             self.handle_stop();
@@ -1795,7 +1816,12 @@ impl SpircTask {
 
         let current_uri = self.connect_state.current_track(|t| &t.uri);
         let id = SpotifyUri::from_uri(current_uri)?;
-        self.player.load(id, start_playing, position_ms);
+        // turntable: only natural advancement preserves the ring and an in-flight fade.
+        if automatic {
+            self.player.load_next(id, start_playing, position_ms);
+        } else {
+            self.player.load(id, start_playing, position_ms);
+        }
 
         self.connect_state
             .update_position(position_ms, self.now_ms());

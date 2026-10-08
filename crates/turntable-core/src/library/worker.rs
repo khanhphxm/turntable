@@ -132,7 +132,8 @@ pub(super) struct Session {
 	pub(super) snapshots: Arc<Mutex<Store>>,
 	/// The user's playlists, to name recently played ones without a request.
 	pub(super) playlists: Vec<Playlist>,
-	/// Artists and others' playlists fetched before (images and names don't change often).
+	/// Artists and others' playlists fetched before. Each map keeps at most 128
+	/// entries, then starts a fresh batch; every insertion uses the budget helpers.
 	pub(super) artists:   HashMap<String, Artist>,
 	pub(super) others:    HashMap<String, Option<Playlist>>,
 	/// The last home page and when it was built: revisits within a minute reuse it.
@@ -170,6 +171,20 @@ impl Session {
 			abouts: Cache::new(24, Duration::from_secs(24 * 3600)),
 			colors: Cache::new(64, Duration::from_secs(24 * 3600)),
 		}
+	}
+
+	pub(super) fn cache_artist(&mut self, id: String, artist: Artist) {
+		if self.artists.len() >= 128 && !self.artists.contains_key(&id) {
+			self.artists.clear();
+		}
+		self.artists.insert(id, artist);
+	}
+
+	pub(super) fn cache_other(&mut self, id: String, playlist: Option<Playlist>) {
+		if self.others.len() >= 128 && !self.others.contains_key(&id) {
+			self.others.clear();
+		}
+		self.others.insert(id, playlist);
 	}
 
 	fn attach(&mut self, player: Option<Reader>, deliver: &dyn Fn(Response)) {
@@ -582,7 +597,9 @@ fn set_followed(s: &mut Session, uri: &str, follow: bool) -> spotify::Result<Res
 		s.playlists.retain(|playlist| playlist.id != id);
 		let route = Route::Playlist(id.to_owned());
 		s.pages.remove(&route);
-		if let Some(player) = &mut s.player { player.forget(&route); }
+		if let Some(player) = &mut s.player {
+			player.forget(&route);
+		}
 		s.snapshots.lock().unwrap_or_else(PoisonError::into_inner).remove_playlist(id);
 		return Ok(Response::Playlists(s.playlists.clone()));
 	}
@@ -679,4 +696,28 @@ fn move_playlist_row(s: &mut Session, id: String, from: u32, to: u32) -> spotify
 	s.forget(&Route::Playlist(id.clone()));
 	// Membership is order-independent: reordering needs no index refresh.
 	Ok(Response::Moved(id, from, to))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn all_worker_metadata_insertions_obey_the_budget() {
+		let client = Client::open(Arc::new(|| Err(spotify::Error::AuthRequired)), false);
+		let snapshots = Arc::new(Mutex::new(Store::new(&std::env::temp_dir())));
+		let mut session = Session::new(client, spotify::User { id: "test".into(), display_name: None }, Vec::new(), snapshots);
+		for index in 0..400 {
+			let id = format!("artist-{index}");
+			let artist = Artist { uri: format!("spotify:artist:{id}"), name: id.clone(), images: Vec::new(), genres: Vec::new() };
+			session.cache_artist(id, artist);
+			session.cache_other(format!("playlist-{index}"), None);
+			assert!(session.artists.len() <= 128);
+			assert!(session.others.len() <= 128);
+		}
+		assert!(!session.artists.contains_key("artist-0"));
+		assert!(session.artists.contains_key("artist-399"));
+		assert!(!session.others.contains_key("playlist-0"));
+		assert!(session.others.contains_key("playlist-399"));
+	}
 }

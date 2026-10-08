@@ -29,10 +29,12 @@ pub struct Library {
 	pub query:               String,
 	pub search:              Option<SearchResults>,
 	pub home:                Home,
-	/// Artists fetched for the now-playing view, by id.
+	/// Artists fetched for the now-playing view, by id. Together with overviews,
+	/// retained for the last 128 distinct artists; listings own their visible data.
 	pub artists:             HashMap<String, Artist>,
 	/// What the web player says about them, by id.
 	pub overviews:           HashMap<String, spotify::ArtistOverview>,
+	pub(crate) artist_order: std::collections::VecDeque<String>,
 	/// Who made the song that last asked: (track URI, credits).
 	pub credits:             Option<(String, Vec<spotify::Credit>)>,
 	/// Whether the URI last checked is in Liked Songs.
@@ -280,7 +282,9 @@ impl Library {
 			Response::LikedTracks(tracks) => self.apply_liked_tracks(tracks),
 			Response::Home(home) => self.home = home,
 			Response::Artist(artist) => {
-				self.artists.insert(id_of(&artist.uri).to_owned(), artist);
+				let id = id_of(&artist.uri).to_owned();
+				self.remember_artist(&id);
+				self.artists.insert(id, artist);
 			},
 			Response::ArtistPopular(id, popular) => {
 				if self.route == Route::Artist(id.clone())
@@ -293,6 +297,7 @@ impl Library {
 					l.overview = popular.overview.clone();
 				}
 				if let Some(overview) = popular.overview {
+					self.remember_artist(&id);
 					self.overviews.insert(id, overview);
 				}
 			},
@@ -304,6 +309,7 @@ impl Library {
 				}
 			},
 			Response::ArtistCard(id, overview) => {
+				self.remember_artist(&id);
 				self.overviews.insert(id, overview);
 			},
 			Response::Credits(uri, credits) => self.credits = Some((uri, credits)),
@@ -354,6 +360,19 @@ impl Library {
 			Response::Error { route, message } => self.apply_error(route.as_ref(), message),
 			Response::LoginFailed(e) => self.conn = Conn::Failed(e),
 		}
+	}
+
+	fn remember_artist(&mut self, id: &str) {
+		if self.artists.contains_key(id) || self.overviews.contains_key(id) {
+			return;
+		}
+		if self.artist_order.len() == 128
+			&& let Some(oldest) = self.artist_order.pop_front()
+		{
+			self.artists.remove(&oldest);
+			self.overviews.remove(&oldest);
+		}
+		self.artist_order.push_back(id.to_owned());
 	}
 
 	fn apply_playlists(&mut self, mut playlists: Vec<Playlist>) {
@@ -523,6 +542,24 @@ mod tests {
 
 	fn titles(lib: &Library, filtered: bool) -> Vec<String> {
 		lib.entries(filtered).iter().map(|e| e.title().to_owned()).collect()
+	}
+
+	#[test]
+	fn artist_metadata_is_bounded_and_revisits_can_be_cached_again() {
+		let mut lib = Library::default();
+		for index in 0..300 {
+			let id = format!("artist-{index}");
+			lib.apply(Response::Artist(artist(&id, &id)));
+			lib.apply(Response::ArtistCard(id, spotify::ArtistOverview::default()));
+		}
+		assert_eq!(lib.artists.len(), 128);
+		assert_eq!(lib.overviews.len(), 128);
+		assert_eq!(lib.artist_order.len(), 128);
+		assert!(!lib.artists.contains_key("artist-0"));
+		assert!(!lib.overviews.contains_key("artist-0"));
+		lib.apply(Response::Artist(artist("artist-0", "Revisited")));
+		assert_eq!(lib.artists.get("artist-0").unwrap().name, "Revisited");
+		assert_eq!(lib.artist_order.len(), 128);
 	}
 
 	#[test]

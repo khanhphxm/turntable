@@ -16,14 +16,12 @@ pub struct Popularity {
 	pub overview: Option<spotify::ArtistOverview>,
 	pub accent:   Option<String>,
 }
-/// Artists kept for the session before the lot is let go (names and pictures: small).
-const ARTISTS_KEPT: usize = 128;
 /// An artist's header: the artist, their releases by kind, where they appear, and whether they are followed.
 pub(super) fn artist_header(s: &mut Session, id: &str) -> spotify::Result<Listing> {
 	if let Some(player) = &mut s.player {
 		let listing = player.artist_header(id)?;
 		if let Some(artist) = &listing.artist {
-			s.artists.insert(id.to_owned(), artist.clone());
+			s.cache_artist(id.to_owned(), artist.clone());
 		}
 		return Ok(listing);
 	}
@@ -51,10 +49,7 @@ pub(super) fn artist_header(s: &mut Session, id: &str) -> spotify::Result<Listin
 		},
 	);
 	let a = a?;
-	if s.artists.len() >= ARTISTS_KEPT {
-		s.artists.clear();
-	}
-	s.artists.insert(id.to_owned(), a.clone());
+	s.cache_artist(id.to_owned(), a.clone());
 	let mut discography = Vec::new();
 	for (title, releases) in groups {
 		if let Some(releases) = releases?.filter(|r| !r.is_empty()) {
@@ -143,6 +138,6 @@ pub(super) fn artist(s: &mut Session, id: &str) -> spotify::Result<Artist> {
 		Some(player) => player.artist(id)?,
 		None => s.client.artist(id)?,
 	};
-	s.artists.insert(id.to_owned(), a.clone());
+	s.cache_artist(id.to_owned(), a.clone());
 	Ok(a)
 }

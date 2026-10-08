@@ -165,11 +165,11 @@ fn learn_contexts(s: &mut Session, played: &[(Track, Option<PlayContext>)]) {
 	);
 	for (artist, id) in artists {
 		if let Some(artist) = artist {
-			s.artists.insert(id, artist);
+			s.cache_artist(id, artist);
 		}
 	}
 	for (playlist, id) in playlists {
-		s.others.insert(id, playlist);
+		s.cache_other(id, playlist);
 	}
 }
 /// The tile for what `track` was played from, if it can be named.
@@ -192,7 +192,7 @@ fn context_tile(s: &mut Session, context: &PlayContext, track: &Track) -> Option
 					None => s.client.playlist(id),
 				}
 				.ok();
-				s.others.insert(id.to_owned(), p);
+				s.cache_other(id.to_owned(), p);
 			}
 			// Spotify also plays Liked Songs as a generated playlist of its own (a `37i9dQZF1F…`
 			// id, named "Liked Songs", with the Liked Songs artwork): that is the pinned tile.

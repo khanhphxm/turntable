@@ -33,7 +33,8 @@ impl Controller {
 			return;
 		}
 		let id = crate::spotify::id_of(uri).to_owned();
-		if !self.state.library.artists.contains_key(&id) && self.asked_artists.insert(id.clone()) {
+		if !self.state.library.artists.contains_key(&id) && self.asked_artist.as_ref() != Some(&id) {
+			self.asked_artist = Some(id.clone());
 			self.library.send(library::Request::Artist(id.clone()));
 			self.library.send(library::Request::ArtistCard(id));
 		}

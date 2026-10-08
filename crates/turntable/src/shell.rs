@@ -12,7 +12,10 @@ use gpui_kit::{
 	prelude::FluentBuilder as _,
 	px,
 };
-use turntable_core::{Controller, Field, Msg, Panel, Route, State};
+use turntable_core::{
+	Controller, Field, Msg, Panel, Route, State,
+	app::settings::{MAX_CROSSFADE, Pref},
+};
 
 use crate::{
 	covers::CoverCache,
@@ -81,6 +84,8 @@ pub struct Shell {
 	pub panel_gen:      usize,
 	pub seek:           Entity<Slider>,
 	pub volume_slider:  Entity<Slider>,
+	/// Settings' crossfade length (0..=MAX_CROSSFADE seconds).
+	pub crossfade:      Entity<Slider>,
 	/// The main view's virtual list (listing pages), and what it was built for.
 	pub list:           ListState,
 	pub list_for:       Option<(Route, usize)>,
@@ -117,6 +122,16 @@ impl Shell {
 	pub fn new(core: Controller, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
 		let seek = Slider::new(cx, 0.);
 		let volume_slider = Slider::new(cx, f32::from(core.state().volume) / 100.);
+		let crossfade = Slider::new(cx, f32::from(core.state().prefs.playback.crossfade) / f32::from(MAX_CROSSFADE));
+		cx.subscribe(&crossfade, |this, _, e: &SliderEvent, cx| {
+			if let SliderEvent::Commit(v) = e {
+				// Whole seconds; at least one while it's on (the switch turns it off).
+				#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "v is 0..=1, so the product is 0..=12")]
+				let seconds = ((v * f32::from(MAX_CROSSFADE)).round() as u8).max(1);
+				this.send(Msg::Pref(Pref::Crossfade(seconds)), cx);
+			}
+		})
+		.detach();
 		cx.subscribe(&seek, |this, _, e: &SliderEvent, cx| {
 			if let SliderEvent::Commit(v) = e {
 				#[expect(
@@ -169,6 +184,7 @@ impl Shell {
 			panel_gen: 0,
 			seek,
 			volume_slider,
+			crossfade,
 			list: ListState::new(0, ListAlignment::Top, px(600.)),
 			list_for: None,
 			search,
@@ -232,6 +248,8 @@ impl Shell {
 		let (pos, vol) = (st.position_ms() as f32 / total as f32, f32::from(st.volume) / 100.);
 		self.seek.update(cx, |s, cx| s.set(pos, cx));
 		self.volume_slider.update(cx, |s, cx| s.set(vol, cx));
+		let fade = f32::from(self.core.state().prefs.playback.crossfade) / f32::from(MAX_CROSSFADE);
+		self.crossfade.update(cx, |s, cx| s.set(fade, cx));
 		// The EQ curve follows the core (a preset moves every band).
 		let eq = self.core.state().eq;
 		self.eq_graph.update(cx, |g, cx| g.set(eq.gains_db, eq.enabled, cx));

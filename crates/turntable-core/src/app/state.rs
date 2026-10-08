@@ -121,12 +121,18 @@ impl Default for Anchor {
 }
 
 /// Encoded artwork shared with a host decoder, independent of any GUI image type.
-/// A loaded URL retains the same Arc for the controller's lifetime; a decoded
-/// image cache can key on `Arc::as_ptr` while retaining an Arc to keep it alive.
+/// A loaded URL retains the same Arc until its encoded cache entry is evicted;
+/// a decoded image cache can key on `Arc::as_ptr` while retaining that Arc.
 #[derive(Debug)]
 pub struct Cover {
 	pub bytes: Vec<u8>,
 	pub mime:  String,
+}
+
+#[derive(Debug)]
+pub(crate) struct CachedCover {
+	cover: Arc<Cover>,
+	used:  std::cell::Cell<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -196,7 +202,11 @@ pub struct State {
 	/// Volume to restore when unmuting.
 	pub unmute_to:           u8,
 	/// Image URL → encoded cover. The host chooses when/how to decode it.
-	pub images:              std::collections::HashMap<String, Arc<Cover>>,
+	/// LRU retention is bounded to 16 MiB and 512 URLs; evicted artwork reloads
+	/// from the disk cache on demand. Hits preserve the original Arc identity.
+	pub(crate) images:       std::collections::HashMap<String, CachedCover>,
+	pub(crate) image_clock:  std::cell::Cell<u64>,
+	pub(crate) image_bytes:  usize,
 	/// Missing URLs recorded by [`State::image`], drained by the controller's pump.
 	pub(crate) image_misses: std::cell::RefCell<std::collections::HashSet<String>>,
 	/// The text field that has the caret, and the text of each field.
@@ -384,12 +394,41 @@ impl State {
 		}
 	}
 
+	/// Retained encoded artwork entries and bytes (excludes decoded/GPU artwork).
+	pub fn image_cache_usage(&self) -> (usize, usize) {
+		(self.images.len(), self.image_bytes)
+	}
+
+	pub(crate) fn cache_image(&mut self, url: String, cover: Cover) {
+		if let Some(cached) = self.images.get(&url) {
+			cached.used.set(self.image_use());
+			return;
+		}
+		self.image_bytes += cover.bytes.len();
+		let cached = CachedCover { cover: Arc::new(cover), used: std::cell::Cell::new(self.image_use()) };
+		self.images.insert(url, cached);
+		while self.image_bytes > 16 * 1024 * 1024 || self.images.len() > 512 {
+			let Some(oldest) = self.images.values().map(|entry| entry.used.get()).min() else { break };
+			let Some((_, cached)) = self.images.extract_if(|_, entry| entry.used.get() == oldest).next() else { break };
+			self.image_bytes -= cached.cover.bytes.len();
+		}
+	}
+
+	fn image_use(&self) -> u64 {
+		let used = self.image_clock.get().saturating_add(1);
+		self.image_clock.set(used);
+		used
+	}
+
 	/// The encoded cover for a URL, or `None` while it is loading. A missing URL
 	/// is recorded so the next [`crate::Controller::pump`] fetches it off-thread.
 	pub fn image(&self, url: Option<&str>) -> Option<&Arc<Cover>> {
 		let url = url.filter(|u| !u.is_empty())?;
 		match self.images.get(url) {
-			Some(cover) => Some(cover),
+			Some(cached) => {
+				cached.used.set(self.image_use());
+				Some(&cached.cover)
+			},
 			None => {
 				self.image_misses.borrow_mut().insert(url.to_owned());
 				None
