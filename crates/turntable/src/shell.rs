@@ -23,6 +23,9 @@ use crate::{
 	widgets::{Slider, SliderEvent},
 };
 
+/// Below this window width Your Library shows as the rail of covers, as Spotify's does.
+const NARROW_W: f32 = 1000.;
+
 /// How many pages back the history reaches.
 const HISTORY: usize = 50;
 
@@ -97,6 +100,8 @@ pub struct Shell {
 	/// The window's scale factor as of this frame (covers decode to it).
 	pub scale:          f32,
 	pub lyrics_scroll:  gpui_kit::ScrollHandle,
+	/// The window is too narrow for the full library (it folds to the rail by itself).
+	pub narrow:         bool,
 	/// The lyric line last scrolled to.
 	pub lyrics_line:    Option<usize>,
 	/// The OS's Now Playing session (set once the window is open).
@@ -193,6 +198,7 @@ impl Shell {
 			main_w: 600.,
 			scale: window.scale_factor(),
 			lyrics_scroll: gpui_kit::ScrollHandle::new(),
+			narrow: false,
 			lyrics_line: None,
 			now_playing: None,
 			details: None,
@@ -262,6 +268,11 @@ impl Shell {
 			cx.quit();
 		}
 		cx.notify();
+	}
+
+	/// Your Library shows as the rail: folded by the user, or the window is narrow.
+	pub fn sidebar_folded(&self) -> bool {
+		self.st().sidebar_collapsed() || self.narrow
 	}
 
 	/// Hides each new toast after a few seconds.
@@ -398,7 +409,8 @@ impl Render for Shell {
 		}
 		self.scale = window.scale_factor();
 		let side = self.side();
-		let left = if self.st().sidebar_collapsed() { theme::SIDEBAR_COLLAPSED_W } else { theme::SIDEBAR_W };
+		self.narrow = window.viewport_size().width < px(NARROW_W);
+		let left = if self.sidebar_folded() { theme::SIDEBAR_COLLAPSED_W } else { theme::SIDEBAR_W };
 		let right = if side.is_some() { theme::RIGHT_W + theme::GAP } else { px(0.) };
 		self.main_w = f32::from(window.viewport_size().width - left - right - theme::GAP * 3.);
 		let main = match self.page.clone() {

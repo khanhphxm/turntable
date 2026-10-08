@@ -19,6 +19,10 @@ const TRAFFIC_LIGHTS_W: f32 = 84.;
 impl Shell {
 	pub fn top_bar(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
 		let can_back = !self.back.is_empty();
+		// Both sides are equally wide, so home and search sit in the window's middle as in
+		// Spotify; wide enough for the right side's buttons (and the offline pill), the search
+		// field gives way first when the window narrows.
+		let side = if self.network_pill().is_some() { 270. } else { 160. };
 		// The account's initial in the avatar.
 		let initial: String = self
 			.st()
@@ -47,6 +51,7 @@ impl Shell {
 			.child(
 				div()
 					.flex_1()
+					.min_w(px(side))
 					.flex()
 					.items_center()
 					.gap_2()
@@ -75,8 +80,7 @@ impl Shell {
 			.child(
 				div()
 					.flex_1()
-					.flex_none()
-					.min_w_0()
+					.min_w(px(side))
 					.flex()
 					.items_center()
 					.justify_end()

@@ -45,7 +45,7 @@ impl Shell {
 
 	pub fn sidebar(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
 		let entries = self.library_entries();
-		let collapsed = self.st().sidebar_collapsed();
+		let collapsed = self.sidebar_folded();
 		div()
 			.w(if collapsed { theme::SIDEBAR_COLLAPSED_W } else { theme::SIDEBAR_W })
 			.flex_none()

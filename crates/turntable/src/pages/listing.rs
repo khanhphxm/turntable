@@ -57,7 +57,20 @@ impl Shell {
 		let Some(l) = self.st().library.listing.as_ref() else {
 			return div().into_any_element();
 		};
-		let text = (l.loading && l.tracks.is_empty()).then_some("Loading…");
+		// Loading, or why there's nothing (the page failed, or offline without a saved copy).
+		let text: Option<String> = if l.loading && l.tracks.is_empty() {
+			Some("Loading…".to_owned())
+		} else if l.tracks.is_empty() && !l.editable {
+			Some(self.st().library.error.clone().unwrap_or_else(|| {
+				if self.st().offline {
+					"You're offline, and this page isn't saved on this computer.".to_owned()
+				} else {
+					"Nothing here.".to_owned()
+				}
+			}))
+		} else {
+			None
+		};
 		let empty = l.tracks.is_empty();
 		// The user's own playlist ends with the finder (open while it's empty).
 		let own = match &self.st().library.route {
@@ -92,7 +105,14 @@ impl Shell {
 			(Route::Playlist(_), Some(false)) => "Private Playlist".to_owned(),
 			_ => l.kicker.to_string(),
 		};
-		let (title, subtitle, cover_url, context) = (l.title.clone(), l.subtitle.clone(), l.cover_url.clone(), l.context_uri.clone());
+		let (title, cover_url, context) = (l.title.clone(), l.cover_url.clone(), l.context_uri.clone());
+		// Spotify ends the line with the total length: the album's own, or the sum of the rows
+		// once every page is in.
+		let total = l.duration_ms.or_else(|| l.next_offset.is_none().then(|| l.tracks.iter().map(|t| u64::from(t.duration_ms)).sum()));
+		let subtitle = match total.filter(|ms| *ms > 0) {
+			Some(ms) => format!("{}, {}", l.subtitle, length(ms)),
+			None => l.subtitle.clone(),
+		};
 		// Spotify stores a missing description as the text "null" on some playlists.
 		let description = l.description.clone().filter(|d| !d.is_empty() && d != "null");
 		let note = l.note.clone();
@@ -136,5 +156,17 @@ impl Shell {
 					.child(div().h_4()),
 			)
 			.into_any_element()
+	}
+}
+
+/// "2 hr 31 min", "48 min", "3 min 20 sec": Spotify's header lengths.
+fn length(ms: u64) -> String {
+	let secs = ms / 1000;
+	let (h, m, s) = (secs / 3600, secs / 60 % 60, secs % 60);
+	match (h, m) {
+		(0, 0) => format!("{s} sec"),
+		(0, m) if m < 10 => format!("{m} min {s} sec"),
+		(0, m) => format!("{m} min"),
+		(h, m) => format!("{h} hr {m} min"),
 	}
 }
