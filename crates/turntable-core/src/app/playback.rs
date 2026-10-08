@@ -93,7 +93,7 @@ impl State {
 
 	/// Stale failures and non-transport failures cannot undo a newer user action.
 	pub(super) fn playback_failed(&mut self, id: u64) -> bool {
-		if !self.transport.pending.as_ref().is_some_and(|pending| pending.id == id) {
+		if self.transport.pending.as_ref().is_none_or(|pending| pending.id != id) {
 			return false;
 		}
 		if let Some(pending) = self.transport.pending.take() {

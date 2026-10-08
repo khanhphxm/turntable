@@ -100,7 +100,7 @@ impl State {
 			return None;
 		}
 		if let Some(playlist) = self.library.playlists.iter().find(|playlist| playlist.id == id) {
-			if !self.library.me.as_ref().is_some_and(|me| me.id == playlist.owner.id) {
+			if self.library.me.as_ref().is_none_or(|me| me.id != playlist.owner.id) {
 				return None;
 			}
 			if playlist.public.is_some() && !playlist.name.is_empty() {
@@ -202,7 +202,7 @@ impl State {
 
 	pub(super) fn set_playlist_public(&mut self, id: String, public: bool) -> Option<library::Request> {
 		if let Some(playlist) = self.library.playlists.iter_mut().find(|playlist| playlist.id == id) {
-			if !self.library.me.as_ref().is_some_and(|me| me.id == playlist.owner.id) {
+			if self.library.me.as_ref().is_none_or(|me| me.id != playlist.owner.id) {
 				return None;
 			}
 			playlist.public = Some(public);
@@ -217,7 +217,7 @@ impl State {
 
 	pub(super) fn set_playlist_collaborative(&mut self, id: String, collaborative: bool) -> Option<library::Request> {
 		if let Some(playlist) = self.library.playlists.iter_mut().find(|playlist| playlist.id == id) {
-			if !self.library.me.as_ref().is_some_and(|me| me.id == playlist.owner.id) {
+			if self.library.me.as_ref().is_none_or(|me| me.id != playlist.owner.id) {
 				return None;
 			}
 			playlist.collaborative = collaborative;
