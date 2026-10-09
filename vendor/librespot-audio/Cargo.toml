@@ -86,3 +86,19 @@ features = [
     "macros",
     "sync",
 ]
+
+[dev-dependencies.dhat]
+version = "0.3"
+
+[dev-dependencies.tokio]
+version = "1"
+features = ["rt-multi-thread", "time"]
+
+# Keep upstream's package outside the app workspace; its localhost tests run here.
+[workspace]
+
+[patch.crates-io]
+librespot-core = { path = "../librespot-core" }
+
+[profile.dev.package."*"]
+opt-level = 2

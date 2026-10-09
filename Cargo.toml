@@ -187,3 +187,5 @@ librespot-connect = { path = "vendor/librespot-connect" }
 librespot-core = { path = "vendor/librespot-core" }
 # Use one decoder runtime worker rather than one per core.
 librespot-playback = { path = "vendor/librespot-playback" }
+# Stream CDN frames to disk with bounded backpressure instead of collecting whole ranges.
+librespot-audio = { path = "vendor/librespot-audio" }

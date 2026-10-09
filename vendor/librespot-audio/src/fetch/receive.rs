@@ -6,7 +6,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use http_body_util::BodyExt;
 use hyper::StatusCode;
 use tempfile::NamedTempFile;
@@ -34,10 +34,35 @@ enum ReceivedData {
 
 const ONE_SECOND: Duration = Duration::from_secs(1);
 const DOWNLOAD_STATUS_POISON_MSG: &str = "audio download status mutex should not be poisoned";
+// Apply backpressure to HTTP readers rather than retaining complete CDN responses.
+// Request sizes, download-ahead policy and the number of download slots are unchanged.
+const FILE_DATA_CAPACITY: usize = 8;
+
+async fn receive_body<S, E>(
+    mut body: S,
+    file_data_tx: &mpsc::Sender<ReceivedData>,
+    offset: &mut usize,
+    actual_length: &mut usize,
+) -> AudioFileResult
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+    E: Into<Error>,
+{
+    while let Some(data) = body.next().await {
+        let data = data.map_err(Into::into)?;
+        let data_size = data.len();
+        file_data_tx
+            .send(ReceivedData::Data(PartialFileData { offset: *offset, data }))
+            .await?;
+        *offset += data_size;
+        *actual_length += data_size;
+    }
+    Ok(())
+}
 
 async fn receive_data(
     shared: Arc<AudioFileShared>,
-    file_data_tx: mpsc::UnboundedSender<ReceivedData>,
+    file_data_tx: mpsc::Sender<ReceivedData>,
     mut request: StreamingRequest,
 ) -> AudioFileResult {
     let mut offset = request.offset;
@@ -76,7 +101,7 @@ async fn receive_data(
             let duration = Instant::now().duration_since(request_time);
             // may be zero if we are handling an initial response
             if duration.as_millis() > 0 {
-                file_data_tx.send(ReceivedData::ResponseTime(duration))?;
+                file_data_tx.send(ReceivedData::ResponseTime(duration)).await?;
                 measure_ping_time = false;
             }
         }
@@ -98,17 +123,16 @@ async fn receive_data(
             break Err(AudioFileError::StatusCode(code).into());
         }
 
-        let body = response.into_body();
-        let data = match body.collect().await.map(|b| b.to_bytes()) {
-            Ok(bytes) => bytes,
-            Err(e) => break Err(e.into()),
-        };
-
-        let data_size = data.len();
-        file_data_tx.send(ReceivedData::Data(PartialFileData { offset, data }))?;
-
-        actual_length += data_size;
-        offset += data_size;
+        if let Err(error) = receive_body(
+            response.into_body().into_data_stream(),
+            &file_data_tx,
+            &mut offset,
+            &mut actual_length,
+        )
+        .await
+        {
+            break Err(error);
+        }
     };
 
     drop(request.streamer);
@@ -117,7 +141,7 @@ async fn receive_data(
         let duration = Instant::now().duration_since(request_time).as_millis();
         if actual_length > 0 && duration > 0 {
             let throughput = ONE_SECOND.as_millis() as usize * actual_length / duration as usize;
-            file_data_tx.send(ReceivedData::Throughput(throughput))?;
+            file_data_tx.send(ReceivedData::Throughput(throughput)).await?;
         }
     }
 
@@ -152,7 +176,7 @@ struct AudioFileFetch {
     shared: Arc<AudioFileShared>,
     output: Option<NamedTempFile>,
 
-    file_data_tx: mpsc::UnboundedSender<ReceivedData>,
+    file_data_tx: mpsc::Sender<ReceivedData>,
     complete_tx: Option<oneshot::Sender<NamedTempFile>>,
     network_response_times: Vec<Duration>,
 
@@ -423,7 +447,7 @@ pub(super) async fn audio_file_fetch(
     mut stream_loader_command_rx: mpsc::UnboundedReceiver<StreamLoaderCommand>,
     complete_tx: oneshot::Sender<NamedTempFile>,
 ) -> AudioFileResult {
-    let (file_data_tx, mut file_data_rx) = mpsc::unbounded_channel();
+    let (file_data_tx, mut file_data_rx) = mpsc::channel(FILE_DATA_CAPACITY);
 
     {
         let requested_range = Range::new(
@@ -515,3 +539,6 @@ pub(super) async fn audio_file_fetch(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
