@@ -211,7 +211,8 @@ impl Library {
 		Some(spotify::PlayStart::Tracks { uris, offset_uri: Some(track.uri.clone()) })
 	}
 
-	/// Opens `route`, returning the requests that load it.
+	/// Opens `route`, returning the requests that load it. Non-listing routes
+	/// release the previous page's rows; the worker's bounded cache serves revisits.
 	pub fn navigate(&mut self, route: Route) -> Vec<Request> {
 		if self.route == route && (self.listing.is_some() || matches!(route, Route::Search | Route::Library | Route::Folder(_))) {
 			return Vec::new();
@@ -224,7 +225,10 @@ impl Library {
 		self.error = None;
 		self.route = route.clone();
 		match &route {
-			Route::Home => vec![Request::Home],
+			Route::Home => {
+				self.listing = None;
+				vec![Request::Home]
+			},
 			Route::Search | Route::Library | Route::Folder(_) => {
 				self.listing = None;
 				Vec::new()
@@ -660,6 +664,27 @@ mod tests {
 
 	fn titles(lib: &Library, filtered: bool) -> Vec<String> {
 		lib.entries(filtered).iter().map(|e| e.title().to_owned()).collect()
+	}
+
+	#[test]
+	fn home_releases_large_listing_and_ignores_its_late_pages() {
+		let route = Route::Playlist("p1".into());
+		let track: Track = serde_json::from_value(serde_json::json!({ "uri": "spotify:track:track" })).unwrap();
+		let mut lib = library();
+		lib.route = route.clone();
+		lib.listing = Some(Listing { tracks: vec![track; 10_000], next_offset: Some(10_000), ..Listing::default() });
+		lib.pending_offset = Some(10_000);
+		lib.home.loaded = true;
+		let requests = lib.navigate(Route::Home);
+		assert!(matches!(requests.as_slice(), [Request::Home]));
+		assert!(lib.listing.is_none());
+		assert!(lib.pending_offset.is_none());
+		assert!(lib.home.loaded, "cached Home content remains available immediately");
+		lib.apply(Response::Listing { route: route.clone(), offset: 10_000, listing: Listing::default() });
+		assert!(lib.listing.is_none());
+		let requests = lib.navigate(route.clone());
+		assert!(matches!(requests.as_slice(), [Request::Open(known, 0)] if known == &route));
+		assert!(lib.listing.as_ref().is_some_and(|listing| listing.loading && listing.tracks.is_empty()));
 	}
 
 	#[test]
