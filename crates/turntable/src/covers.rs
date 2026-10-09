@@ -10,7 +10,7 @@
 //! same concurrency limit. Decoder state and resize inputs are dropped before
 //! BGRA conversion; the host's allocator controls when freed pages are purged.
 //!
-//! The default budget is 24 MiB of decoded BGRA pixels, not compressed source
+//! The default budget is 12 MiB of decoded BGRA pixels, not compressed source
 //! bytes or GPU atlas overhead. Eviction also releases GPUI's atlas entry. Sources
 //! are held weakly except while decoding; dead sources are swept on misses and
 //! completions. Call `prune` after replacing a library to reclaim them immediately
@@ -25,8 +25,10 @@ use gpui_kit::{AnyWeakEntity, App, BorrowAppContext as _, Context, Global, Rende
 use image::{DynamicImage, Frame, ImageFormat, RgbaImage};
 use turntable_core::Cover;
 
-const DEFAULT_BUDGET: usize = 24 * 1024 * 1024;
-const BUCKETS: [u32; 4] = [64, 128, 320, 640];
+const DEFAULT_BUDGET: usize = 12 * 1024 * 1024;
+// Avoid the old 320→640 jump: a 164-logical-pixel shelf cover at 2x needs 328,
+// not 640, physical pixels. Every bucket still covers the requested display size.
+const BUCKETS: [u32; 9] = [64, 96, 128, 192, 256, 320, 384, 512, 640];
 const MAX_DECODES: usize = 2;
 /// A blurred backdrop is decoded this small, then blurred: stretched over a panel it reads as
 /// soft colour, like Apple Music's lyrics.
@@ -331,12 +333,14 @@ mod tests {
 			(0, 1., 64),
 			(40, 1., 64),
 			(64, 1., 64),
-			(65, 1., 128),
-			(40, 2., 128),
+			(65, 1., 96),
+			(40, 2., 96),
 			(64, 2., 128),
-			(65, 2., 320),
+			(65, 2., 192),
 			(128, 2.5, 320),
-			(129, 2.5, 640),
+			(129, 2.5, 384),
+			(164, 2., 384),
+			(232, 2., 512),
 			(320, 2., 640),
 			(641, 1., 640),
 			(u32::MAX, 3., 640),
@@ -363,6 +367,46 @@ mod tests {
 
 	fn image(side: u32) -> Arc<RenderImage> {
 		Arc::new(RenderImage::new([Frame::new(RgbaImage::new(side, side))]))
+	}
+
+	#[test]
+	fn cached_covers_return_the_same_pixels_without_decode_or_queue_work() {
+		use gpui_kit::AppContext as _;
+
+		let app = gpui_test::TestAppContext::single();
+		app.update(|cx| {
+			let source = source();
+			let expected = image(64);
+			let mut cache = CoverCache::default();
+			let key = pending(&mut cache, &source, 64);
+			cache.complete(key, Some(Arc::clone(&expected)), |_| {});
+			cx.set_global(cache);
+			let requester = cx.new(|_| ());
+			requester.update(cx, |(), cx| {
+				for _ in 0..3 {
+					let hit = CoverCache::get(&source, 32, 2., cx);
+					assert!(hit.is_some_and(|image| Arc::ptr_eq(&image, &expected)));
+				}
+			});
+			let cache = cx.global::<CoverCache>();
+			assert_eq!(cache.entries.len(), 1);
+			assert_eq!(cache.running, 0);
+			assert!(cache.queue.is_empty());
+		});
+	}
+
+	#[test]
+	fn default_cache_stays_bounded_across_page_working_sets() {
+		let mut cache = CoverCache::default();
+		let sources: Vec<_> = (0..40).map(|_| source()).collect();
+		let mut released = 0;
+		for source in &sources {
+			let key = pending(&mut cache, source, 640);
+			cache.complete(key, Some(image(640)), |_| released += 1);
+			assert!(cache.bytes <= 12 * 1024 * 1024);
+		}
+		assert!(released > 0);
+		assert_eq!(cache.entries.len() + released, sources.len());
 	}
 
 	#[test]

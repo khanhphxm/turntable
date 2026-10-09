@@ -21,13 +21,14 @@ impl Shell {
 		let st = self.st();
 		let item = st.item.clone();
 		let lyrics = st.lyrics_shown();
-		let big = item.cover(CoverSize::Large).map(str::to_owned);
-		let cover = self.image(big.as_deref(), 320, cx);
 		let creators = item.creators();
 		let heading = [st.context.name(), item.parent_name()].into_iter().find(|n| !n.is_empty()).unwrap_or("Now playing").to_owned();
 		let body: AnyElement = if lyrics {
 			self.lyric_lines(40., 48., true, cx)
 		} else {
+			// Match the 240 px cover below; lyrics need only the cached blurred backdrop.
+			let big = item.cover(CoverSize::Large).map(str::to_owned);
+			let cover = self.image(big.as_deref(), 240, cx);
 			div()
 				.size_full()
 				.flex()
