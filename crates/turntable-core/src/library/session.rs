@@ -8,6 +8,8 @@
 //! metadata deduplication and unavailable rows. `Listing::added_at(row)` returns Unix
 //! seconds (Playlist4 milliseconds are converted); albums and old caches return `None`.
 //! `Listing::added_by(row)` exposes Playlist4's username when present, not a display name.
+//! Artist vectors reserve the protobuf count before fallible conversion, avoiding
+//! `Result<Vec<_>, _>` collection's four-element minimum allocation on every row.
 
 mod artwork;
 mod collection;
@@ -639,6 +641,14 @@ fn artist(raw: &metadata::Artist) -> Result<Artist, librespot_core::Error> {
 	Ok(Artist { name: raw.name().to_owned(), uri: uri("artist", raw.gid())?, images: image_models(images), genres: Vec::new() })
 }
 
+fn artist_models(raw: &[metadata::Artist]) -> Result<Vec<Artist>, librespot_core::Error> {
+	let mut artists = Vec::with_capacity(raw.len());
+	for raw in raw {
+		artists.push(artist(raw)?);
+	}
+	Ok(artists)
+}
+
 fn album(raw: &metadata::Album) -> Result<Album, librespot_core::Error> {
 	let images = if raw.cover_group.is_some() { &raw.cover_group.get_or_default().image } else { &raw.cover };
 	let date = raw.date.as_ref().filter(|date| date.year() > 0).map(|date| {
@@ -654,7 +664,7 @@ fn album(raw: &metadata::Album) -> Result<Album, librespot_core::Error> {
 		name:         raw.name().to_owned(),
 		uri:          uri("album", raw.gid())?,
 		images:       image_models(images),
-		artists:      raw.artist.iter().map(artist).collect::<Result<_, _>>()?,
+		artists:      artist_models(&raw.artist)?,
 		total_tracks: u32::try_from(raw.disc.iter().map(|d| d.track.len()).sum::<usize>()).unwrap_or(u32::MAX),
 		release_date: date,
 		label:        raw.has_label().then(|| raw.label().to_owned()).filter(|label| !label.is_empty()),
@@ -703,7 +713,7 @@ fn track(entity: &str, raw: &metadata::Track, known_album: Option<&Album>) -> Re
 		duration_ms: u32::try_from(raw.duration()).unwrap_or_default(),
 		disc_number: u32::try_from(raw.disc_number()).unwrap_or_default(),
 		explicit:    raw.explicit(),
-		artists:     raw.artist.iter().map(artist).collect::<Result<_, _>>()?,
+		artists:     artist_models(&raw.artist)?,
 		album:       match known_album {
 			Some(album) => Some(album.clone()),
 			None => raw.album.as_ref().map(album).transpose()?,

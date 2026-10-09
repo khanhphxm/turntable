@@ -84,6 +84,39 @@ fn track_preserves_original_uri_and_complete_row_metadata() -> Result<(), Error>
 }
 
 #[test]
+fn fallible_artist_conversion_keeps_exact_capacity_order_and_errors() -> Result<(), Error> {
+	for count in [0, 1, 2, 3, 4, 8, 17] {
+		let mut raw_album = album_proto();
+		raw_album.artist = (0..count)
+			.map(|index| metadata::Artist {
+				gid: Some(SpotifyId { id: index + 1 }.to_raw().to_vec()),
+				name: Some(format!("Artist {index}")),
+				..metadata::Artist::default()
+			})
+			.collect();
+		let expected = raw_album.artist.iter().map(super::artist).collect::<Result<Vec<_>, _>>()?;
+		let converted_album = album(&raw_album)?;
+		let raw_track = metadata::Track { artist: raw_album.artist.clone(), album: MessageField::some(raw_album), ..Default::default() };
+		let row = track("spotify:track:0000000000000000000001", &raw_track, None)?;
+		assert_eq!(converted_album.artists, expected);
+		assert_eq!(row.artists, expected);
+		assert_eq!(converted_album.artists.capacity(), expected.len());
+		assert_eq!(row.artists.capacity(), expected.len());
+		if expected.len() == 1 {
+			let before = expected.capacity() * size_of::<crate::spotify::Artist>() * 2;
+			let after = (row.artists.capacity() + converted_album.artists.capacity()) * size_of::<crate::spotify::Artist>();
+			println!("one-artist track+album buffers: previous {before} bytes, exact {after} bytes");
+		}
+	}
+	let mut invalid = album_proto();
+	invalid.artist.push(metadata::Artist::default());
+	assert!(album(&invalid).is_err());
+	let invalid_track = metadata::Track { artist: invalid.artist, ..Default::default() };
+	assert!(track("spotify:track:0000000000000000000001", &invalid_track, None).is_err());
+	Ok(())
+}
+
+#[test]
 fn local_files_and_episodes_stay_distinct_from_spotify_tracks() -> Result<(), Error> {
 	let local = local("spotify:local:Artist:Album:Song:123");
 	assert!(local.is_some());
