@@ -7,6 +7,7 @@ mod assets;
 mod bar;
 mod components;
 mod covers;
+mod desktop;
 mod dialogs;
 mod eqgraph;
 mod fullview;
@@ -46,6 +47,7 @@ fn main() {
 	gpui_kit::application().with_assets(assets::Assets).run(|cx| {
 		gpui_kit::init(cx);
 		gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+		desktop::install(cx);
 		shell::bind_keys(cx);
 		menus::install(shell::OpenSettings, cx);
 		let paths = Paths::resolve();

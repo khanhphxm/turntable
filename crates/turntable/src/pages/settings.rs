@@ -158,6 +158,7 @@ impl Shell {
 					self.toggle("compact", p.display.compact, Pref::Compact, cx).into_any_element(),
 				),
 			]),
+			("Startup and window", self.startup_settings(cx)),
 			("About", vec![(
 				format!("{} {}", crate::menus::NAME, env!("CARGO_PKG_VERSION")),
 				"A lightweight Spotify player",
@@ -188,6 +189,27 @@ impl Shell {
 			.gap_2()
 			.child(Input::new(&self.proxy_input))
 			.when_some(error, |view, error| view.child(div().text_size(px(12.)).text_color(gpui_kit::rgb(0x00ff_7777)).child(error)))
+	}
+
+	fn startup_settings(&self, cx: &mut Context<'_, Self>) -> Vec<Row> {
+		let desktop = cx.global::<crate::desktop::Desktop>();
+		let enabled = desktop.login_enabled;
+		let error = desktop.error.clone();
+		let mut rows = vec![(
+			"Open Turntable when you log in".into(),
+			"Start the player automatically on this computer",
+			Switch::new("open-at-login")
+				.checked(enabled)
+				.on_click(cx.listener(|_, checked: &bool, _, cx| {
+					crate::desktop::set_login(*checked, cx);
+					cx.notify();
+				}))
+				.into_any_element(),
+		)];
+		if let Some(error) = error {
+			rows.push((error, "The operating system did not apply the requested setting", div().into_any_element()));
+		}
+		rows
 	}
 
 	/// Spotify's "Search in Settings": a magnifier that opens into a field, filtering the rows.

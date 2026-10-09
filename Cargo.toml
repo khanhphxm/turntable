@@ -43,6 +43,8 @@ objc2-media-player = { version = "0.3", default-features = false, features = [
 	"objc2-core-foundation",
 	"std",
 ] }
+objc2-service-management = { version = "0.3", default-features = false, features = ["std", "objc2", "objc2-foundation", "SMAppService"] }
+plist = { version = "1" }
 parking_lot = { version = "0.12" }
 protobuf = { version = "3.7" }
 rand = { version = "0.9" }
@@ -58,6 +60,7 @@ tokio = { version = "1", default-features = false, features = ["macros", "rt-mul
 turntable-core = { path = "crates/turntable-core" }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 windows = { version = "0.61", default-features = false, features = ["std"] }
+winreg = { version = "0.56" }
 
 # Curated additions to Clippy defaults: pedantic conflicts with exact DSP comparisons and intentional precision changes.
 # Document genuine exceptions with local #[expect(..., reason = "...")]; never use blanket allows.
