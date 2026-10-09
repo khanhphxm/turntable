@@ -15,9 +15,11 @@ chrono.workspace = true
 gpui-kit.workspace = true
 image.workspace = true
 jpeg-decoder.workspace = true
+raw-window-handle.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 smol.workspace = true
+tray-icon.workspace = true
 turntable-core.workspace = true
 
 [dev-dependencies]
@@ -38,11 +40,13 @@ dbus.workspace = true
 dbus-crossroads.workspace = true
 libc.workspace = true
 tempfile.workspace = true
+x11rb.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2.workspace = true
 objc2.workspace = true
 objc2-app-kit.workspace = true
+objc2-app-kit.features = ["NSView", "NSWindow"]
 objc2-foundation.workspace = true
 objc2-foundation.features = ["NSBundle"]
 objc2-media-player.workspace = true
@@ -60,5 +64,6 @@ windows.features = [
 	"Win32_System_WinRT",
 	"Win32_UI_Input_KeyboardAndMouse",
 	"Win32_UI_Shell",
+	"Win32_UI_WindowsAndMessaging",
 ]
 

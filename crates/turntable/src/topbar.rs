@@ -283,7 +283,7 @@ fn caption_button(id: &'static str, area: WindowControlArea, glyph: IconName) ->
 				match area {
 					WindowControlArea::Min => window.minimize_window(),
 					WindowControlArea::Max => window.zoom_window(),
-					WindowControlArea::Close => window.remove_window(),
+					WindowControlArea::Close => crate::desktop::request_close(window, cx),
 					WindowControlArea::Drag => window.start_window_move(),
 				}
 			})

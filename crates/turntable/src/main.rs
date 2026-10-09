@@ -44,7 +44,9 @@ use turntable_core::{Controller, Options, Paths};
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() {
-	gpui_kit::application().with_assets(assets::Assets).run(|cx| {
+	let application = gpui_kit::application().with_assets(assets::Assets);
+	application.on_reopen(desktop::show);
+	application.run(|cx| {
 		gpui_kit::init(cx);
 		gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
 		desktop::install(cx);
@@ -78,6 +80,7 @@ fn main() {
 				if let Some(config) = config.clone() {
 					remember_bounds(&entity, config, window, cx);
 				}
+				desktop::attach(&entity, window, cx);
 				shell::run_core(&entity, wake_rx, cx);
 				shell = Some(entity.clone());
 				entity

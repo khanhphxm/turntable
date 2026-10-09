@@ -54,6 +54,7 @@ pub struct Prefs {
 	pub device:   Device,
 	pub display:  Display,
 	pub network:  Network,
+	pub desktop:  Desktop,
 }
 
 /// Network preferences are applied before sign-in and shared by every transport.
@@ -132,6 +133,16 @@ impl Default for Display {
 	}
 }
 
+/// Desktop-only presentation. Login registration is read from the OS, not cached here.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Desktop {
+	/// An optional menu-bar/status-tray icon; only an active icon enables close-to-background.
+	pub status_icon: bool,
+	/// macOS only, and only effective while the status icon is active.
+	pub hide_dock:   bool,
+}
+
 impl Prefs {
 	/// Brings hand-edited or newer settings files into the app's supported ranges.
 	pub fn sanitized(mut self) -> Self {
@@ -173,6 +184,8 @@ pub enum Pref {
 	Compact(bool),
 	PlayCounts(bool),
 	Proxy(String),
+	StatusIcon(bool),
+	HideDock(bool),
 }
 
 impl Prefs {
@@ -189,6 +202,8 @@ impl Prefs {
 			Pref::Compact(on) => self.display.compact = *on,
 			Pref::PlayCounts(on) => self.display.play_counts = *on,
 			Pref::Proxy(proxy) => self.network.proxy = proxy.trim().to_owned(),
+			Pref::StatusIcon(on) => self.desktop.status_icon = *on,
+			Pref::HideDock(on) => self.desktop.hide_dock = *on,
 			Pref::NowPlayingView(_) => return false,
 		}
 		true
@@ -346,6 +361,21 @@ mod tests {
 		assert_eq!(Settings::load(dir).prefs.playback.crossfade, MAX_CROSSFADE);
 		fs::write(dir.join("settings.json"), br#"{"playback":{"autoplay":false}}"#).unwrap();
 		assert_eq!(Settings::load(dir).prefs.playback.crossfade, 0);
+	}
+
+	#[test]
+	fn status_icon_is_opt_in_and_desktop_preferences_survive_restart() {
+		let directory = tempfile::tempdir().unwrap();
+		let dir = directory.path();
+		let mut settings = Settings::default();
+		assert!(!settings.prefs.desktop.status_icon);
+		assert!(!settings.prefs.desktop.hide_dock);
+		settings.prefs.set(&Pref::StatusIcon(true));
+		settings.prefs.set(&Pref::HideDock(true));
+		settings.save(dir).unwrap();
+		assert_eq!(Settings::load(dir).prefs.desktop, Desktop { status_icon: true, hide_dock: true });
+		fs::write(dir.join("settings.json"), br#"{"display":{"compact":true}}"#).unwrap();
+		assert_eq!(Settings::load(dir).prefs.desktop, Desktop::default());
 	}
 
 	#[test]

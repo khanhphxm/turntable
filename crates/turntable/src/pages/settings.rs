@@ -192,9 +192,10 @@ impl Shell {
 	}
 
 	fn startup_settings(&self, cx: &mut Context<'_, Self>) -> Vec<Row> {
-		let desktop = cx.global::<crate::desktop::Desktop>();
-		let enabled = desktop.login_enabled;
-		let error = desktop.error.clone();
+		let desktop = cx.try_global::<crate::desktop::Desktop>();
+		let enabled = desktop.is_some_and(|desktop| desktop.login_enabled);
+		let icon_enabled = desktop.is_some_and(crate::desktop::Desktop::icon_enabled);
+		let error = desktop.and_then(|desktop| desktop.error.clone());
 		let mut rows = vec![(
 			"Open Turntable when you log in".into(),
 			"Start the player automatically on this computer",
@@ -206,6 +207,27 @@ impl Shell {
 				}))
 				.into_any_element(),
 		)];
+		rows.push((
+			if cfg!(target_os = "macos") { "Show menu bar icon" } else { "Show tray icon" }.into(),
+			"Keep playing in the background when the main window closes",
+			Switch::new("status-icon")
+				.checked(icon_enabled)
+				.on_click(cx.listener(|this, checked: &bool, _, cx| {
+					if crate::desktop::set_icon(*checked, cx) {
+						this.send(Msg::Pref(Pref::StatusIcon(*checked)), cx);
+					} else {
+						cx.notify();
+					}
+				}))
+				.into_any_element(),
+		));
+		if cfg!(target_os = "macos") && icon_enabled {
+			rows.push((
+				"Hide Dock icon".into(),
+				"Use only the menu bar icon while it is enabled",
+				self.toggle("hide-dock", self.st().prefs.desktop.hide_dock, Pref::HideDock, cx).into_any_element(),
+			));
+		}
 		if let Some(error) = error {
 			rows.push((error, "The operating system did not apply the requested setting", div().into_any_element()));
 		}

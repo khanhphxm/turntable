@@ -48,6 +48,7 @@ plist = { version = "1" }
 parking_lot = { version = "0.12" }
 protobuf = { version = "3.7" }
 rand = { version = "0.9" }
+raw-window-handle = { version = "0.6" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 sha2 = { version = "0.10", default-features = false }
@@ -57,10 +58,12 @@ tempfile = { version = "3" }
 thiserror = { version = "2" }
 tikv-jemallocator = { version = "0.7" }
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }
 turntable-core = { path = "crates/turntable-core" }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 windows = { version = "0.61", default-features = false, features = ["std"] }
 winreg = { version = "0.56" }
+x11rb = { version = "0.13" }
 
 # Curated additions to Clippy defaults: pedantic conflicts with exact DSP comparisons and intentional precision changes.
 # Document genuine exceptions with local #[expect(..., reason = "...")]; never use blanket allows.

@@ -387,6 +387,7 @@ impl Shell {
 			np.sync(self);
 			self.now_playing = Some(np);
 		}
+		crate::desktop::sync(self, cx);
 		self.time_toast(cx);
 		cx.notify();
 	}
