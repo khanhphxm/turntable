@@ -126,16 +126,26 @@ impl MetalAtlasTextures {
         min_size: Size<DevicePixels>,
         kind: AtlasTextureKind,
     ) -> &mut MetalAtlasTexture {
+        // Small glyphs and row images share compact pages. Large artwork gets a
+        // tightly sized page: a 640px cover otherwise pins a mostly empty 4MiB
+        // 1024px page until the last unrelated small tile is released.
         const DEFAULT_ATLAS_SIZE: Size<DevicePixels> = Size {
-            width: DevicePixels(1024),
-            height: DevicePixels(1024),
+            width: DevicePixels(512),
+            height: DevicePixels(512),
         };
         // Max texture size on all modern Apple GPUs. Anything bigger than that crashes in validateWithDevice.
         const MAX_ATLAS_SIZE: Size<DevicePixels> = Size {
             width: DevicePixels(16384),
             height: DevicePixels(16384),
         };
-        let size = min_size.min(&MAX_ATLAS_SIZE).max(&DEFAULT_ATLAS_SIZE);
+        let min_size = min_size.min(&MAX_ATLAS_SIZE);
+        let size = if kind == AtlasTextureKind::Polychrome
+            && (min_size.width.0 > 256 || min_size.height.0 > 256)
+        {
+            min_size
+        } else {
+            min_size.max(&DEFAULT_ATLAS_SIZE)
+        };
         let texture_descriptor = metal::TextureDescriptor::new();
         texture_descriptor.set_width(size.width.into());
         texture_descriptor.set_height(size.height.into());
@@ -377,8 +387,8 @@ mod tests {
             height: DevicePixels(64),
         };
         let big = Size {
-            width: DevicePixels(700),
-            height: DevicePixels(700),
+            width: DevicePixels(256),
+            height: DevicePixels(256),
         };
 
         let keeper_key = make_image_key(1, 0);
@@ -392,6 +402,53 @@ mod tests {
         atlas.remove(&big_key_a);
         let tile_b = insert_tile(&atlas, big_key_b, big);
         assert_eq!(tile_b.texture_id, keeper_tile.texture_id);
+    }
+
+    #[test]
+    fn test_small_images_share_compact_pages() {
+        let Some(atlas) = create_atlas() else {
+            return;
+        };
+        let size = Size {
+            width: DevicePixels(128),
+            height: DevicePixels(128),
+        };
+        let first = insert_tile(&atlas, make_image_key(1, 0), size);
+        let second = insert_tile(&atlas, make_image_key(2, 0), size);
+        assert_eq!(first.texture_id, second.texture_id);
+        let texture = atlas.metal_texture(first.texture_id).unwrap();
+        assert_eq!((texture.width(), texture.height()), (512, 512));
+    }
+
+    #[test]
+    fn test_large_images_are_tightly_sized_and_independently_released() {
+        let Some(atlas) = create_atlas() else {
+            return;
+        };
+        let large_key = make_image_key(1, 0);
+        let large = insert_tile(
+            &atlas,
+            large_key.clone(),
+            Size {
+                width: DevicePixels(640),
+                height: DevicePixels(640),
+            },
+        );
+        let texture = atlas.metal_texture(large.texture_id).unwrap();
+        assert_eq!((texture.width(), texture.height()), (640, 640));
+        drop(texture);
+        let small = insert_tile(
+            &atlas,
+            make_image_key(2, 0),
+            Size {
+                width: DevicePixels(64),
+                height: DevicePixels(64),
+            },
+        );
+        assert_ne!(small.texture_id, large.texture_id);
+        atlas.remove(&large_key);
+        assert!(atlas.metal_texture(large.texture_id).is_none());
+        assert!(atlas.metal_texture(small.texture_id).is_some());
     }
 
     #[test]

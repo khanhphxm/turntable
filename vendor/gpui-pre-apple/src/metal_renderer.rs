@@ -60,7 +60,9 @@ pub struct InstanceBufferPool {
 impl Default for InstanceBufferPool {
     fn default() -> Self {
         Self {
-            buffer_size: 2 * 1024 * 1024,
+            // Grow geometrically for dense scenes rather than reserving 2MiB
+            // per in-flight frame for ordinary windows.
+            buffer_size: 128 * 1024,
             buffers: Vec::new(),
         }
     }
@@ -437,7 +439,6 @@ impl MetalRenderer {
         if let Some(layer) = &self.layer {
             layer.set_drawable_size(CGSize::new(size.width.0 as f64, size.height.0 as f64));
         }
-        self.update_path_intermediate_textures(size);
     }
 
     fn update_path_intermediate_textures(&mut self, size: Size<DevicePixels>) {
@@ -447,6 +448,11 @@ impl MetalRenderer {
         if size.width.0 <= 0 || size.height.0 <= 0 {
             self.path_intermediate_texture = None;
             self.path_intermediate_msaa_texture = None;
+            return;
+        }
+        if self.path_intermediate_texture.as_ref().is_some_and(|texture| {
+            texture.width() == size.width.0 as u64 && texture.height() == size.height.0 as u64
+        }) {
             return;
         }
 
@@ -538,6 +544,15 @@ impl MetalRenderer {
         texture: &metal::TextureRef,
         viewport_size: Size<DevicePixels>,
     ) -> Result<metal::CommandBuffer> {
+        // Most UI scenes only use quads and sprites. Keep full-viewport path
+        // targets only while paths need them; Metal retains encoded resources
+        // until older command buffers complete.
+        if scene.paths.is_empty() {
+            self.path_intermediate_texture = None;
+            self.path_intermediate_msaa_texture = None;
+        } else {
+            self.update_path_intermediate_textures(viewport_size);
+        }
         let mut writer = InstanceBufferWriter::new(
             &self.device,
             &self.instance_buffer_pool,
@@ -625,9 +640,6 @@ impl MetalRenderer {
         // Headless callers do not have a Cocoa event-loop pool to release
         // autoreleased command buffers and render-pass descriptors.
         objc2::rc::autoreleasepool(|_| {
-            // Update path intermediate textures for this size
-            self.update_path_intermediate_textures(size);
-
             // Create an offscreen texture as render target
             let texture_descriptor = metal::TextureDescriptor::new();
             texture_descriptor.set_width(size.width.0 as u64);
@@ -679,8 +691,6 @@ impl MetalRenderer {
         }
 
         objc2::rc::autoreleasepool(|_| {
-            self.update_path_intermediate_textures(size);
-
             let needs_new_target = self.headless_render_target.as_ref().is_none_or(|texture| {
                 texture.width() != size.width.0 as u64 || texture.height() != size.height.0 as u64
             });
@@ -1706,6 +1716,121 @@ mod tests {
         CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
         CVPixelBufferUnlockBaseAddress, kCVPixelBufferIOSurfacePropertiesKey,
     };
+
+    #[test]
+    fn instance_buffers_start_small_and_grow_without_losing_earlier_bindings() {
+        let Some(device) = metal::Device::system_default() else {
+            return;
+        };
+        let pool = Arc::new(Mutex::new(InstanceBufferPool::default()));
+        let mut writer = InstanceBufferWriter::new(&device, &pool, device.has_unified_memory());
+        assert_eq!(writer.current.size, 128 * 1024);
+        let first = writer.write(&[1u32, 2, 3, 4]).unwrap();
+        writer.write(&vec![0u8; 128 * 1024 + 1]).unwrap();
+        assert_eq!(writer.current.size, 256 * 1024);
+        assert_eq!(writer.filled.len(), 1);
+        assert_eq!(
+            writer.filled[0].0.metal_buffer.as_ptr(),
+            first.buffer.as_ptr()
+        );
+        let buffer = writer.finish();
+        pool.lock().release(buffer);
+        assert_eq!(pool.lock().buffers.len(), 1);
+    }
+
+    #[test]
+    fn path_targets_are_lazy_reused_resized_and_released() {
+        let mut renderer = MetalRenderer::new_headless(Arc::new(Mutex::new(Default::default())));
+        let viewport = size(DevicePixels(16), DevicePixels(16));
+        renderer.update_drawable_size(viewport);
+        renderer
+            .render_scene_to_image(&Scene::default(), viewport)
+            .unwrap();
+        assert!(renderer.path_intermediate_texture.is_none());
+        assert!(renderer.path_intermediate_msaa_texture.is_none());
+
+        let mut path = Path::new(point(gpui::px(0.), gpui::px(0.)));
+        path.move_to(point(gpui::px(0.), gpui::px(0.)));
+        path.line_to(point(gpui::px(16.), gpui::px(0.)));
+        path.line_to(point(gpui::px(16.), gpui::px(16.)));
+        path.content_mask = ContentMask {
+            bounds: Bounds::new(Point::default(), size(gpui::px(16.), gpui::px(16.))),
+        };
+        path.color = gpui::rgb(0xff0000).into();
+        let mut scene = Scene::default();
+        scene.insert_primitive(path.scale(1.));
+        scene.finish();
+        let image = renderer.render_scene_to_image(&scene, viewport).unwrap();
+        assert_eq!(image.get_pixel(12, 4).0, [255, 0, 0, 255]);
+        assert_eq!(image.get_pixel(2, 12).0, [0, 0, 0, 255]);
+        let target = renderer.path_intermediate_texture.clone().unwrap();
+        renderer.render_scene_to_image(&scene, viewport).unwrap();
+        assert_eq!(
+            renderer.path_intermediate_texture.as_ref().unwrap().as_ptr(),
+            target.as_ptr()
+        );
+        renderer
+            .render_scene_to_image(&scene, size(DevicePixels(32), DevicePixels(24)))
+            .unwrap();
+        let resized = renderer.path_intermediate_texture.as_ref().unwrap();
+        assert_eq!((resized.width(), resized.height()), (32, 24));
+        assert_ne!(resized.as_ptr(), target.as_ptr());
+        renderer
+            .render_scene_to_image(&Scene::default(), viewport)
+            .unwrap();
+        assert!(renderer.path_intermediate_texture.is_none());
+        assert!(renderer.path_intermediate_msaa_texture.is_none());
+        assert_eq!(
+            renderer.render_scene_to_image(&scene, viewport).unwrap(),
+            image
+        );
+    }
+
+    #[test]
+    fn compact_and_large_image_pages_preserve_rendered_pixels() {
+        use gpui::{AtlasKey, PlatformAtlas as _, PolychromeSprite, RenderImageParams};
+        use std::borrow::Cow;
+
+        let mut renderer = MetalRenderer::new_headless(Arc::new(Mutex::new(Default::default())));
+        for side in [128, 328, 640] {
+            let key = AtlasKey::Image(RenderImageParams {
+                image_id: gpui::ImageId(side as usize),
+                frame_index: 0,
+            });
+            let pixels = [17, 34, 51, 255].repeat(side as usize * side as usize);
+            let tile = renderer
+                .sprite_atlas
+                .get_or_insert_with(key.clone(), &mut || {
+                    Ok(Some((
+                        size(DevicePixels(side), DevicePixels(side)),
+                        Cow::Borrowed(&pixels),
+                    )))
+                })
+                .unwrap()
+                .unwrap();
+            let bounds = Bounds::new(Point::default(), size(ScaledPixels(16.), ScaledPixels(16.)));
+            let mut scene = Scene::default();
+            scene.insert_primitive(PolychromeSprite {
+                order: 0,
+                pad: 0,
+                grayscale: false.into(),
+                opacity: 1.,
+                bounds,
+                content_mask: ContentMask { bounds },
+                corner_radii: Default::default(),
+                tile,
+            });
+            scene.finish();
+            let image = renderer
+                .render_scene_to_image(&scene, size(DevicePixels(16), DevicePixels(16)))
+                .unwrap();
+            for pixel in image.pixels() {
+                assert_eq!(pixel.0, [51, 34, 17, 255]);
+            }
+            renderer.sprite_atlas.remove(&key);
+            assert!(renderer.sprite_atlas.metal_texture(tile.texture_id).is_none());
+        }
+    }
 
     #[test]
     fn render_core_video_surface() {

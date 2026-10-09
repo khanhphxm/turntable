@@ -179,6 +179,8 @@ strip = true
 [patch.crates-io]
 # Park macOS display links when no window redraw or animation is pending.
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
+# Right-size Metal atlas pages, instance buffers and path targets.
+gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 # Expose Spirc queue state and mutations to the in-process player.
 librespot-connect = { path = "vendor/librespot-connect" }
 # Report session attributes instead of exiting on non-Premium accounts.
