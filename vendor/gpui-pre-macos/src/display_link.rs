@@ -50,6 +50,10 @@
 //! is a std implementation detail, not a guarantee; if it changes, the cost
 //! is added latency under contention, not incorrectness.)
 
+#[path = "frame_activity.rs"]
+mod frame_activity;
+
+use frame_activity::FrameActivity;
 use anyhow::Result;
 use core_graphics::display::CGDirectDisplayID;
 use dispatch2::{
@@ -300,6 +304,7 @@ pub struct WindowFrameSource {
     frame_requests: DispatchRetained<DispatchSource>,
     registration: Option<(CGDirectDisplayID, SubscriberId)>,
     signal: Arc<PlatformFrameSignal>,
+    activity: FrameActivity,
 }
 
 impl WindowFrameSource {
@@ -322,19 +327,43 @@ impl WindowFrameSource {
             frame_requests,
             registration: None,
             signal: Arc::new(PlatformFrameSignal::new()),
+            activity: FrameActivity::default(),
         }
     }
 
     pub fn start(&mut self, display_id: CGDirectDisplayID) -> Result<()> {
+        self.activity.request();
+        if self.registration.is_some_and(|(id, _)| id == display_id) {
+            return Ok(());
+        }
         self.stop();
         let subscriber_id =
             subscribe(display_id, self.frame_requests.clone(), self.signal.clone())?;
         self.registration = Some((display_id, subscriber_id));
+        // An idle window must redraw promptly without waiting for the first
+        // native vsync. Only merge on restart, not on every animation request:
+        // continuous animations must remain paced by CVDisplayLink.
+        if let Some(at) = PlatformFrameSignal::capture(Instant::now) {
+            self.signal.record(at, FrameRequestSource::LocalSchedule);
+        }
+        self.frame_requests.merge_data(1);
         Ok(())
     }
 
     pub fn take_signal(&self) -> Option<(Instant, FrameRequestSource)> {
         self.signal.take()
+    }
+
+    /// Renews frame demand and reports whether native vsyncs are already armed.
+    pub fn request_frame(&mut self) -> bool {
+        self.activity.request();
+        self.registration.is_some()
+    }
+
+    pub fn complete_frame(&mut self) {
+        if self.activity.should_park() {
+            self.stop();
+        }
     }
 
     pub fn stop(&mut self) {

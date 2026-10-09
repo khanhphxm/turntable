@@ -833,19 +833,32 @@ impl MacWindowState {
         }
     }
 
+    fn request_frame(&mut self) {
+        // Animations wake us on every frame. Renew running demand without
+        // querying AppKit or allocating the NSScreenNumber lookup key again.
+        if !self
+            .frame_source
+            .as_mut()
+            .is_some_and(WindowFrameSource::request_frame)
+        {
+            self.start_display_link();
+        }
+    }
+
     fn start_display_link(&mut self) {
-        self.stop_display_link();
         unsafe {
             if !self
                 .native_window
                 .occlusionState()
                 .contains(NSWindowOcclusionState::NSWindowOcclusionStateVisible)
             {
+                self.stop_display_link();
                 return;
             }
         }
         let Some(display_id) = display_id_for_screen(unsafe { self.native_window.screen() }) else {
             // AppKit can temporarily report no screen while displays are being reconfigured.
+            self.stop_display_link();
             return;
         };
         let data = self.native_view.as_ptr() as *mut c_void;
@@ -2018,6 +2031,15 @@ impl PlatformWindow for MacWindow {
         }
     }
 
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let window_state = Arc::downgrade(&self.0);
+        Some(Rc::new(move || {
+            if let Some(window_state) = window_state.upgrade() {
+                window_state.lock().request_frame();
+            }
+        }))
+    }
+
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         self.0.as_ref().lock().request_frame_callback = Some(callback);
     }
@@ -2124,6 +2146,9 @@ impl PlatformWindow for MacWindow {
     fn draw(&self, scene: &gpui::Scene) {
         let mut this = self.0.lock();
         this.renderer.draw(scene);
+        if let Some(frame_source) = this.frame_source.as_mut() {
+            frame_source.request_frame();
+        }
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
@@ -2655,6 +2680,7 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
     let Some(event) = event else {
         return NO;
     };
+    lock.request_frame();
 
     let run_callback = |event: PlatformInput| -> BOOL {
         let mut callback = window_state.as_ref().lock().event_callback.take();
@@ -2936,6 +2962,7 @@ extern "C" fn handle_view_event(this: &Object, _: Sel, native_event: id) {
             _ => {}
         }
 
+        lock.request_frame();
         if let Some(mut callback) = lock.event_callback.take() {
             drop(lock);
             callback(event);
@@ -3108,6 +3135,7 @@ fn update_window_scale_factor(window_state: &Arc<Mutex<MacWindowState>>) {
     }
 
     lock.renderer.update_drawable_size(drawable_size);
+    lock.start_display_link();
 
     if let Some(mut callback) = lock.resize_callback.take() {
         let content_size = lock.content_size();
@@ -3308,6 +3336,7 @@ extern "C" fn set_frame_size(this: &Object, _: Sel, size: NSSize) {
     let scale_factor = lock.scale_factor();
     let drawable_size = new_size.to_device_pixels(scale_factor);
     lock.renderer.update_drawable_size(drawable_size);
+    lock.start_display_link();
 
     if let Some(mut callback) = lock.resize_callback.take() {
         let content_size = lock.content_size();
@@ -3359,7 +3388,11 @@ extern "C" fn step(view: *mut c_void) {
             signal_source,
             ..Default::default()
         });
-        window_state.lock().request_frame_callback = Some(callback);
+        let mut lock = window_state.lock();
+        lock.request_frame_callback = Some(callback);
+        if let Some(frame_source) = lock.frame_source.as_mut() {
+            frame_source.complete_frame();
+        }
     }
 }
 
@@ -3513,6 +3546,7 @@ extern "C" fn attributed_substring_for_proposed_range(
 extern "C" fn do_command_by_selector(this: &Object, _: Sel, _: Sel) {
     let state = unsafe { get_window_state(this) };
     let mut lock = state.as_ref().lock();
+    lock.request_frame();
     let keystroke = lock.keystroke_for_do_command.take();
     let mut event_callback = lock.event_callback.take();
     drop(lock);
@@ -3534,6 +3568,7 @@ extern "C" fn view_did_change_effective_appearance(this: &Object, _: Sel) {
         let state = get_window_state(this);
         let appearance_changed_callback = {
             let mut lock = state.as_ref().lock();
+            lock.start_display_link();
             lock.appearance_changed_callback.take()
         };
 
@@ -3733,6 +3768,7 @@ async fn synthetic_drag(
             lock.synthetic_drag_counter += 1;
             break;
         }
+        lock.request_frame();
         if let Some(mut callback) = lock.event_callback.take() {
             drop(lock);
             callback(PlatformInput::MouseMove(event.clone()));
@@ -3754,6 +3790,7 @@ fn send_file_drop_event(
     };
 
     let mut lock = window_state.lock();
+    lock.request_frame();
     if let Some(mut callback) = lock.event_callback.take() {
         drop(lock);
         callback(PlatformInput::FileDrop(file_drop_event));
