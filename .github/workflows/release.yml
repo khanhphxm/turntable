@@ -51,6 +51,7 @@ jobs:
     name: macOS universal
     needs: version
     runs-on: macos-14
+    environment: release
     timeout-minutes: 120
     env:
       TURNTABLE_VERSION: ${{ needs.version.outputs.version }}
@@ -202,7 +203,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
-      contents: write
+      contents: write # Required to create/publish the GitHub release and upload its artifacts.
     env:
       RELEASE_TAG: ${{ needs.version.outputs.tag }}
       TURNTABLE_VERSION: ${{ needs.version.outputs.version }}
@@ -243,6 +244,7 @@ jobs:
     needs: [version, publish]
     if: needs.version.outputs.prerelease == 'false'
     runs-on: ubuntu-24.04
+    environment: release
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
