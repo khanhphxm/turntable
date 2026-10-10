@@ -11,6 +11,11 @@ TODO.md
 .env
 .env.*
 *.pem
+*.p12
+*.p8
+*.key
+token.json
+turntable-tap
 credentials*.json
 
 # Build output
