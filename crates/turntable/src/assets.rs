@@ -1,12 +1,13 @@
-//! Bundled assets: Lucide icons (only those named below are embedded), the app icon and a few
-//! filled glyphs of turntable's own, with GPUI Kit's component icons behind them.
+//! Bundled assets: Lucide icons (only those named below are embedded), the app icon and Turntable's
+//! filled glyphs, with GPUI Kit's component icons behind them. The transport glyphs are original
+//! triangles and rectangles, not copied or traced from Spotify artwork, and use Turntable's MIT license.
 
 use std::borrow::Cow;
 
 use gpui_kit::{AssetSource, Result, SharedString};
 
-/// One list names every icon: Lucide's (from GPUI Kit's bundled set, only these embedded) and the
-/// few turntable draws itself, filled as Spotify's transport and heart are.
+/// One list names every icon: Lucide's (from GPUI Kit's bundled set, only these embedded) and
+/// Turntable's filled glyphs, including the original geometric transport icons.
 macro_rules! icons {
 	(lucide { $($lv:ident => $lucide:ident),* $(,)? } own { $($ov:ident => $file:literal),* $(,)? }) => {
 		/// The bundled icons.
