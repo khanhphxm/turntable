@@ -15,5 +15,7 @@
 	<key>LSApplicationCategoryType</key><string>public.app-category.music</string>
 	<key>LSMinimumSystemVersion</key><string>12.0</string>
 	<key>NSHighResolutionCapable</key><true/>
+	<!-- No one-time-code AutoFill in ordinary text fields (see main.rs). -->
+	<key>NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac</key><true/>
 </dict>
 </plist>

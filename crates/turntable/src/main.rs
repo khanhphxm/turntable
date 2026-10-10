@@ -45,6 +45,8 @@ use turntable_core::{Controller, Options, Paths};
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 fn main() {
+	#[cfg(target_os = "macos")]
+	disable_autofill_heuristics();
 	let application = gpui_kit::application().with_assets(assets::Assets);
 	application.on_reopen(desktop::show);
 	application.run(|cx| {
@@ -107,6 +109,22 @@ fn main() {
 			shell.update(cx, |s, _| s.now_playing = np);
 		}
 	});
+}
+
+/// macOS runs an AutoFill helper process ("AutoFill (Turntable)", ~12–15 MB each) for apps whose
+/// focused view accepts text, to offer one-time codes, contacts and passwords. A music player's
+/// search box needs none of that. This undocumented AppKit default (also used by Ghostty) turns
+/// the heuristics off for this app only; `Edit → AutoFill` still works on request. Info.plist's
+/// `NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac` is the documented half of the opt-out.
+#[cfg(target_os = "macos")]
+fn disable_autofill_heuristics() {
+	use objc2::{rc::Retained, runtime::AnyObject};
+	use objc2_foundation::{NSDictionary, NSNumber, NSString, NSUserDefaults};
+	let key = NSString::from_str("NSAutoFillHeuristicControllerEnabled");
+	let off: Retained<AnyObject> = NSNumber::new_bool(false).into();
+	let defaults = NSDictionary::from_retained_objects(&[&*key], &[off]);
+	// SAFETY: a dictionary of property-list values (NSString → NSNumber), as the API requires.
+	unsafe { NSUserDefaults::standardUserDefaults().registerDefaults(&defaults) };
 }
 
 /// Saves the window's size, place and state whenever they change (once moves settle).
