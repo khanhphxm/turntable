@@ -5,6 +5,10 @@ plugin. Use the archive matching your CPU: `linux-x86_64` or `linux-aarch64`.
 Release builds use Ubuntu 24.04 (glibc 2.39); older distributions are not supported
 by these binaries. Build from source on older systems instead.
 
+Before installing, review LICENSE and THIRD_PARTY_NOTICES in the archive (or
+`/usr/share/doc/turntable/` in the DEB). The bundled D-Bus library is provided
+under AFL-2.1; please accept those terms before installing or using it.
+
 For the matching Ubuntu 24.04 `.deb`, use
 `sudo apt install ./turntable-<version>-linux-<arch>.deb`; apt installs its runtime
 dependencies and desktop entry. Remove it with `sudo apt remove turntable`.

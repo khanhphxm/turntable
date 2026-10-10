@@ -16,6 +16,7 @@ try {
     New-Item -ItemType Directory -Path $Stage | Out-Null
     Copy-Item $Binary (Join-Path $Stage 'turntable.exe')
     Copy-Item (Join-Path $Root 'LICENSE') $Stage
+    Copy-Item (Join-Path $Root 'THIRD_PARTY_NOTICES') $Stage
     Copy-Item (Join-Path $PSScriptRoot 'INSTALL-windows.md') (Join-Path $Stage 'INSTALL.md')
     Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath (Join-Path $Dist "turntable-$Version-windows-x86_64.zip") -Force
     & $Iscc "/DAppVersion=$Version" "/DNumericVersion=$NumericVersion" "/DSourceDir=$Stage" "/DProjectDir=$Root" "/DOutputDir=$Dist" (Join-Path $PSScriptRoot 'windows/turntable.iss')

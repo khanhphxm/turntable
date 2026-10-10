@@ -38,7 +38,8 @@ the app before archiving, then notarizes/staples the signed DMG too.
 Build natively on Ubuntu 24.04 for each CPU, then run
 `TURNTABLE_VERSION=0.1.0 packaging/bundle-linux.sh [binary]`.
 `TURNTABLE_ARCH=x86_64|aarch64` overrides CPU detection. Each tarball includes
-`bin/turntable`, a `.desktop` entry, hicolor PNG/SVG icons, LICENSE and INSTALL.md;
+`bin/turntable`, a `.desktop` entry, hicolor PNG/SVG icons, LICENSE,
+THIRD_PARTY_NOTICES and INSTALL.md;
 each DEB installs under `/usr`, with Ubuntu runtime dependencies and architecture
 `amd64` / `arm64`. Prereleases use Debian's `~` ordering. Packaging needs
 `dpkg-deb`, not root. Binaries require glibc 2.39+ and a Vulkan-capable GPU.
@@ -65,6 +66,24 @@ After changing `icon.svg`, install `resvg` (`cargo install --locked resvg --vers
 on macOS for ICNS. Commit all generated `icons/` together; ordinary builds need
 no renderer or Python packages.
 
+## Third-party notices
+
+Every package includes the root `THIRD_PARTY_NOTICES`: macOS stores it in
+`Contents/Resources` before signing, Linux DEBs in `/usr/share/doc/turntable`,
+and portable archives and Windows installations beside LICENSE.
+
+After dependency or embedded-asset updates, install the pinned generator with
+`nice -n 19 env CARGO_BUILD_JOBS=4 cargo install cargo-about --version 0.9.2 --locked --features cli`,
+then run `packaging/generate-notices.sh` and commit the regenerated file.
+The config covers the complete dependency graph for all five release targets,
+including build-time and development dependencies conservatively. The script
+also retains asset, copied-snippet and native-library notices which Cargo
+package license expressions alone do not describe. Exact crate-source links
+cover MPL-2.0 source availability; bundled D-Bus uses the AFL-2.1 option, whose
+terms recipients are asked to review and accept in the Linux install guide.
+Before releasing, review changes in bundled native dependencies and their
+licensing as well as the Rust crate manifests.
+
 ## CI and release setup
 
 **Actions disabled while private:** leave repository Settings → Actions disabled
@@ -79,7 +98,9 @@ CI uses nightly rustfmt and stable per-OS lint/tests. Required check names:
 conventional commits, e.g. `feat(player): add shuffle`. Release builds are
 uncached so published binaries do not depend on CI cache contents.
 
-Set repository **Actions secrets** (no PAT is needed; `GITHUB_TOKEN` is built in):
+Set **Actions secrets** in the `release` environment (Settings → Environments);
+only `v*` tags may deploy. After copying the values, remove the corresponding
+repository secrets. No PAT is needed; `GITHUB_TOKEN` is built in.
 
 | Secret | Value / creation |
 | --- | --- |
@@ -124,8 +145,10 @@ keys with **Allow write access**, and save the private key as `HOMEBREW_TAP_KEY`
 1. Update `[workspace.package].version` and `Cargo.lock`; all workspace packages
    must match. Merge after CI passes, then tag that main commit, substituting
    the real version: `git tag -a v0.1.0 -m 'Turntable 0.1.0' && git push origin v0.1.0`.
-2. Watch **Release** (manual dispatch requires an **existing tag**). It validates
-   the tag/version, builds the immutable commit, generates conventional-commit
+2. Watch **Release**. For manual dispatch, select the **existing release tag**
+   in the workflow ref dropdown (not `main`) and use the same tag as the input;
+   the `release` environment only permits `v*` tag refs. It validates the
+   tag/version, builds the immutable commit, generates conventional-commit
    notes with `cliff.toml`, and uploads all eight artifacts plus `SHA256SUMS` to a
    draft before publishing: macOS universal ZIP/DMG; Linux x86_64/aarch64
    tarballs/DEBs; Windows x86_64 ZIP/per-user EXE. Never move a published tag.

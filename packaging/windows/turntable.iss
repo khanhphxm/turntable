@@ -49,6 +49,7 @@ WizardStyle=modern
 [Files]
 Source: "{#SourceDir}\turntable.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\THIRD_PARTY_NOTICES"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\INSTALL.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
