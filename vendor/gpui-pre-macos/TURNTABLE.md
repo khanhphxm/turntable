@@ -4,6 +4,13 @@ Based on gpui-pre-macos 0.3.9 (Apache-2.0), the registry snapshot of Zed
 `93d745668805029476e6d7fbb19652116fed51de`. The registry's source, normalized
 manifest and license are retained. The workspace patches crates.io to this copy.
 
+The normalized manifest additionally allows upstream's deprecated `cocoa`
+usage for this path dependency, matching registry builds' capped warnings.
+Changed upstream files carry a Turntable modification notice pointing here;
+`src/frame_activity.rs` is Turntable's added frame-demand policy, not an
+upstream file. The retained Apache text and the MIT display-link bindings
+notice are included in the distributed root `THIRD_PARTY_NOTICES`.
+
 ## Demand-driven display links
 
 The upstream macOS backend subscribes every visible window to CVDisplayLink for

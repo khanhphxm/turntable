@@ -1,3 +1,5 @@
+// Modified by Turntable from upstream GPUI/Zed; see ../TURNTABLE.md for changes.
+
 use crate::{
     BoolExt, MacDisplay, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
     TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native,

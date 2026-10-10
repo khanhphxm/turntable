@@ -1,3 +1,5 @@
+// Modified by Turntable from upstream GPUI/Zed; see ../TURNTABLE.md for changes.
+
 use anyhow::{Context as _, Result};
 use derive_more::{Deref, DerefMut};
 use etagere::BucketedAtlasAllocator;

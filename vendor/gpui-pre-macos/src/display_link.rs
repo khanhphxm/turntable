@@ -1,3 +1,5 @@
+// Modified by Turntable from upstream GPUI/Zed; see ../TURNTABLE.md for changes.
+
 //! Frame pacing for macOS windows, built on `CVDisplayLink`.
 //!
 //! CVDisplayLink has no safe teardown: `CVDisplayLinkStop` merely flags the

@@ -1,3 +1,5 @@
+// Modified by Turntable from upstream GPUI/Zed; see ../TURNTABLE.md for changes.
+
 use crate::metal_atlas::MetalAtlas;
 use anyhow::{Context as _, Result};
 use block2::RcBlock;
