@@ -614,6 +614,7 @@ impl<NodeContext> TaffyTree<NodeContext> {
         self.nodes.clear();
         self.children.clear();
         self.parents.clear();
+        self.node_context_data.clear();
     }
 
     /// Remove a specific node from the tree and drop it
@@ -637,6 +638,7 @@ impl<NodeContext> TaffyTree<NodeContext> {
         let _ = self.children.remove(key);
         let _ = self.parents.remove(key);
         let _ = self.nodes.remove(key);
+        let _ = self.node_context_data.remove(key);
 
         Ok(node)
     }
@@ -950,6 +952,15 @@ mod tests {
     use crate::style::{Dimension, Display, FlexDirection};
     use crate::style_helpers::*;
     use crate::util::sys;
+    use core::cell::Cell;
+
+    struct ContextDrop<'a>(&'a Cell<usize>);
+
+    impl Drop for ContextDrop<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
 
     fn size_measure_function(
         known_dimensions: Size<Option<f32>>,
@@ -1017,6 +1028,56 @@ mod tests {
         assert_eq!(taffy.child_count(node), 2);
         assert_eq!(taffy.children(node).unwrap()[0], child0);
         assert_eq!(taffy.children(node).unwrap()[1], child1);
+    }
+
+    #[test]
+    fn clear_should_drop_all_contexts_without_reusing_slots() {
+        let dropped = Cell::new(0);
+        let mut taffy = TaffyTree::new();
+        let first = taffy.new_leaf_with_context(Style::default(), ContextDrop(&dropped)).unwrap();
+        let second = taffy.new_leaf_with_context(Style::default(), ContextDrop(&dropped)).unwrap();
+
+        taffy.clear();
+
+        assert_eq!(dropped.get(), 2);
+        assert_eq!(taffy.total_node_count(), 0);
+        assert!(taffy.get_node_context(first).is_none());
+        assert!(taffy.get_node_context(second).is_none());
+        taffy.clear();
+        assert_eq!(dropped.get(), 2);
+    }
+
+    #[test]
+    fn clear_should_invalidate_old_keys_before_unmeasured_slot_reuse() {
+        let dropped = Cell::new(0);
+        let mut taffy = TaffyTree::new();
+        let old = taffy.new_leaf_with_context(Style::default(), ContextDrop(&dropped)).unwrap();
+
+        taffy.clear();
+        let replacement = taffy.new_leaf(Style::default()).unwrap();
+
+        assert_ne!(old, replacement);
+        assert_eq!(dropped.get(), 1);
+        assert!(taffy.get_node_context(old).is_none());
+        assert!(taffy.get_node_context(replacement).is_none());
+        assert_eq!(taffy.total_node_count(), 1);
+    }
+
+    #[test]
+    fn remove_should_drop_only_the_removed_nodes_context() {
+        let dropped = Cell::new(0);
+        let mut taffy = TaffyTree::new();
+        let removed = taffy.new_leaf_with_context(Style::default(), ContextDrop(&dropped)).unwrap();
+        let retained = taffy.new_leaf_with_context(Style::default(), ContextDrop(&dropped)).unwrap();
+
+        taffy.remove(removed).unwrap();
+
+        assert_eq!(dropped.get(), 1);
+        assert!(taffy.get_node_context(removed).is_none());
+        assert!(taffy.get_node_context(retained).is_some());
+        assert_eq!(taffy.total_node_count(), 1);
+        taffy.clear();
+        assert_eq!(dropped.get(), 2);
     }
 
     #[test]
