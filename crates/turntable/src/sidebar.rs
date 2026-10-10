@@ -312,7 +312,9 @@ impl Shell {
 			.on_hover(cx.listener(move |this, over: &bool, _, cx| this.prefetch_on_hover(&hovered, *over, cx)))
 			.w_full()
 			.h(if compact && !collapsed { px(32.) } else { px(64.) })
-			.p_2()
+			// The rail's 56 px row holds only the 48 px art: a smaller inset keeps it centred, with
+			// the hover highlight showing evenly on every side.
+			.map(|s| if collapsed { s.p_1().justify_center() } else { s.p_2() })
 			.flex()
 			.items_center()
 			.gap_3()
