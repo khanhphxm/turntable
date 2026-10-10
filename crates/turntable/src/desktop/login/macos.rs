@@ -5,7 +5,7 @@ use objc2_foundation::NSBundle;
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 use plist::{Dictionary, Value};
 
-const LABEL: &str = "com.khanhphxm.turntable";
+const LABEL: &str = "wtf.penguins.turntable";
 
 /// SMAppService needs a signed .app bundle. Older macOS and standalone development
 /// binaries use a per-user LaunchAgent instead; a denied modern login item is never

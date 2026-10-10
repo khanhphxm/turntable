@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key><string>en</string>
 	<key>CFBundleExecutable</key><string>turntable</string>
 	<key>CFBundleIconFile</key><string>turntable.icns</string>
-	<key>CFBundleIdentifier</key><string>com.khanhphxm.turntable</string>
+	<key>CFBundleIdentifier</key><string>wtf.penguins.turntable</string>
 	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
 	<key>CFBundleName</key><string>Turntable</string>
 	<key>CFBundleDisplayName</key><string>Turntable</string>
