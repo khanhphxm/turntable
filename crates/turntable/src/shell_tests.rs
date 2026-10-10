@@ -1,6 +1,9 @@
 //! Portable GPUI TestPlatform journeys. The real Shell, input handlers, context menus,
 //! dialog hitboxes and prepaint/paint pipeline run without native windows, GPU or Spotify.
 
+#[path = "cache_tests.rs"]
+mod caching;
+
 use gpui_kit::{AppContext as _, Entity, KeyDownEvent, Keystroke, Modifiers, MouseButton, component::Root, point, px, size};
 use gpui_test::{TestAppContext, VisualTestContext};
 use turntable_core::{
@@ -64,7 +67,6 @@ fn setup() -> (Entity<Shell>, VisualTestContext, tempfile::TempDir) {
 
 fn frame(cx: &mut VisualTestContext) {
 	cx.update(|window, cx| {
-		window.refresh();
 		window.draw(cx).clear(cx);
 	});
 	cx.run_until_parked();
@@ -534,4 +536,25 @@ mod shortcuts {
 			assert_eq!(shell.page, Page::Settings);
 		});
 	}
+}
+
+#[test]
+#[ignore = "manual per-repaint timing; no Spotify or native window"]
+fn playhead_repaint_benchmark() {
+	let (shell, mut cx, _directory) = setup();
+	let playhead = cx.read_entity(&shell, |shell, _| shell.playhead.clone());
+	cx.update(|window, cx| {
+		// Warm the scene, text cache and allocations before timing just the draw pipeline.
+		for _ in 0..20 {
+			playhead.update(cx, |_, cx| cx.notify());
+			window.draw(cx).clear(cx);
+		}
+		let start = std::time::Instant::now();
+		for _ in 0..200 {
+			playhead.update(cx, |_, cx| cx.notify());
+			window.draw(cx).clear(cx);
+		}
+		let elapsed = start.elapsed();
+		println!("200 playhead-only draws: {elapsed:?}; per draw: {:?}", elapsed / 200);
+	});
 }

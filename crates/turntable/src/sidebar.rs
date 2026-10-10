@@ -114,7 +114,7 @@ impl Shell {
 			.group("library")
 			.on_hover(cx.listener(|this, over: &bool, _, cx| {
 				if this.library_reveal.set(*over) {
-					cx.notify();
+					this.regions.library.update(cx, |_, cx| cx.notify());
 				}
 			}))
 			.flex_none()

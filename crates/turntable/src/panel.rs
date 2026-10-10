@@ -123,7 +123,7 @@ impl Shell {
 			.id("right-panel")
 			.on_hover(cx.listener(|this, over: &bool, _, cx| {
 				if this.panel_reveal.set(*over) {
-					cx.notify();
+					this.regions.panel.update(cx, |_, cx| cx.notify());
 				}
 			}))
 			.child(

@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use gpui_kit::{
-	Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
-	Subscription, Task, Window, div, prelude::FluentBuilder as _, px, relative,
+	Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, StyleRefinement,
+	Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _, px, relative,
 };
 use turntable_core::{
 	Msg, Panel, Route,
@@ -129,7 +129,7 @@ impl Render for Playhead {
 }
 
 impl Shell {
-	pub fn player_bar(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+	pub fn player_bar(&self) -> impl IntoElement {
 		div()
 			.h(theme::BAR_H)
 			.flex_none()
@@ -137,13 +137,13 @@ impl Shell {
 			.items_center()
 			.justify_between()
 			.px(theme::GAP)
-			.child(self.bar_now(cx))
-			.child(self.bar_transport(cx))
-			.child(self.bar_extras(cx))
+			.child(self.regions.now_playing.clone().cached(StyleRefinement::default().w(relative(0.3)).min_w(px(SIDE_MIN_W)).h_full()))
+			.child(self.bar_transport())
+			.child(self.regions.extras.clone().cached(StyleRefinement::default().w(relative(0.3)).min_w(px(SIDE_MIN_W)).h_full()))
 	}
 
-	fn bar_now(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-		let side = div().w(relative(0.3)).min_w(px(SIDE_MIN_W)).flex().items_center().gap_3().pl_2();
+	pub(crate) fn bar_now(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+		let side = div().w_full().h_full().flex().items_center().gap_3().pl_2();
 		let item = &self.st().item;
 		if item.uri.is_empty() {
 			return side;
@@ -202,11 +202,7 @@ impl Shell {
 		})
 	}
 
-	fn bar_transport(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
-		let st = self.st();
-		let playing = st.playing();
-		let shuffle = st.options.shuffle;
-		let repeat = st.options.repeat;
+	fn bar_transport(&self) -> impl IntoElement {
 		div()
 			.flex_1()
 			.max_w(px(722.))
@@ -214,48 +210,50 @@ impl Shell {
 			.flex_col()
 			.items_center()
 			.gap_1()
-			.child(
-				div()
-					.flex()
-					.items_center()
-					.gap_2()
-					.child(icon_button(
-						"shuffle",
-						Icon::Shuffle,
-						px(16.),
-						shuffle,
-						cx.listener(|this, _, _, cx| this.send(Msg::ToggleShuffle, cx)),
-					))
-					.child(icon_button("prev", Icon::Prev, px(16.), false, cx.listener(|this, _, _, cx| this.send(Msg::Prev, cx))))
-					.child(
-						div()
-							.id("play")
-							.size(px(32.))
-							.mx_2()
-							.rounded_full()
-							.bg(theme::text())
-							.flex()
-							.items_center()
-							.justify_center()
-							.cursor_pointer()
-							.hover(|s| s.bg(theme::alpha(theme::text(), 0.9)))
-							.active(|s| s.bg(theme::subdued()))
-							.on_click(cx.listener(|this, _, _, cx| this.send(Msg::TogglePlay, cx)))
-							.child(icon(if playing { Icon::Pause } else { Icon::Play }, px(16.), theme::base())),
-					)
-					.child(icon_button("next", Icon::Next, px(16.), false, cx.listener(|this, _, _, cx| this.send(Msg::Next, cx))))
-					.child(icon_button(
-						"repeat",
-						if repeat == Repeat::Track { Icon::RepeatOne } else { Icon::Repeat },
-						px(16.),
-						repeat != Repeat::Off,
-						cx.listener(|this, _, _, cx| this.send(Msg::CycleRepeat, cx)),
-					)),
-			)
+			.child(self.regions.transport.clone().cached(StyleRefinement::default().w_full().h(px(32.)).flex_none()))
 			.child(self.playhead.clone())
 	}
 
-	fn bar_extras(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+	pub(crate) fn bar_buttons(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
+		let st = self.st();
+		let playing = st.playing();
+		let shuffle = st.options.shuffle;
+		let repeat = st.options.repeat;
+		div()
+			.w_full()
+			.flex()
+			.items_center()
+			.justify_center()
+			.gap_2()
+			.child(icon_button("shuffle", Icon::Shuffle, px(16.), shuffle, cx.listener(|this, _, _, cx| this.send(Msg::ToggleShuffle, cx))))
+			.child(icon_button("prev", Icon::Prev, px(16.), false, cx.listener(|this, _, _, cx| this.send(Msg::Prev, cx))))
+			.child(
+				div()
+					.id("play")
+					.size(px(32.))
+					.mx_2()
+					.rounded_full()
+					.bg(theme::text())
+					.flex()
+					.items_center()
+					.justify_center()
+					.cursor_pointer()
+					.hover(|s| s.bg(theme::alpha(theme::text(), 0.9)))
+					.active(|s| s.bg(theme::subdued()))
+					.on_click(cx.listener(|this, _, _, cx| this.send(Msg::TogglePlay, cx)))
+					.child(icon(if playing { Icon::Pause } else { Icon::Play }, px(16.), theme::base())),
+			)
+			.child(icon_button("next", Icon::Next, px(16.), false, cx.listener(|this, _, _, cx| this.send(Msg::Next, cx))))
+			.child(icon_button(
+				"repeat",
+				if repeat == Repeat::Track { Icon::RepeatOne } else { Icon::Repeat },
+				px(16.),
+				repeat != Repeat::Off,
+				cx.listener(|this, _, _, cx| this.send(Msg::CycleRepeat, cx)),
+			))
+	}
+
+	pub(crate) fn bar_extras(&mut self, cx: &mut Context<'_, Self>) -> impl IntoElement {
 		let side = self.side();
 		let muted = self.st().volume == 0;
 		let remote = self.st().remote().map(|d| d.name.clone());
@@ -264,11 +262,12 @@ impl Shell {
 			icon_button(id, glyph, px(16.), side == Some(s), cx.listener(move |this, _, _, cx| this.toggle_side(s, cx)))
 		};
 		div()
-			.w(relative(0.3))
-			.min_w(px(SIDE_MIN_W))
+			.w_full()
+			.h_full()
 			.flex()
 			.flex_col()
 			.items_end()
+			.justify_center()
 			.child(
 				div()
 					.flex()

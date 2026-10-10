@@ -32,6 +32,7 @@ impl Shell {
 		let can_forward = !self.forward.is_empty();
 		div()
 			.relative()
+			.w_full()
 			.h(theme::TOP_H)
 			.flex_none()
 			.flex()

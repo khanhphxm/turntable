@@ -9,8 +9,9 @@ mod tests;
 use std::{sync::Arc, time::Instant};
 
 use gpui_kit::{
-	AppContext as _, Context, Entity, FocusHandle, Focusable, ImageSource, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment,
-	ListScrollEvent, ListState, ParentElement as _, Pixels, Render, StatefulInteractiveElement as _, Styled as _, Task, Window, actions,
+	AnyElement, AppContext as _, Context, Entity, FocusHandle, Focusable, ImageSource, InteractiveElement as _, IntoElement, KeyBinding,
+	ListAlignment, ListScrollEvent, ListState, ParentElement as _, Pixels, Render, StatefulInteractiveElement as _, StyleRefinement,
+	Styled as _, Task, Window, actions,
 	component::{
 		WindowExt as _,
 		input::{InputEvent, InputState},
@@ -134,6 +135,7 @@ pub struct Shell {
 	pub forward:              Vec<Page>,
 	/// Bumped whenever the right-hand panel changes, so its entrance animation runs again.
 	pub panel_gen:            usize,
+	pub(crate) regions:       crate::regions::Regions,
 	pub playhead:             Entity<crate::bar::Playhead>,
 	pub volume_slider:        Entity<Slider>,
 	/// Settings' crossfade length (0..=MAX_CROSSFADE seconds).
@@ -270,6 +272,7 @@ impl Shell {
 			back: std::collections::VecDeque::new(),
 			forward: Vec::new(),
 			panel_gen: 0,
+			regions: crate::regions::Regions::new(cx),
 			playhead,
 			volume_slider,
 			crossfade,
@@ -604,6 +607,18 @@ impl Shell {
 			},
 		}
 	}
+
+	pub(crate) fn page_content(&mut self, cx: &mut Context<'_, Self>) -> AnyElement {
+		match self.page.clone() {
+			Page::Core(Route::Home | Route::Library) => self.home_page(cx).into_any_element(),
+			Page::Core(Route::Folder(id)) => self.folder_page(&id, cx).into_any_element(),
+			Page::Core(Route::Search) => self.search_page(cx).into_any_element(),
+			Page::Core(Route::Artist(_)) => self.artist_page(cx).into_any_element(),
+			Page::Core(route @ (Route::Liked | Route::Playlist(_) | Route::Album(_))) => self.listing_page(route, cx).into_any_element(),
+			Page::Settings => self.settings_page(cx).into_any_element(),
+			Page::Equalizer => self.eq_page(cx).into_any_element(),
+		}
+	}
 }
 
 /// Drives the core: sleeps until a worker wakes it or its next timer is due, then pumps.
@@ -675,19 +690,10 @@ impl Render for Shell {
 		}
 		let width = window.viewport_size().width;
 		self.crowded = width < self.library_w + self.panel_w + px(MAIN_MIN_W) + theme::GAP * 4.;
-		let side = self.side();
+		let region_style = StyleRefinement::default().h_full().flex_none();
 		let left = self.sidebar_w();
 		let right = self.right_w() + theme::GAP;
 		self.main_w = f32::from(window.viewport_size().width - left - right - theme::GAP * 3.);
-		let main = match self.page.clone() {
-			Page::Core(Route::Home | Route::Library) => self.home_page(cx).into_any_element(),
-			Page::Core(Route::Folder(id)) => self.folder_page(&id, cx).into_any_element(),
-			Page::Core(Route::Search) => self.search_page(cx).into_any_element(),
-			Page::Core(Route::Artist(_)) => self.artist_page(cx).into_any_element(),
-			Page::Core(route @ (Route::Liked | Route::Playlist(_) | Route::Album(_))) => self.listing_page(route, cx).into_any_element(),
-			Page::Settings => self.settings_page(cx).into_any_element(),
-			Page::Equalizer => self.eq_page(cx).into_any_element(),
-		};
 		let toast = self.st().toast.clone().filter(|(id, _)| Some(*id) != self.toast_gone);
 		let dialog = self.dialog(window, cx);
 		let menu = self.menu_overlay(window, cx);
@@ -698,15 +704,22 @@ impl Render for Shell {
 			.bg(theme::base())
 			.text_color(theme::text())
 			.font_family(".SystemUIFont")
-			.when(self.full_view != FullView::Screen, |s| s.child(self.top_bar(window, cx)))
+			.when(self.full_view != FullView::Screen, |s| {
+				s.child(self.regions.top.clone().cached(StyleRefinement::default().w_full().h(theme::TOP_H).flex_none()))
+			})
 			.child(
 				div()
 					.flex_1()
 					.min_h_0()
 					.flex()
 					.px(theme::GAP)
-					.when(self.full_view == FullView::Off, |row| row.child(self.sidebar(cx)).child(Self::resize_handle(Edge::Library, cx)))
-					.when(self.full_view != FullView::Off, |row| row.child(self.full_view_page(cx)))
+					.when(self.full_view == FullView::Off, |row| {
+						row.child(self.regions.library.clone().cached(region_style.clone().w(left)))
+							.child(Self::resize_handle(Edge::Library, cx))
+					})
+					.when(self.full_view != FullView::Off, |row| {
+						row.child(self.regions.page.clone().cached(StyleRefinement::default().flex_1().min_w_0().h_full()))
+					})
 					.when(self.full_view == FullView::Off, |row| {
 						row.child(
 							div()
@@ -717,19 +730,17 @@ impl Render for Shell {
 								.rounded(theme::RADIUS)
 								.overflow_hidden()
 								.bg(theme::panel())
-								.child(main)
+								.child(self.regions.page.clone().cached(StyleRefinement::default().size_full()))
 								.when_some(toast, |s, (id, text)| s.child(toast_view(text, id)))
 								.child(crate::widgets::corner_mask()),
 						)
 					})
 					.when(self.full_view == FullView::Off, |row| {
-						row.child(Self::resize_handle(Edge::Panel, cx)).child(match side {
-							Some(side) => self.right_panel(side, cx).into_any_element(),
-							None => self.folded_panel(cx).into_any_element(),
-						})
+						row.child(Self::resize_handle(Edge::Panel, cx))
+							.child(self.regions.panel.clone().cached(region_style.w(self.right_w())))
 					}),
 			)
-			.child(self.player_bar(cx))
+			.child(self.player_bar())
 			.relative()
 			.children(dialog)
 			.children(menu)
@@ -827,6 +838,7 @@ fn search_input(window: &mut Window, cx: &mut Context<'_, Shell>) -> Entity<Inpu
 				this.send(Msg::SearchSubmit(text), cx);
 				this.go(Route::Search, cx);
 			}
+			cx.notify();
 		},
 		InputEvent::Focus => {
 			this.search_open = true;

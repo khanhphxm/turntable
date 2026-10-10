@@ -20,6 +20,7 @@ mod miniplayer;
 mod nowplaying;
 mod pages;
 mod panel;
+mod regions;
 mod resize;
 mod shell;
 mod sidebar;
