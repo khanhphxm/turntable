@@ -177,6 +177,8 @@ panic = "abort"
 strip = true
 
 [patch.crates-io]
+# Drop removed layout nodes' measurement contexts rather than retaining old page text.
+taffy = { path = "vendor/taffy" }
 # Park macOS display links when no window redraw or animation is pending.
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
 # Right-size Metal atlas pages, instance buffers and path targets.
