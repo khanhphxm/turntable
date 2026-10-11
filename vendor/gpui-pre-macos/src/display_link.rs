@@ -63,6 +63,7 @@ use dispatch2::{
 };
 use gpui::{FrameRequestSource, PlatformFrameSignal};
 use gpui_util::ResultExt;
+use objc2_app_kit::NSView;
 use scheduler::Instant;
 use std::{
     collections::{BTreeMap, btree_map},
@@ -304,6 +305,9 @@ fn unsubscribe(display_id: CGDirectDisplayID, subscriber_id: SubscriberId) {
 /// io thread and invokes `callback(data)` on the main queue.
 pub struct WindowFrameSource {
     frame_requests: DispatchRetained<DispatchSource>,
+    // The window owns this source and keeps its native view alive until after
+    // source teardown. Only complete_frame dereferences this on the main thread.
+    native_view: *mut NSView,
     registration: Option<(CGDirectDisplayID, SubscriberId)>,
     signal: Arc<PlatformFrameSignal>,
     activity: FrameActivity,
@@ -327,6 +331,7 @@ impl WindowFrameSource {
         };
         Self {
             frame_requests,
+            native_view: data.cast(),
             registration: None,
             signal: Arc::new(PlatformFrameSignal::new()),
             activity: FrameActivity::default(),
@@ -363,8 +368,25 @@ impl WindowFrameSource {
     }
 
     pub fn complete_frame(&mut self) {
-        if self.activity.should_park() {
+        if self.registration.is_some() && self.activity.should_park() {
+            // SAFETY: new's context is the window's live GPUIView. This method
+            // runs inside its main-queue callback, before source/view teardown.
+            let view = unsafe { &*self.native_view };
+            // Keep the pool and vsyncs throughout a live resize, including
+            // pauses while the resize grip is held. Its first idle tick after
+            // AppKit ends the resize can then retire the pool normally.
+            if view.inLiveResize() {
+                return;
+            }
             self.stop();
+            // SAFETY: NSView's nullable layer getter returns an object owned by
+            // the view throughout this synchronous main-thread call. Using the
+            // selector avoids requiring optional AppKit QuartzCore bindings.
+            let layer: *mut objc2::runtime::AnyObject =
+                unsafe { objc2::msg_send![view, layer] };
+            if let Some(layer) = unsafe { layer.as_ref() } {
+                gpui_apple::metal_renderer::park_drawables(layer);
+            }
         }
     }
 

@@ -10,6 +10,33 @@ Based on gpui-pre-apple 0.3.9 (Apache-2.0), the Apple Metal renderer used by gpu
 
 Atlas removal still follows GPUI's explicit `drop_image` ownership API. Removing the last tile releases its texture; cached scenes can replay old sprite bindings, so arbitrary per-frame atlas eviction would be incorrect. Turntable's cover cache owns unused-image eviction. This patch does not add a polling timer or disable cached painting.
 
+## Idle drawable pools
+
+On macOS, the display-link source clears the backing `CAMetalLayer`'s [nullable `device`](https://developer.apple.com/documentation/quartzcore/cametallayer/device) when its existing idle-frame tail parks. Core Animation retains the last presented image, while the layer releases the pool's other IOSurfaces. No image readback, copy, replacement layer, additional surface, polling timer, or change to the three-drawable limit is required. The renderer restores its original device immediately before the next `nextDrawable`. The backing layer and its application-owned animation sublayers keep their identity.
+
+Live resize keeps both the pool and display-link subscription, including pauses with the resize grip held. The first unused frame after AppKit ends the resize can park normally. Transaction-backed rendering and drawable-size updates still use the same layer. iOS and headless rendering are unchanged. Native regression tests cover repeated park/resume, the original device and layer identity, overlay ownership, size, transparency, transaction mode, and ignoring non-Metal layers.
+
+### Native measurements (2026-10-14)
+
+The isolated release Turntable process used a copied `/tmp/tt-bench` profile, regenerated Connect identity, `TURNTABLE_BACKGROUND=1`, a visible bottom strip on the 1× primary display, and no system input or Spotify controls. Network access was denied because the account was playing in the user's car; the cached Home UI still rendered its normal covers and playlists. An external Objective-C instrumentation library primed the original three-surface pool, then allowed normal idle parking. The 1280×800 comparison used the same binary and instrumentation, suppressing only the new nil-device setter for the baseline. The 1920×950 comparison used that retained-pool build and the final release with the completed live-resize guard. The table uses the OS's `task_vm_info.phys_footprint` readings before screenshots; these offline totals are not a signed-in playback measurement.
+
+| Cached idle Home | Physical footprint MiB, retained → retired pool | IOSurface MiB, retained → retired pool |
+| --- | ---: | ---: |
+| 1280×800, 1× | 45.67 → 37.16 | 11.91 → 3.97 |
+| 1920×950, 1× | 60.49 → 46.83 | 21.28 → 7.09 |
+
+An independent AppKit/Metal clear probe at 1920×950 retained three drawables before retirement: physical footprint fell from 41.079 to 26.829 MiB and IOSurface charge from approximately 21.28 to 7.09 MiB. Its first resumed drawable acquisition took 1.419 ms; the first completed clear took 10.430 ms including the driver restart. At 1280×800, acquisition took 0.361 ms and the first completed clear 4.237 ms. Before/parked screenshots were pixel-identical at both sizes; the cached Turntable Home image was also unchanged between consecutive parked screenshots.
+
+In the final 1920×950 Turntable build, twelve synthetic hover events were delivered directly to the isolated GPUIView, without posting system input or changing the cursor/focus. The first resumed `nextDrawable` took 0.401 ms median / 0.840 ms maximum, versus 0.060 / 0.070 ms with the retained pool. Event-to-first-drawable latency was 1.048 / 2.441 ms with retirement versus 1.650 / 7.449 ms in the retained-pool run. The first drawable's presentation-handler callback arrived in 9.758 / 11.662 ms; `presentedTime` was zero for these callbacks in both builds, so that callback is not claimed as an actual display-vsync timestamp.
+
+A 20-second window video contained 1,139 original decoded frames across hover/park/resume cycles. The visible Home patch remained stable (mean RGB 35.474–35.589), with no blank or white-flash frames. Both ordinary size changes and a native AppKit live-resize sequence rendered correctly. The live-resize sequence set the real window and view `inLiveResize` flags, performed 60 timed size changes, then ended through AppKit; it used private lifecycle selectors only in the disposable external probe, not in delivered code. Live-resize drawable acquisition was 0.640 ms median / 2.066 ms maximum. The final idle layer's device was nil again, confirming the pool retired after live-resize ended.
+
+An additional uninstrumented 1920×950 offline run reported approximately 46 MiB footprint and 0.46% process CPU over ten seconds. Do not claim the 0% idle-CPU goal or signed-in playing-footprint goal from this network-denied assay; the change removes retained drawable memory, not application/connection work.
+
+Rejected alternatives: setting `drawableSize` to zero retained all three large surfaces (40.720 → 40.688 MiB footprint, Metal allocated size unchanged at 22.188 MiB). Freezing the last IOSurface into a persistent parent's `contents` and removing/recreating its child Metal layer saved the same memory as clearing `device`, but its first completed 1280×800 clear took 22.372 ms instead of 4.237 ms. Lowering `maximumDrawableCount` at runtime was already observed not to release the pool; permanently using two drawables also remains rejected by the earlier scrolling latency measurements below.
+
+The remaining drawable floor is one full-resolution presented surface: approximately 3.97 MiB at 1280×800 or 7.09 MiB at 1920×950, multiplied by four at 2× scale. This patch does not remove the driver's approximately 105 MiB submission transient while continuous GPUI animations run; animation frame demand is a separate cost.
+
 ## Regression coverage
 
 The native Metal tests cover compact-page sharing, independent release of large cover textures, tile-space reuse, buffer growth preserving earlier bindings, lazy/reused/resized/released path targets, and rendered image/path pixels after allocation and lifetime changes.

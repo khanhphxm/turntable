@@ -111,6 +111,22 @@ impl InstanceBufferPool {
     }
 }
 
+/// Retires a parked window's unused drawables without replacing its backing layer.
+///
+/// Core Animation keeps the last presented image visible when the Metal device
+/// is cleared. Unlike changing `maximumDrawableCount`, this releases the other
+/// IOSurfaces in the pool. `draw` restores the renderer's device on demand.
+#[cfg(target_os = "macos")]
+pub fn park_drawables(layer: &AnyObject) {
+    if let Some(layer) = layer.downcast_ref::<objc2_quartz_core::CAMetalLayer>() {
+        // SAFETY: CAMetalLayer's device setter accepts nil. The platform calls
+        // this on the main thread only after its final frame's idle tail.
+        unsafe {
+            let _: () = objc2::msg_send![layer, setDevice: ptr::null::<AnyObject>()];
+        }
+    }
+}
+
 pub struct MetalRenderer {
     device: metal::Device,
     layer: Option<metal::MetalLayer>,
@@ -507,6 +523,17 @@ impl MetalRenderer {
                 return;
             }
         };
+        #[cfg(target_os = "macos")]
+        {
+            let objc2_layer: &objc2_quartz_core::CAMetalLayer =
+                unsafe { &*layer.as_ptr().cast() };
+            // metal-rs's device getter assumes a non-null device. Borrow the
+            // nullable Objective-C result without retaining it on every frame.
+            let device: *mut AnyObject = unsafe { objc2::msg_send![objc2_layer, device] };
+            if device.is_null() {
+                layer.set_device(&self.device);
+            }
+        }
         let viewport_size = layer.drawable_size();
         let viewport_size: Size<DevicePixels> = size(
             (viewport_size.width.ceil() as i32).into(),
@@ -1718,6 +1745,47 @@ mod tests {
         CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
         CVPixelBufferUnlockBaseAddress, kCVPixelBufferIOSurfacePropertiesKey,
     };
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parked_drawables_resume_without_replacing_the_layer_or_its_overlays() {
+        objc2::rc::autoreleasepool(|_| {
+            let mut renderer = MetalRenderer::new(Arc::new(Mutex::new(Default::default())), true);
+            renderer.update_drawable_size(size(DevicePixels(64), DevicePixels(48)));
+            renderer.set_presents_with_transaction(true);
+            let layer = renderer.layer.as_ref().unwrap().clone();
+            let objc2_layer: &objc2_quartz_core::CAMetalLayer =
+                unsafe { &*layer.as_ptr().cast() };
+            let overlay = objc2_quartz_core::CALayer::new();
+            objc2_layer.addSublayer(&overlay);
+
+            for _ in 0..3 {
+                park_drawables(objc2_layer);
+                let device: *mut AnyObject = unsafe { objc2::msg_send![objc2_layer, device] };
+                assert!(device.is_null());
+                let drawable_size = layer.drawable_size();
+                assert_eq!((drawable_size.width, drawable_size.height), (64., 48.));
+                assert_eq!(layer.maximum_drawable_count(), 3);
+                assert!(!layer.is_opaque());
+                assert!(layer.presents_with_transaction());
+                assert_eq!(overlay.superlayer().as_deref(), Some(objc2_layer.as_ref()));
+
+                renderer.draw(&Scene::default());
+                assert_eq!(layer.device().as_ptr(), renderer.device.as_ptr());
+                assert_eq!(renderer.layer_ptr(), layer.as_ptr());
+            }
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parking_ignores_non_metal_backing_layers() {
+        let layer = objc2_quartz_core::CALayer::new();
+        let overlay = objc2_quartz_core::CALayer::new();
+        layer.addSublayer(&overlay);
+        park_drawables(&layer);
+        assert_eq!(overlay.superlayer().as_deref(), Some(&*layer));
+    }
 
     #[test]
     fn instance_buffers_start_small_and_grow_without_losing_earlier_bindings() {
