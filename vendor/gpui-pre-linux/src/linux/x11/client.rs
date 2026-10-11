@@ -1,3 +1,4 @@
+// Modified by Turntable: demand-driven X11 frame scheduling; see TURNTABLE.md.
 use anyhow::{Context as _, anyhow};
 use ashpd::WindowIdentifier;
 use calloop::{
@@ -82,6 +83,7 @@ const GPUI_X11_SCALE_FACTOR_ENV: &str = "GPUI_X11_SCALE_FACTOR";
 pub(crate) struct WindowRef {
     window: X11WindowStatePtr,
     refresh_state: Option<RefreshState>,
+    last_frame: Option<Instant>,
     last_visibility: Visibility,
     is_mapped: bool,
 }
@@ -112,10 +114,10 @@ impl Deref for WindowRef {
 }
 
 enum RefreshState {
-    Hidden {
+    Idle {
         refresh_rate: Duration,
     },
-    PeriodicRefresh {
+    Scheduled {
         refresh_rate: Duration,
         event_loop_token: RegistrationToken,
     },
@@ -186,6 +188,7 @@ pub struct X11ClientState {
     /// Long-lived sources this client registered on the loop, removed when its
     /// [`X11Connection`] drops.
     registrations: Vec<RegistrationToken>,
+    pub(crate) frame_ping: calloop::ping::Ping,
     /// The environment this connection was made in, without its activation token.
     graphical_environment: GraphicalEnvironment,
 
@@ -256,7 +259,7 @@ impl X11ClientStatePtr {
         let mut state = client.0.borrow_mut();
 
         if let Some(window_ref) = state.windows.remove(&x_window)
-            && let Some(RefreshState::PeriodicRefresh {
+            && let Some(RefreshState::Scheduled {
                 event_loop_token, ..
             }) = window_ref.refresh_state
         {
@@ -344,7 +347,7 @@ impl Drop for X11Connection {
             .windows
             .values_mut()
             .filter_map(|window| match window.refresh_state.take() {
-                Some(RefreshState::PeriodicRefresh {
+                Some(RefreshState::Scheduled {
                     event_loop_token, ..
                 }) => Some(event_loop_token),
                 _ => None,
@@ -498,10 +501,13 @@ impl X11Connection {
         };
 
         let background_executor = common.borrow().background_executor.clone();
+        let (frame_ping, frame_ping_source) =
+            calloop::ping::make_ping().context("Failed to create X11 frame ping")?;
         let connection = X11Connection(X11Client(Rc::new_cyclic(|this| {
             RefCell::new(X11ClientState {
                 this: X11ClientStatePtr(this.clone()),
                 registrations: Vec::new(),
+                frame_ping,
                 graphical_environment: GraphicalEnvironment {
                     activation_token: None,
                     ..environment.clone()
@@ -558,6 +564,25 @@ impl X11Connection {
         })));
         // From here on, `Drop` removes whatever was registered if a later step fails.
         connection.register_sources(&handle, background_executor)?;
+        let token = handle
+            .insert_source(frame_ping_source, {
+                let this = connection.0.0.borrow().this.clone();
+                move |_, _, _| {
+                    if let Some(client) = this.get_client() {
+                        let mut state = client.0.borrow_mut();
+                        let requested = state
+                            .windows
+                            .iter()
+                            .filter_map(|(&id, window)| window.frame_requested.is_requested().then_some(id))
+                            .collect::<SmallVec<[xproto::Window; 4]>>();
+                        for id in requested {
+                            state.update_refresh_loop(id);
+                        }
+                    }
+                }
+            })
+            .map_err(|err| anyhow!("Failed to initialize X11 frame ping: {err:?}"))?;
+        connection.0.0.borrow_mut().registrations.push(token);
         let xcb_connection = connection.0.0.borrow().xcb_connection.clone();
         xcb_flush(&xcb_connection);
         Ok(connection)
@@ -1712,6 +1737,7 @@ impl X11Client {
         let window = X11Window::new(
             handle,
             X11ClientStatePtr(Rc::downgrade(&self.0)),
+            state.frame_ping.clone(),
             state.common.borrow().foreground_executor.clone(),
             state.gpu_context.clone(),
             compositor_gpu,
@@ -1743,6 +1769,7 @@ impl X11Client {
         let window_ref = WindowRef {
             window: window.0.clone(),
             refresh_state: None,
+            last_frame: None,
             last_visibility: Visibility::UNOBSCURED,
             is_mapped: false,
         };
@@ -1970,27 +1997,33 @@ impl X11ClientState {
         };
         let is_visible = window_ref.visibility().is_visible();
         match (is_visible, window_ref.refresh_state.take()) {
-            (false, refresh_state @ Some(RefreshState::Hidden { .. }))
+            (false, refresh_state @ Some(RefreshState::Idle { .. }))
             | (false, refresh_state @ None)
-            | (true, refresh_state @ Some(RefreshState::PeriodicRefresh { .. })) => {
+            | (true, refresh_state @ Some(RefreshState::Scheduled { .. })) => {
                 window_ref.refresh_state = refresh_state;
             }
             (
                 false,
-                Some(RefreshState::PeriodicRefresh {
+                Some(RefreshState::Scheduled {
                     refresh_rate,
                     event_loop_token,
                 }),
             ) => {
                 self.loop_handle.remove(event_loop_token);
-                window_ref.refresh_state = Some(RefreshState::Hidden { refresh_rate });
+                window_ref.frame_requested.park();
+                window_ref.refresh_state = Some(RefreshState::Idle { refresh_rate });
             }
-            (true, Some(RefreshState::Hidden { refresh_rate })) => {
+            (true, Some(RefreshState::Idle { refresh_rate })) => {
+                if !window_ref.frame_requested.is_requested() {
+                    window_ref.refresh_state = Some(RefreshState::Idle { refresh_rate });
+                    return;
+                }
                 let event_loop_token = self.start_refresh_loop(x_window, refresh_rate);
                 let Some(window_ref) = self.windows.get_mut(&x_window) else {
                     return;
                 };
-                window_ref.refresh_state = Some(RefreshState::PeriodicRefresh {
+                window_ref.frame_requested.arm();
+                window_ref.refresh_state = Some(RefreshState::Scheduled {
                     refresh_rate,
                     event_loop_token,
                 });
@@ -2036,7 +2069,8 @@ impl X11ClientState {
                 let Some(window_ref) = self.windows.get_mut(&x_window) else {
                     return;
                 };
-                window_ref.refresh_state = Some(RefreshState::PeriodicRefresh {
+                window_ref.frame_requested.arm();
+                window_ref.refresh_state = Some(RefreshState::Scheduled {
                     refresh_rate,
                     event_loop_token,
                 });
@@ -2050,8 +2084,14 @@ impl X11ClientState {
         x_window: xproto::Window,
         refresh_rate: Duration,
     ) -> RegistrationToken {
+        let now = Instant::now();
+        let deadline = self
+            .windows
+            .get(&x_window)
+            .and_then(|window| window.last_frame)
+            .map_or(now, |last_frame| (last_frame + refresh_rate).max(now));
         self.loop_handle
-            .insert_source(calloop::timer::Timer::immediate(), {
+            .insert_source(calloop::timer::Timer::from_deadline(deadline), {
                 let this = self.this.clone();
                 move |mut instant, (), _| {
                     let Some(client) = this.get_client() else {
@@ -2061,6 +2101,8 @@ impl X11ClientState {
                         let mut state = client.0.borrow_mut();
                         let xcb_connection = state.xcb_connection.clone();
                         if let Some(window) = state.windows.get_mut(&x_window) {
+                            window.frame_requested.begin_frame();
+                            window.last_frame = Some(Instant::now());
                             let window = window.window.clone();
                             drop(state);
                             window.refresh(RequestFrameOptions {
@@ -2073,6 +2115,20 @@ impl X11ClientState {
                         xcb_connection
                     };
                     client.process_x11_events(&xcb_connection).log_err();
+                    let mut state = client.0.borrow_mut();
+                    let Some(window) = state.windows.get_mut(&x_window) else {
+                        return calloop::timer::TimeoutAction::Drop;
+                    };
+                    // Visibility changes can have removed this source while processing events.
+                    if !matches!(window.refresh_state, Some(RefreshState::Scheduled { .. })) {
+                        return calloop::timer::TimeoutAction::Drop;
+                    }
+                    if !window.frame_requested.is_requested() {
+                        window.frame_requested.park();
+                        window.refresh_state = Some(RefreshState::Idle { refresh_rate });
+                        return calloop::timer::TimeoutAction::Drop;
+                    }
+                    drop(state);
 
                     // Take into account that some frames have been skipped
                     let now = Instant::now();
@@ -2234,6 +2290,11 @@ pub fn mode_refresh_rate(mode: &randr::ModeInfo) -> Duration {
 /// resulting visibility to the window. Consumes the client borrow because the
 /// visibility callback re-enters GPUI.
 fn handle_visibility_changed(mut state: RefMut<'_, X11ClientState>, x_window: xproto::Window) {
+    if let Some(window) = state.windows.get(&x_window)
+        && window.visibility().is_visible()
+    {
+        window.frame_requested.request();
+    }
     state.update_refresh_loop(x_window);
     let Some(window_ref) = state.windows.get(&x_window) else {
         return;

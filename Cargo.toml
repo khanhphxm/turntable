@@ -181,6 +181,8 @@ strip = true
 taffy = { path = "vendor/taffy" }
 # Park macOS display links when no window redraw or animation is pending.
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
+# Park X11 refresh timers when no redraw or animation is pending.
+gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
 # Right-size Metal atlas pages, instance buffers and path targets.
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 # Expose Spirc queue state and mutations to the in-process player.

@@ -1,3 +1,4 @@
+// Modified by Turntable: demand-driven X11 frame scheduling; see TURNTABLE.md.
 use anyhow::{Context as _, anyhow};
 use x11rb::connection::RequestConnection;
 
@@ -33,7 +34,7 @@ use std::{
     cell::RefCell, ffi::c_void, fmt::Display, num::NonZeroU32, ptr::NonNull, rc::Rc, sync::Arc,
 };
 
-use super::{X11Display, XINPUT_ALL_DEVICE_GROUPS, XINPUT_ALL_DEVICES};
+use super::{X11Display, XINPUT_ALL_DEVICE_GROUPS, XINPUT_ALL_DEVICES, frame_request::FrameRequest};
 
 x11rb::atom_manager! {
     pub XcbAtoms: AtomsCookie {
@@ -313,6 +314,8 @@ pub(crate) struct X11WindowStatePtr {
     pub(crate) callbacks: Rc<RefCell<Callbacks>>,
     xcb: Rc<XCBConnection>,
     pub(crate) x_window: xproto::Window,
+    pub(crate) frame_requested: Rc<FrameRequest>,
+    frame_ping: calloop::ping::Ping,
 }
 
 impl rwh::HasWindowHandle for RawWindow {
@@ -921,6 +924,7 @@ impl X11Window {
     pub fn new(
         handle: AnyWindowHandle,
         client: X11ClientStatePtr,
+        frame_ping: calloop::ping::Ping,
         executor: ForegroundExecutor,
         gpu_context: gpui_wgpu::GpuContext,
         compositor_gpu: Option<CompositorGpuHint>,
@@ -958,6 +962,8 @@ impl X11Window {
             callbacks: Rc::new(RefCell::new(Callbacks::default())),
             xcb: xcb.clone(),
             x_window,
+            frame_requested: Rc::new(FrameRequest::default()),
+            frame_ping,
         };
 
         let state = ptr.state.borrow_mut();
@@ -1049,6 +1055,12 @@ impl X11Window {
 }
 
 impl X11WindowStatePtr {
+    fn schedule_frame(&self) {
+        if self.frame_requested.request() {
+            self.frame_ping.ping();
+        }
+    }
+
     pub fn should_close(&self) -> bool {
         let mut cb = self.callbacks.borrow_mut();
         if let Some(mut should_close) = cb.should_close.take() {
@@ -1697,6 +1709,18 @@ impl PlatformWindow for X11Window {
         self.0.state.borrow().fullscreen
     }
 
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let requested = Rc::downgrade(&self.0.frame_requested);
+        let ping = self.0.frame_ping.clone();
+        Some(Rc::new(move || {
+            if let Some(requested) = requested.upgrade()
+                && requested.request()
+            {
+                ping.ping();
+            }
+        }))
+    }
+
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         self.0.callbacks.borrow_mut().request_frame = Some(callback);
     }
@@ -1772,14 +1796,20 @@ impl PlatformWindow for X11Window {
             }
 
             inner.force_render_after_recovery = true;
+            self.0.schedule_frame();
             return;
         }
 
-        renderer.draw(scene);
+        let presented = renderer.draw(scene);
 
-        if renderer.needs_redraw() {
+        if !presented || renderer.needs_redraw() {
             inner.force_render_after_recovery = true;
+            self.0.schedule_frame();
         }
+    }
+
+    fn schedule_frame(&self) {
+        self.0.schedule_frame();
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {

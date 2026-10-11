@@ -1,7 +1,9 @@
+// Modified by Turntable: demand-driven X11 frame scheduling; see ../../TURNTABLE.md.
 mod client;
 mod clipboard;
 mod display;
 mod event;
+mod frame_request;
 mod window;
 mod xim_handler;
 
