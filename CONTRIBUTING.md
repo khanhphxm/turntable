@@ -34,3 +34,18 @@ retain upstream licenses/attribution and record the upstream version plus local
 changes in that crate's `TURNTABLE.md`. For modified Apache-licensed files, also
 retain a prominent in-file modification notice. Commit any necessary lockfile
 update with the patch. See [packaging/README.md](packaging/README.md) for releases.
+
+## Audio benchmark
+
+An offline benchmark runs real files through the playback chain (decoder, EQ,
+normalization, resampler) into a paced null output. It needs no account or audio device.
+Linux only; requires `ffmpeg`.
+
+```sh
+sh scripts/audio-fixtures.sh /tmp/turntable-audio 30
+cargo build --release -p turntable-core --example audio-bench --features audio-bench
+target/release/examples/audio-bench /tmp/turntable-audio/vorbis.ogg --rate 48000
+```
+
+To check that a change keeps output identical, compare two builds with
+`python3 scripts/audio-equivalence.py <before> <after> <fixtures-dir>`.

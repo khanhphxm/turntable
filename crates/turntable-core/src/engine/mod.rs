@@ -10,6 +10,8 @@
 //! other eligible transitions use the core audio mixer. Manual transport commands cut
 //! immediately; every PCM stream passes through the same EQ/leveler/output.
 
+#[cfg(feature = "audio-bench")]
+pub mod benchmark;
 mod connect;
 mod load;
 mod metadata;

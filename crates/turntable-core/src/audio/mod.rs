@@ -11,6 +11,8 @@
 //! While unavailable, PCM is dropped at a bounded pace rather than pausing/blocking the decoder.
 //! Short ramps soften underruns and track starts. Every backend stops when idle.
 
+#[cfg(feature = "audio-bench")]
+pub mod benchmark;
 mod crossfade;
 mod eq;
 mod leveler;
@@ -18,12 +20,12 @@ mod leveler;
 #[cfg_attr(target_os = "linux", path = "linux.rs")]
 #[cfg_attr(windows, path = "wasapi.rs")]
 mod output;
-#[cfg(any(target_os = "macos", windows, test))]
+#[cfg(any(target_os = "macos", windows, test, feature = "audio-bench"))]
 mod resample;
 mod ring;
 mod stage;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "audio-bench"))]
 use std::sync::atomic::AtomicU64;
 use std::{
 	io,
@@ -137,8 +139,12 @@ struct Shared {
 	recovering: AtomicBool,
 	failure:    OnceLock<Box<dyn Fn() + Send + Sync>>,
 	ended:      AtomicBool,
-	#[cfg(test)]
+	#[cfg(any(test, feature = "audio-bench"))]
 	underruns:  AtomicU64,
+	#[cfg(feature = "audio-bench")]
+	writer_parks: AtomicU64,
+	#[cfg(feature = "audio-bench")]
+	writer_wakes: AtomicU64,
 	/// The writer's thread, for the render callback to unpark.
 	writer:     OnceLock<Thread>,
 	/// The writer is parked waiting for room in the ring.
@@ -193,8 +199,12 @@ impl Shared {
 			recovering:             AtomicBool::new(false),
 			failure:                OnceLock::new(),
 			ended:                  AtomicBool::new(false),
-			#[cfg(test)]
+			#[cfg(any(test, feature = "audio-bench"))]
 			underruns:              AtomicU64::new(0),
+			#[cfg(feature = "audio-bench")]
+			writer_parks: AtomicU64::new(0),
+			#[cfg(feature = "audio-bench")]
+			writer_wakes: AtomicU64::new(0),
 			writer:                 OnceLock::new(),
 			waiting:                AtomicBool::new(false),
 			running:                AtomicBool::new(true),
@@ -294,6 +304,8 @@ impl PcmWriter {
 				// A full ring with output stopped would wait forever: wake it up.
 				sh.request_start();
 				if FILL_SAMPLES.saturating_sub(sh.ring.len()) < need {
+					#[cfg(feature = "audio-bench")]
+					sh.writer_parks.fetch_add(1, Ordering::Relaxed);
 					thread::park_timeout(READER_PARK.min(timeout.saturating_sub(progress.elapsed())));
 				}
 				sh.waiting.store(false, Ordering::Release);
@@ -549,7 +561,7 @@ impl Render {
 				silence.fill(0.0);
 			}
 			if !self.buffering && !ended {
-				#[cfg(test)]
+				#[cfg(any(test, feature = "audio-bench"))]
 				sh.underruns.fetch_add(1, Ordering::Relaxed);
 				self.buffering = true;
 				self.fade_out = CLICK_FADE_FRAMES;
@@ -566,6 +578,8 @@ impl Render {
 			&& sh.waiting.swap(false, Ordering::AcqRel)
 			&& let Some(t) = sh.writer.get()
 		{
+			#[cfg(feature = "audio-bench")]
+			sh.writer_wakes.fetch_add(1, Ordering::Relaxed);
 			t.unpark();
 		}
 		// Run the EQ over silence too so filter tails ring out instead of freezing.

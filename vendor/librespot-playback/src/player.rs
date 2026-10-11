@@ -710,14 +710,22 @@ struct PlayerLoadedTrackData {
 /// are used only with decoder normalization disabled; the host's post-mix stage
 /// remains responsible for leveling and limiting both tracks together.
 pub struct CrossfadeSource {
-    track: PlayerLoadedTrackData,
+    decoder: Decoder,
+    // Only the decoder and download lifetime are needed once the incoming track takes over.
+    _download: Option<StreamLoaderController>,
 }
 
 impl CrossfadeSource {
     pub fn next_packet(
         &mut self,
     ) -> crate::decoder::DecoderResult<Option<(AudioPacketPosition, AudioPacket)>> {
-        self.track.decoder.next_packet()
+        self.decoder.next_packet()
+    }
+
+    /// Constructs the outgoing source for Turntable's offline playback-chain benchmark.
+    #[cfg(feature = "audio-bench")]
+    pub fn from_decoder(decoder: Box<dyn AudioDecoder + Send>) -> Self {
+        Self { decoder, _download: None }
     }
 }
 
@@ -2383,7 +2391,13 @@ impl PlayerInternal {
                             if let PlayerState::EndOfTrack { loaded_track, .. } =
                                 mem::replace(&mut self.state, PlayerState::Stopped)
                             {
-                                self.sink.begin_crossfade(CrossfadeSource { track: loaded_track }, duration_ms);
+                                self.sink.begin_crossfade(
+                                    CrossfadeSource {
+                                        decoder: loaded_track.decoder,
+                                        _download: Some(loaded_track.stream_loader_controller),
+                                    },
+                                    duration_ms,
+                                );
                             }
                         }
                     }

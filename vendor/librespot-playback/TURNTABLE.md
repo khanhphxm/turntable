@@ -18,5 +18,9 @@ Compared with the registry source:
 - `src/audio_backend/mod.rs` adds optional sink hooks for overlap duration,
   beginning a fade, a new PCM program and discontinuity resets. Manual loads,
   seeks and stops reset pending overlaps; natural advancement preserves them.
+- The opt-in `audio-bench` feature can construct an outgoing crossfade source
+  from a local decoder. Crossfade sources retain only the decoder and download
+  controller, not the outgoing track's unused metadata. Production builds do
+  not expose the offline constructor.
 
 MIT requires retained license notices, not per-file modification notices.
