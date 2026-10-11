@@ -1,3 +1,4 @@
+// Modified by Turntable: compact buffers and lazy path targets; see ../TURNTABLE.md.
 use crate::{CompositorGpuHint, DeviceErrorState, WgpuAtlas, WgpuContext};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
@@ -16,6 +17,7 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
+const INITIAL_INSTANCE_BUFFER_SIZE: u64 = 128 * 1024;
 const MAX_INSTANCE_BUFFER_SIZE: u64 = 256 * 1024 * 1024;
 
 const INSTANCE_TEXTURE_TEXEL_SIZE: u64 = 16;
@@ -1262,7 +1264,7 @@ impl WgpuRendererCore {
             let max_instance_data_size = (u64::from(max_texture_dimension).pow(2)
                 * INSTANCE_TEXTURE_TEXEL_SIZE)
                 .min(MAX_INSTANCE_BUFFER_SIZE);
-            let initial_capacity = (2 * 1024 * 1024).min(max_instance_data_size);
+            let initial_capacity = INITIAL_INSTANCE_BUFFER_SIZE.min(max_instance_data_size);
             let (instance_data, capacity) =
                 Self::create_instance_texture(&device, initial_capacity, max_texture_dimension);
             (
@@ -1277,7 +1279,7 @@ impl WgpuRendererCore {
                 .max_buffer_size
                 .min(device.limits().max_storage_buffer_binding_size)
                 .min(MAX_INSTANCE_BUFFER_SIZE);
-            let initial_capacity = (2 * 1024 * 1024).min(max_buffer_size);
+            let initial_capacity = INITIAL_INSTANCE_BUFFER_SIZE.min(max_buffer_size);
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("instance_buffer"),
                 size: initial_capacity,
@@ -1378,9 +1380,13 @@ impl WgpuRendererCore {
         &mut self.resources
     }
 
-    /// Path rendering goes through an intermediate texture that must match the frame
-    /// target's dimensions, so the textures are keyed by size and rebuilt on mismatch.
-    fn ensure_intermediate_textures(&mut self, size: Size<DevicePixels>) {
+    /// Path targets are needed only by scenes containing paths. Keep the viewport
+    /// dimensions and antialiasing unchanged, but release them for path-free scenes.
+    fn ensure_intermediate_textures(&mut self, size: Size<DevicePixels>, has_paths: bool) {
+        if !has_paths {
+            self.resources.invalidate_intermediate_textures();
+            return;
+        }
         let width = size.width.0 as u32;
         let height = size.height.0 as u32;
         if self
@@ -1434,7 +1440,7 @@ impl WgpuRendererCore {
         );
 
         self.atlas.before_frame();
-        self.ensure_intermediate_textures(size);
+        self.ensure_intermediate_textures(size, !scene.paths.is_empty());
 
         let gamma_params = GammaParams {
             gamma_ratios: self.rendering_params.gamma_ratios,
@@ -2738,6 +2744,45 @@ mod tests {
 
         renderer.render_scene(&Scene::default(), device_size(16, 17))?;
         assert_ne!(target_texture(&renderer), first);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn path_targets_are_lazy_reused_resized_and_released() -> anyhow::Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let size = device_size(64, 32);
+        renderer.render_scene(&Scene::default(), size)?;
+        assert!(renderer.core.resources.path_intermediate_texture.is_none());
+        assert!(renderer.core.resources.path_msaa_texture.is_none());
+
+        renderer.core.ensure_intermediate_textures(size, true);
+        let first = renderer.core.resources.path_intermediate_texture.clone();
+        assert!(first.is_some());
+        renderer.core.ensure_intermediate_textures(size, true);
+        assert_eq!(renderer.core.resources.path_intermediate_texture, first);
+        renderer.core.ensure_intermediate_textures(device_size(64, 33), true);
+        assert_ne!(renderer.core.resources.path_intermediate_texture, first);
+
+        renderer.render_scene(&Scene::default(), size)?;
+        assert!(renderer.core.resources.path_intermediate_texture.is_none());
+        assert!(renderer.core.resources.path_msaa_texture.is_none());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn compact_instance_buffer_grows_and_renders_the_whole_scene() -> anyhow::Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        assert_eq!(renderer.core.instance_data_capacity, INITIAL_INSTANCE_BUFFER_SIZE);
+        let mut scene = Scene::default();
+        for _ in 0..2000 {
+            scene.insert_primitive(solid_quad(0.0, 0.0, 32.0, 32.0, gpui::red()));
+        }
+        scene.finish();
+        let image = renderer.render_scene_to_image(&scene, device_size(32, 32))?;
+        assert!(renderer.core.instance_data_capacity > INITIAL_INSTANCE_BUFFER_SIZE);
+        assert_pixel(&image, 16, 16, RED);
         Ok(())
     }
 

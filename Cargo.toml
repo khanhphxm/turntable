@@ -185,6 +185,8 @@ gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
 gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
 # Right-size Metal atlas pages, instance buffers and path targets.
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
+# Apply the same compact atlas/buffer and lazy path-target policy to wgpu.
+gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
 # Expose Spirc queue state and mutations to the in-process player.
 librespot-connect = { path = "vendor/librespot-connect" }
 # Report session attributes instead of exiting on non-Premium accounts.
