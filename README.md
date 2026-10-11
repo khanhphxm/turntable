@@ -58,8 +58,13 @@ sudo apt install clang cmake pkg-config libssl-dev libdbus-1-dev libasound2-dev 
 
 Turntable talks only to Spotify. Your sign-in stays on your computer.
 
+Turntable is an unofficial client that uses Spotify's internal (non-public) interfaces.
+It can break when Spotify changes them; use it at your own risk under
+[Spotify's terms](https://www.spotify.com/legal/end-user-agreement/).
+
 ## License
 
 [MIT](LICENSE). Icons from [Lucide](https://lucide.dev) (ISC).
+Third-party components retain their own licenses; see [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
 Turntable is not affiliated with, endorsed or sponsored by Spotify. Spotify is a trademark of
 Spotify AB.

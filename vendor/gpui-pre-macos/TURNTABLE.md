@@ -46,6 +46,6 @@ target/frame-activity-tests
 
 Turntable's existing playhead test covers its pending-next-frame chain, pause
 transition and high-refresh-rate cap.
-Use `tools/bench/quick.sh <binary> 20 3` for a short idle CPU/RSS/footprint sample.
+For an idle CPU/RSS sample on macOS, run `top -l 3 -s 10 -pid <PID> -stats pid,command,cpu,mem`.
 Set `TURNTABLE_HOME` to an isolated profile copy with a distinct Connect device
 name and regenerated device ID; never benchmark with the live user profile.
