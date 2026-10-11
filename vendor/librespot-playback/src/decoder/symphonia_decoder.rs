@@ -1,13 +1,15 @@
 use std::{io, time::Duration};
 
 use symphonia::core::{
-    audio::SampleBuffer,
+    audio::{AudioBuffer, AudioBufferRef, Signal},
     codecs::{Decoder, DecoderOptions},
+    conv::IntoSample,
     errors::Error,
     formats::{FormatOptions, SeekMode, SeekTo},
     io::{MediaSource, MediaSourceStream, MediaSourceStreamOptions},
     meta::{MetadataOptions, StandardTagKey, Value},
     probe::{Hint, ProbeResult},
+    sample::Sample,
 };
 
 use super::{AudioDecoder, AudioPacket, AudioPacketPosition, DecoderError, DecoderResult};
@@ -17,8 +19,29 @@ use crate::{NUM_CHANNELS, PAGES_PER_MS, SAMPLE_RATE, player::NormalisationData, 
 pub struct SymphoniaDecoder {
     probe_result: ProbeResult,
     decoder: Box<dyn Decoder>,
-    // Turntable renders f32: keep PCM in that format instead of widening then narrowing it.
-    sample_buffer: Option<SampleBuffer<f32>>,
+}
+
+// The sink owns each packet, so interleave directly into that allocation. Keeping an
+// extra SampleBuffer would duplicate every decoded packet and retain unused scratch.
+fn interleave_stereo<S: Sample + IntoSample<f32>>(decoded: &AudioBuffer<S>) -> Vec<f32> {
+    decoded.chan(0).iter().zip(decoded.chan(1))
+        .flat_map(|(&left, &right)| [left.into_sample(), right.into_sample()])
+        .collect()
+}
+
+fn pcm_packet(decoded: AudioBufferRef<'_>) -> Vec<f32> {
+    match decoded {
+        AudioBufferRef::U8(buffer) => interleave_stereo(&buffer),
+        AudioBufferRef::U16(buffer) => interleave_stereo(&buffer),
+        AudioBufferRef::U24(buffer) => interleave_stereo(&buffer),
+        AudioBufferRef::U32(buffer) => interleave_stereo(&buffer),
+        AudioBufferRef::S8(buffer) => interleave_stereo(&buffer),
+        AudioBufferRef::S16(buffer) => interleave_stereo(&buffer),
+        AudioBufferRef::S24(buffer) => interleave_stereo(&buffer),
+        AudioBufferRef::S32(buffer) => interleave_stereo(&buffer),
+        AudioBufferRef::F32(buffer) => interleave_stereo(&buffer),
+        AudioBufferRef::F64(buffer) => interleave_stereo(&buffer),
+    }
 }
 
 #[derive(Default)]
@@ -87,9 +110,6 @@ impl SymphoniaDecoder {
         Ok(Self {
             probe_result,
             decoder,
-            // We set the sample buffer when decoding the first full packet,
-            // whose duration is also the ideal sample buffer size.
-            sample_buffer: None,
         })
     }
 
@@ -244,17 +264,7 @@ impl AudioDecoder for SymphoniaDecoder {
 
             match self.decoder.decode(&packet) {
                 Ok(decoded) => {
-                    let sample_buffer = match self.sample_buffer.as_mut() {
-                        Some(buffer) => buffer,
-                        None => {
-                            let spec = *decoded.spec();
-                            let duration = decoded.capacity() as u64;
-                            self.sample_buffer.insert(SampleBuffer::new(duration, spec))
-                        }
-                    };
-
-                    sample_buffer.copy_interleaved_ref(decoded);
-                    let samples = AudioPacket::Samples(sample_buffer.samples().to_vec());
+                    let samples = AudioPacket::Samples(pcm_packet(decoded));
 
                     return Ok(Some((packet_position, samples)));
                 }
@@ -279,6 +289,8 @@ mod tests {
         sample::Sample,
     };
 
+    use super::interleave_stereo;
+
     fn compare<S: Sample + IntoSample<f32> + IntoSample<f64>>(values: &[S]) {
         let spec = SignalSpec::new_with_layout(44_100, Layout::Stereo);
         let mut decoded = AudioBuffer::<S>::new(values.len() as u64, spec);
@@ -287,11 +299,10 @@ mod tests {
         for (sample, value) in decoded.chan_mut(1).iter_mut().zip(values.iter().rev()) {
             *sample = *value;
         }
-        let mut native = SampleBuffer::<f32>::new(values.len() as u64, spec);
+        let native = interleave_stereo(&decoded);
         let mut previous = SampleBuffer::<f64>::new(values.len() as u64, spec);
-        native.copy_interleaved_typed(&decoded);
         previous.copy_interleaved_typed(&decoded);
-        for (&actual, &reference) in native.samples().iter().zip(previous.samples()) {
+        for (&actual, &reference) in native.iter().zip(previous.samples()) {
             assert_eq!(actual.to_bits(), (reference as f32).to_bits());
             for volume in [1.0, 0.5, 0.1, 0.001] {
                 let actual = (f64::from(actual) * volume) as f32;
