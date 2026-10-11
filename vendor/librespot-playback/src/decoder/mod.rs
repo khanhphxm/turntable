@@ -31,13 +31,13 @@ pub enum AudioPacketError {
 pub type AudioPacketResult<T> = Result<T, AudioPacketError>;
 
 pub enum AudioPacket {
-    Samples(Vec<f64>),
+    Samples(Vec<f32>),
     Raw(Vec<u8>),
 }
 
 impl AudioPacket {
     #[inline]
-    pub fn samples(&self) -> AudioPacketResult<&[f64]> {
+    pub fn samples(&self) -> AudioPacketResult<&[f32]> {
         match self {
             AudioPacket::Samples(s) => Ok(s),
             AudioPacket::Raw(_) => Err(AudioPacketError::Raw),

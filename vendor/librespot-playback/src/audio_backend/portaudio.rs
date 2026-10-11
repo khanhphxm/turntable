@@ -142,7 +142,7 @@ impl Sink for PortAudioSink<'_> {
 
     fn write(&mut self, packet: AudioPacket, converter: &mut Converter) -> SinkResult<()> {
         macro_rules! write_sink {
-            (ref mut $stream: expr, $samples: expr) => {
+            ($stream: expr, $samples: expr) => {
                 $stream.as_mut().unwrap().write($samples)
             };
         }
@@ -152,17 +152,14 @@ impl Sink for PortAudioSink<'_> {
             .map_err(|e| SinkError::OnWrite(e.to_string()))?;
 
         let result = match self {
-            Self::F32(stream, _parameters) => {
-                let samples_f32: &[f32] = &converter.f64_to_f32(samples);
-                write_sink!(ref mut stream, samples_f32)
-            }
+            Self::F32(stream, _parameters) => write_sink!(stream, samples),
             Self::S32(stream, _parameters) => {
-                let samples_s32: &[i32] = &converter.f64_to_s32(samples);
-                write_sink!(ref mut stream, samples_s32)
+                let samples_s32: &[i32] = &converter.f32_to_s32(samples);
+                write_sink!(stream, samples_s32)
             }
             Self::S16(stream, _parameters) => {
-                let samples_s16: &[i16] = &converter.f64_to_s16(samples);
-                write_sink!(ref mut stream, samples_s16)
+                let samples_s16: &[i16] = &converter.f32_to_s16(samples);
+                write_sink!(stream, samples_s16)
             }
         };
         match result {

@@ -22,5 +22,12 @@ Compared with the registry source:
   from a local decoder. Crossfade sources retain only the decoder and download
   controller, not the outgoing track's unused metadata. Production builds do
   not expose the offline constructor.
+- Decoder packets and their interleaving scratch use the host's f32 render
+  format instead of f64. Turntable's RingSink moves the decoded allocation
+  directly; all optional backends consume f32 packets, converting only when
+  their device format requires it. Volume/dynamic-normalization calculations
+  and integer-output dithering keep f64 intermediates. Decoder conversion
+  tests compare the old widen/narrow path, including integer extrema and
+  attenuation of 32-bit lossless PCM.
 
 MIT requires retained license notices, not per-file modification notices.

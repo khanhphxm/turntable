@@ -80,7 +80,7 @@ pub(super) struct RingSink {
 	volume:          Box<dyn VolumeGetter + Send>,
 	samples:         Vec<f32>,
 	outgoing:        Vec<f32>,
-	packet:          Vec<f64>,
+	packet:          Vec<f32>,
 	cursor:          usize,
 	source:          Option<CrossfadeSource>,
 	fade:            Crossfade,
@@ -110,7 +110,7 @@ impl RingSink {
 		while self.outgoing.len() < samples {
 			if let Some(available) = self.packet.get(self.cursor..).filter(|tail| !tail.is_empty()) {
 				let count = available.len().min(samples - self.outgoing.len());
-				self.outgoing.extend(available.iter().take(count).map(|s| dsp_f32(*s * volume)));
+				self.outgoing.extend(available.iter().take(count).map(|s| dsp_f32(f64::from(*s) * volume)));
 				self.cursor += count;
 				continue;
 			}
@@ -182,8 +182,9 @@ impl Sink for RingSink {
 		let AudioPacket::Samples(samples) = packet else {
 			return Err(SinkError::InvalidParams("raw packets (passthrough) are not supported".into()));
 		};
-		self.samples.clear();
-		self.samples.extend(samples.iter().copied().map(dsp_f32));
+		// The decoder already owns interleaved render-format PCM. Move it instead of copying
+		// and narrowing an entire packet into a second buffer.
+		self.samples = samples;
 		self.fade_start();
 		if self.fade.remaining() > 0 {
 			self.read_outgoing((self.samples.len() / 2).min(self.fade.remaining()) * 2)?;
@@ -263,5 +264,18 @@ mod tests {
 		sink.fade.start(4410);
 		sink.new_track();
 		assert_eq!(sink.start_remaining, 0, "do not attenuate the outgoing side of a crossfade");
+	}
+
+	#[test]
+	fn render_format_packets_move_without_a_copy_or_changed_sample_bits() {
+		let (writer, _feed) = crate::audio::channel();
+		let mut sink = RingSink::new(writer, Arc::new(Transitions::default()), Box::new(librespot_playback::mixer::NoOpVolume));
+		sink.start_remaining = 0;
+		let samples = vec![-1.0f32, 1.0, -0.0, 0.0, f32::from_bits(1), -f32::MIN_POSITIVE, 0.123_456_7, -0.999_999_94];
+		let pointer = samples.as_ptr();
+		let previous: Vec<u32> = samples.iter().map(|&sample| dsp_f32(f64::from(sample)).to_bits()).collect();
+		sink.write(AudioPacket::Samples(samples), &mut Converter::new(None)).unwrap();
+		assert_eq!(sink.samples.as_ptr(), pointer, "RingSink must retain the decoder's allocation");
+		assert_eq!(sink.samples.iter().map(|sample| sample.to_bits()).collect::<Vec<_>>(), previous);
 	}
 }

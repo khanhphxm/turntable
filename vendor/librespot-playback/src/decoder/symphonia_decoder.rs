@@ -17,7 +17,8 @@ use crate::{NUM_CHANNELS, PAGES_PER_MS, SAMPLE_RATE, player::NormalisationData, 
 pub struct SymphoniaDecoder {
     probe_result: ProbeResult,
     decoder: Box<dyn Decoder>,
-    sample_buffer: Option<SampleBuffer<f64>>,
+    // Turntable renders f32: keep PCM in that format instead of widening then narrowing it.
+    sample_buffer: Option<SampleBuffer<f32>>,
 }
 
 #[derive(Default)]
@@ -267,5 +268,52 @@ impl AudioDecoder for SymphoniaDecoder {
                 Err(err) => return Err(err.into()),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use symphonia::core::{
+        audio::{AudioBuffer, Layout, SampleBuffer, Signal, SignalSpec},
+        conv::IntoSample,
+        sample::Sample,
+    };
+
+    fn compare<S: Sample + IntoSample<f32> + IntoSample<f64>>(values: &[S]) {
+        let spec = SignalSpec::new_with_layout(44_100, Layout::Stereo);
+        let mut decoded = AudioBuffer::<S>::new(values.len() as u64, spec);
+        decoded.render_reserved(None);
+        decoded.chan_mut(0).copy_from_slice(values);
+        for (sample, value) in decoded.chan_mut(1).iter_mut().zip(values.iter().rev()) {
+            *sample = *value;
+        }
+        let mut native = SampleBuffer::<f32>::new(values.len() as u64, spec);
+        let mut previous = SampleBuffer::<f64>::new(values.len() as u64, spec);
+        native.copy_interleaved_typed(&decoded);
+        previous.copy_interleaved_typed(&decoded);
+        for (&actual, &reference) in native.samples().iter().zip(previous.samples()) {
+            assert_eq!(actual.to_bits(), (reference as f32).to_bits());
+            for volume in [1.0, 0.5, 0.1, 0.001] {
+                let actual = (f64::from(actual) * volume) as f32;
+                let reference = (reference * volume) as f32;
+                // 32-bit lossless PCM can round before attenuation; never more than one f32 ulp.
+                assert!((actual - reference).abs() <= f32::EPSILON);
+            }
+        }
+    }
+
+    #[test]
+    fn native_pcm_matches_widen_then_narrow_for_lossy_and_lossless_samples() {
+        compare(&[i16::MIN, -32767, -1, 0, 1, 32766, i16::MAX]);
+        compare(&[i32::MIN, i32::MIN + 1, -257, -256, -1, 0, 1, 256, 257, i32::MAX - 1, i32::MAX]);
+        compare(&[-1.0f32, -0.25, -0.0, 0.0, f32::from_bits(1), f32::MIN_POSITIVE, 0.125, 0.999_999_94, 1.0]);
+        let mut state = 37u32;
+        let integers: Vec<i32> = (0..8192).map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            i32::from_ne_bytes(state.to_ne_bytes())
+        }).collect();
+        compare(&integers);
+        let floats: Vec<f32> = integers.iter().map(|&value| value as f32 / 2_147_483_648.0).collect();
+        compare(&floats);
     }
 }

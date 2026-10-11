@@ -93,41 +93,41 @@ impl Converter {
     }
 
     #[inline]
-    pub fn f64_to_f32(&mut self, samples: &[f64]) -> Vec<f32> {
-        samples.iter().map(|sample| *sample as f32).collect()
+    pub fn f32_to_f64(&mut self, samples: &[f32]) -> Vec<f64> {
+        samples.iter().copied().map(f64::from).collect()
     }
 
     #[inline]
-    pub fn f64_to_s32(&mut self, samples: &[f64]) -> Vec<i32> {
+    pub fn f32_to_s32(&mut self, samples: &[f32]) -> Vec<i32> {
         samples
             .iter()
-            .map(|sample| self.scale(*sample, Self::SHIFT_16_TO_32) as i32)
+            .map(|sample| self.scale(f64::from(*sample), Self::SHIFT_16_TO_32) as i32)
             .collect()
     }
 
     /// S24 is 24-bit PCM packed in an upper 32-bit word
     #[inline]
-    pub fn f64_to_s24(&mut self, samples: &[f64]) -> Vec<i32> {
+    pub fn f32_to_s24(&mut self, samples: &[f32]) -> Vec<i32> {
         samples
             .iter()
-            .map(|sample| self.clamping_scale_s24(*sample) as i32)
+            .map(|sample| self.clamping_scale_s24(f64::from(*sample)) as i32)
             .collect()
     }
 
     /// S24_3 is 24-bit PCM in a 3-byte array
     #[inline]
-    pub fn f64_to_s24_3(&mut self, samples: &[f64]) -> Vec<i24> {
+    pub fn f32_to_s24_3(&mut self, samples: &[f32]) -> Vec<i24> {
         samples
             .iter()
-            .map(|sample| i24::from_s24(self.clamping_scale_s24(*sample) as i32))
+            .map(|sample| i24::from_s24(self.clamping_scale_s24(f64::from(*sample)) as i32))
             .collect()
     }
 
     #[inline]
-    pub fn f64_to_s16(&mut self, samples: &[f64]) -> Vec<i16> {
+    pub fn f32_to_s16(&mut self, samples: &[f32]) -> Vec<i16> {
         samples
             .iter()
-            .map(|sample| self.scale(*sample, 0) as i16)
+            .map(|sample| self.scale(f64::from(*sample), 0) as i16)
             .collect()
     }
 }

@@ -1862,7 +1862,7 @@ impl PlayerInternal {
                             (false, _) => {
                                 if volume < 1.0 {
                                     for sample in data.iter_mut() {
-                                        *sample *= volume;
+                                        *sample = (f64::from(*sample) * volume) as f32;
                                     }
                                 }
                             }
@@ -1873,7 +1873,7 @@ impl PlayerInternal {
                                 let attack_cf = self.config.normalisation_attack_cf;
                                 let release_cf = self.config.normalisation_release_cf;
 
-                                for sample in data.iter_mut() {
+                                for output in data.iter_mut() {
                                     // Feedforward limiter in the log domain
                                     // After: Giannoulis, D., Massberg, M., & Reiss, J.D. (2012).
                                     // Digital Dynamic Range Compressor Design—A Tutorial and
@@ -1883,7 +1883,7 @@ impl PlayerInternal {
                                     // This implementation assumes audio is stereo.
 
                                     // step 0: apply gain stage
-                                    *sample *= normalisation_factor;
+                                    let mut sample = f64::from(*output) * normalisation_factor;
 
                                     // step 1-4: half-wave rectification and conversion into dB, and
                                     // gain computer with soft knee and subtractor
@@ -1891,7 +1891,7 @@ impl PlayerInternal {
                                         // Add slight DC offset. Some samples are silence, which is
                                         // -inf dB and gets the limiter stuck. Adding a small
                                         // positive offset prevents this.
-                                        *sample += f64::MIN_POSITIVE;
+                                        sample += f64::MIN_POSITIVE;
 
                                         let bias_db = ratio_to_db(sample.abs()) - threshold_db;
                                         let knee_boundary_db = bias_db * 2.0;
@@ -1927,13 +1927,13 @@ impl PlayerInternal {
                                         self.normalisation_peaks[0],
                                         self.normalisation_peaks[1],
                                     );
-                                    *sample *= db_to_ratio(-max_peak) * volume;
+                                    *output = (sample * db_to_ratio(-max_peak) * volume) as f32;
                                 }
                             }
                             (true, NormalisationMethod::Basic) => {
                                 if normalisation_factor < 1.0 || volume < 1.0 {
                                     for sample in data.iter_mut() {
-                                        *sample *= normalisation_factor * volume;
+                                        *sample = (f64::from(*sample) * (normalisation_factor * volume)) as f32;
                                     }
                                 }
                             }

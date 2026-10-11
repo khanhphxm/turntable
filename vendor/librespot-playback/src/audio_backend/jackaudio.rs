@@ -66,13 +66,12 @@ impl Open for JackSink {
 }
 
 impl Sink for JackSink {
-    fn write(&mut self, packet: AudioPacket, converter: &mut Converter) -> SinkResult<()> {
+    fn write(&mut self, packet: AudioPacket, _converter: &mut Converter) -> SinkResult<()> {
         let samples = packet
             .samples()
             .map_err(|e| SinkError::OnWrite(e.to_string()))?;
 
-        let samples_f32: &[f32] = &converter.f64_to_f32(samples);
-        for sample in samples_f32.iter() {
+        for sample in samples.iter() {
             let res = self.send.send(*sample);
             if res.is_err() {
                 error!("cannot write to channel");

@@ -240,15 +240,14 @@ impl Sink for RodioSink {
         Ok(())
     }
 
-    fn write(&mut self, packet: AudioPacket, converter: &mut Converter) -> SinkResult<()> {
-        let samples = packet
-            .samples()
-            .map_err(|e| RodioError::Samples(e.to_string()))?;
-        let samples_f32: &[f32] = &converter.f64_to_f32(samples);
+    fn write(&mut self, packet: AudioPacket, _converter: &mut Converter) -> SinkResult<()> {
+        let AudioPacket::Samples(samples) = packet else {
+            return Err(RodioError::Samples("raw packets are not supported".into()).into());
+        };
         let source = rodio::buffer::SamplesBuffer::new(
             NUM_CHANNELS as cpal::ChannelCount,
             SAMPLE_RATE,
-            samples_f32,
+            samples,
         );
         self.rodio_sink.append(source);
 
