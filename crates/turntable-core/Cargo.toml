@@ -14,7 +14,7 @@ workspace = true
 # Offline host/controller fixtures; never enabled by production builds.
 test-support = []
 # Offline decoder/DSP measurements; does not connect to Spotify or open an audio device.
-audio-bench = ["dep:symphonia", "librespot-playback/audio-bench"]
+audio-bench = ["dep:libc", "dep:symphonia", "librespot-playback/audio-bench"]
 
 [dependencies]
 futures-util.workspace = true
@@ -40,7 +40,9 @@ ureq.workspace = true
 
 [dev-dependencies]
 image.workspace = true
-libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows.workspace = true

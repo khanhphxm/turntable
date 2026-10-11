@@ -3,15 +3,23 @@ use std::{
 	cell::Cell,
 	fs::File,
 	io::{self, BufWriter, Write},
-	mem::MaybeUninit,
 	path::PathBuf,
-	sync::{Arc, Barrier, atomic::{AtomicBool, AtomicU64, Ordering}},
+	sync::{
+		Arc, Barrier,
+		atomic::{AtomicBool, AtomicU64, Ordering},
+	},
 	thread,
 	time::{Duration, Instant},
 };
 
 use serde_json::json;
-use turntable_core::{audio::{self, EqSettings, Normalize, benchmark::NullOutput}, engine::benchmark::Stream};
+use turntable_core::{
+	audio::{
+		self, EqSettings, Normalize,
+		benchmark::{NullOutput, resource_usage},
+	},
+	engine::benchmark::Stream,
+};
 
 static TRACKING: AtomicBool = AtomicBool::new(false);
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
@@ -42,14 +50,18 @@ unsafe impl GlobalAlloc for MeasuredAllocator {
 	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
 		// SAFETY: GlobalAlloc's caller supplies a valid allocation layout.
 		let result = unsafe { System.alloc(layout) };
-		if !result.is_null() { allocated(layout.size()); }
+		if !result.is_null() {
+			allocated(layout.size());
+		}
 		result
 	}
 
 	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
 		// SAFETY: GlobalAlloc's caller supplies a valid allocation layout.
 		let result = unsafe { System.alloc_zeroed(layout) };
-		if !result.is_null() { allocated(layout.size()); }
+		if !result.is_null() {
+			allocated(layout.size());
+		}
 		result
 	}
 
@@ -74,31 +86,56 @@ unsafe impl GlobalAlloc for MeasuredAllocator {
 static ALLOCATOR: MeasuredAllocator = MeasuredAllocator;
 
 struct Options {
-	file: PathBuf,
-	rate: u32,
-	frames: usize,
-	repeats: u32,
+	file:         PathBuf,
+	rate:         u32,
+	frames:       usize,
+	repeats:      u32,
 	crossfade_ms: u32,
-	normalize: Normalize,
-	eq: EqSettings,
-	output: Option<PathBuf>,
+	normalize:    Normalize,
+	eq:           EqSettings,
+	output:       Option<PathBuf>,
 }
 
-fn invalid(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message.into()) }
+fn invalid(message: impl Into<String>) -> io::Error {
+	io::Error::new(io::ErrorKind::InvalidInput, message.into())
+}
 
 fn options() -> io::Result<Options> {
 	let mut args = std::env::args().skip(1);
 	let file = args.next().ok_or_else(|| invalid("usage: audio-bench FILE [--rate HZ] [--frames N] [--repeat N] [--normalize off|quiet|normal|loud] [--eq flat|enabled-flat|bass_boost|rock|...] [--crossfade-ms N] [--output FILE]"))?;
-	let mut options = Options { file: file.into(), rate: 44_100, frames: 2048, repeats: 1, crossfade_ms: 0, normalize: Normalize::Off, eq: EqSettings::FLAT, output: None };
+	let mut options = Options {
+		file:         file.into(),
+		rate:         44_100,
+		frames:       2048,
+		repeats:      1,
+		crossfade_ms: 0,
+		normalize:    Normalize::Off,
+		eq:           EqSettings::FLAT,
+		output:       None,
+	};
 	while let Some(key) = args.next() {
 		let value = args.next().ok_or_else(|| invalid(format!("missing value for {key}")))?;
 		match key.as_str() {
-			"--rate" => options.rate = value.parse().map_err(|_| invalid("invalid rate"))?,
-			"--frames" => options.frames = value.parse().map_err(|_| invalid("invalid frame count"))?,
-			"--repeat" => options.repeats = value.parse().map_err(|_| invalid("invalid repeat count"))?,
-			"--crossfade-ms" => options.crossfade_ms = value.parse().map_err(|_| invalid("invalid overlap duration"))?,
-			"--normalize" => options.normalize = match value.as_str() { "off" => Normalize::Off, "quiet" => Normalize::Quiet, "normal" => Normalize::Normal, "loud" => Normalize::Loud, _ => return Err(invalid("unknown normalization mode")) },
-			"--eq" => options.eq = if value == "enabled-flat" { EqSettings { enabled: true, ..EqSettings::FLAT } } else { EqSettings::preset(&value).ok_or_else(|| invalid("unknown EQ preset"))? },
+			"--rate" => options.rate = value.parse().map_err(|error| invalid(format!("{key}: {error}")))?,
+			"--frames" => options.frames = value.parse().map_err(|error| invalid(format!("{key}: {error}")))?,
+			"--repeat" => options.repeats = value.parse().map_err(|error| invalid(format!("{key}: {error}")))?,
+			"--crossfade-ms" => options.crossfade_ms = value.parse().map_err(|error| invalid(format!("{key}: {error}")))?,
+			"--normalize" => {
+				options.normalize = match value.as_str() {
+					"off" => Normalize::Off,
+					"quiet" => Normalize::Quiet,
+					"normal" => Normalize::Normal,
+					"loud" => Normalize::Loud,
+					_ => return Err(invalid("unknown normalization mode")),
+				}
+			},
+			"--eq" => {
+				options.eq = if value == "enabled-flat" {
+					EqSettings { enabled: true, ..EqSettings::FLAT }
+				} else {
+					EqSettings::preset(&value).ok_or_else(|| invalid("unknown EQ preset"))?
+				}
+			},
 			"--output" => options.output = Some(value.into()),
 			_ => return Err(invalid(format!("unknown option {key}"))),
 		}
@@ -107,20 +144,6 @@ fn options() -> io::Result<Options> {
 		return Err(invalid("rate must be 8000..192000, frames 64..8192, repeat >= 1"));
 	}
 	Ok(options)
-}
-
-fn usage() -> io::Result<libc::rusage> {
-	let mut usage = MaybeUninit::<libc::rusage>::uninit();
-	// SAFETY: usage is writable storage for the OS to initialize; RUSAGE_SELF includes all threads.
-	if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
-		return Err(io::Error::last_os_error());
-	}
-	// SAFETY: successful getrusage initialized the complete rusage value.
-	Ok(unsafe { usage.assume_init() })
-}
-
-fn cpu_seconds(usage: &libc::rusage) -> f64 {
-	usage.ru_utime.tv_sec as f64 + usage.ru_utime.tv_usec as f64 * 1e-6 + usage.ru_stime.tv_sec as f64 + usage.ru_stime.tv_usec as f64 * 1e-6
 }
 
 pub fn run() -> io::Result<()> {
@@ -139,39 +162,54 @@ pub fn run() -> io::Result<()> {
 	})?;
 	let heap_start = LIVE.load(Ordering::Relaxed);
 	PEAK.store(heap_start, Ordering::Relaxed);
-	let before = usage()?;
+	let before = resource_usage()?;
 	let start = Instant::now();
 	TRACKING.store(true, Ordering::Relaxed);
 	barrier.wait();
 	let mut rendered_frames = 0u64;
-	let mut drain_callbacks = 0;
+	let mut drain_callbacks = 0u64;
 	let mut late_callbacks = 0u64;
+	let drain_frames = (2048u64 * u64::from(options.rate)).div_ceil(44_100);
 	loop {
 		// Absolute deadlines do not accumulate sleep drift. The initial period lets the ring fill.
 		rendered_frames += options.frames as u64;
 		let deadline = start + Duration::from_nanos(rendered_frames * 1_000_000_000 / u64::from(options.rate));
 		let now = Instant::now();
-		if now < deadline { thread::sleep(deadline - now); } else { late_callbacks += 1; }
+		if now < deadline {
+			thread::sleep(deadline - now);
+		} else {
+			late_callbacks += 1;
+		}
 		RENDERING.set(true);
 		output.render(&mut samples);
 		RENDERING.set(false);
 		if let Some(dump) = &mut dump {
-			for sample in &samples { dump.write_all(&sample.to_le_bytes())?; }
+			for sample in &samples {
+				dump.write_all(&sample.to_le_bytes())?;
+			}
 		}
 		if output.drained() {
 			drain_callbacks += 1;
 			// Flush both the converter's pull buffer/FIR and the leveler's lookahead.
-			if drain_callbacks * options.frames >= 2048 { break; }
+			if drain_callbacks * options.frames as u64 >= drain_frames {
+				break;
+			}
 		}
 	}
-	let decoded = decoder.join().map_err(|_| io::Error::other("decoder thread panicked"))??;
+	let decoded = match decoder.join() {
+		Ok(decoded) => decoded?,
+		Err(error) => std::panic::resume_unwind(error),
+	};
 	TRACKING.store(false, Ordering::Relaxed);
 	let elapsed = start.elapsed().as_secs_f64();
-	let after = usage()?;
-	if let Some(dump) = &mut dump { dump.flush()?; }
+	let after = resource_usage()?;
+	if let Some(dump) = &mut dump {
+		dump.flush()?;
+	}
 	let scheduling = output.scheduling();
-	let cpu = cpu_seconds(&after) - cpu_seconds(&before);
+	let cpu = after.cpu_seconds - before.cpu_seconds;
 	let audio = decoded.frames as f64 / 44_100.0;
+	let heap_end = LIVE.load(Ordering::Relaxed);
 	let result = json!({
 		"file": options.file, "rate_hz": options.rate, "buffer_frames": options.frames, "normalize": options.normalize,
 		"eq": options.eq, "crossfade_ms": options.crossfade_ms, "repeats": options.repeats,
@@ -181,13 +219,13 @@ pub fn run() -> io::Result<()> {
 		"callbacks_per_second": scheduling.callbacks as f64 / elapsed,
 		"writer_parks_per_second": scheduling.writer_parks as f64 / elapsed,
 		"writer_wakes_per_second": scheduling.writer_wakes as f64 / elapsed,
-		"voluntary_context_switches_per_second": (after.ru_nvcsw - before.ru_nvcsw) as f64 / elapsed,
-		"involuntary_context_switches_per_second": (after.ru_nivcsw - before.ru_nivcsw) as f64 / elapsed,
+		"voluntary_context_switches_per_second": (after.voluntary_switches - before.voluntary_switches) as f64 / elapsed,
+		"involuntary_context_switches_per_second": (after.involuntary_switches - before.involuntary_switches) as f64 / elapsed,
 		"allocations": ALLOCATIONS.load(Ordering::Relaxed), "allocated_bytes": ALLOCATED.load(Ordering::Relaxed),
 		"allocations_per_audio_second": ALLOCATIONS.load(Ordering::Relaxed) as f64 / audio,
 		"render_allocations": RENDER_ALLOCATIONS.load(Ordering::Relaxed),
-		"heap_start_bytes": heap_start, "heap_peak_bytes": PEAK.load(Ordering::Relaxed), "heap_end_bytes": LIVE.load(Ordering::Relaxed),
-		"peak_rss_kib": after.ru_maxrss, "underruns": scheduling.underruns, "late_callbacks": late_callbacks,
+		"heap_start_bytes": heap_start, "heap_peak_bytes": PEAK.load(Ordering::Relaxed), "heap_end_bytes": heap_end,
+		"peak_rss_kib": after.peak_rss_kib, "underruns": scheduling.underruns, "late_callbacks": late_callbacks,
 	});
 	serde_json::to_writer(io::stdout().lock(), &result)?;
 	io::stdout().lock().write_all(b"\n")?;

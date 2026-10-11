@@ -128,37 +128,37 @@ impl StageShared {
 }
 
 struct Shared {
-	ring:       Ring,
-	mailbox:    Mailbox,
+	ring:         Ring,
+	mailbox:      Mailbox,
 	/// Natural-transition overlap in seconds, read by the decoder (not the callback).
-	crossfade:  AtomicU8,
-	stop:       AtomicBool,
+	crossfade:    AtomicU8,
+	stop:         AtomicBool,
 	/// Output failure, distinct from permanent shutdown: the decoder keeps accepting commands.
-	dead:       AtomicBool,
+	dead:         AtomicBool,
 	/// A replacement owns the feed while the old backend is being shut down.
-	recovering: AtomicBool,
-	failure:    OnceLock<Box<dyn Fn() + Send + Sync>>,
-	ended:      AtomicBool,
+	recovering:   AtomicBool,
+	failure:      OnceLock<Box<dyn Fn() + Send + Sync>>,
+	ended:        AtomicBool,
 	#[cfg(any(test, feature = "audio-bench"))]
-	underruns:  AtomicU64,
+	underruns:    AtomicU64,
 	#[cfg(feature = "audio-bench")]
 	writer_parks: AtomicU64,
 	#[cfg(feature = "audio-bench")]
 	writer_wakes: AtomicU64,
 	/// The writer's thread, for the render callback to unpark.
-	writer:     OnceLock<Thread>,
+	writer:       OnceLock<Thread>,
 	/// The writer is parked waiting for room in the ring.
-	waiting:    AtomicBool,
+	waiting:      AtomicBool,
 	/// The output unit is running (render callbacks are happening).
-	running:    AtomicBool,
+	running:      AtomicBool,
 	/// Requests for the control thread, which owns starting and stopping.
-	want_stop:  AtomicBool,
-	want_start: AtomicBool,
+	want_stop:    AtomicBool,
+	want_start:   AtomicBool,
 	/// Re-registerable: a rebuilt output has a new control thread. Wake never locks/allocates.
-	control:    AtomicWaker,
-	stage:      StageShared,
+	control:      AtomicWaker,
+	stage:        StageShared,
 	/// Backend control state; default-output backends need none.
-	_output:    output::State,
+	_output:      output::State,
 }
 
 impl Shared {
@@ -191,28 +191,28 @@ impl Shared {
 impl Shared {
 	fn new() -> Self {
 		Self {
-			ring:                   Ring::new(),
-			mailbox:                Mailbox::new(),
-			crossfade:              AtomicU8::new(0),
-			stop:                   AtomicBool::new(false),
-			dead:                   AtomicBool::new(false),
-			recovering:             AtomicBool::new(false),
-			failure:                OnceLock::new(),
-			ended:                  AtomicBool::new(false),
+			ring: Ring::new(),
+			mailbox: Mailbox::new(),
+			crossfade: AtomicU8::new(0),
+			stop: AtomicBool::new(false),
+			dead: AtomicBool::new(false),
+			recovering: AtomicBool::new(false),
+			failure: OnceLock::new(),
+			ended: AtomicBool::new(false),
 			#[cfg(any(test, feature = "audio-bench"))]
-			underruns:              AtomicU64::new(0),
+			underruns: AtomicU64::new(0),
 			#[cfg(feature = "audio-bench")]
 			writer_parks: AtomicU64::new(0),
 			#[cfg(feature = "audio-bench")]
 			writer_wakes: AtomicU64::new(0),
-			writer:                 OnceLock::new(),
-			waiting:                AtomicBool::new(false),
-			running:                AtomicBool::new(true),
-			want_stop:              AtomicBool::new(false),
-			want_start:             AtomicBool::new(false),
-			control:                AtomicWaker::new(),
-			stage:                  StageShared::new(),
-			_output:                output::State::default(),
+			writer: OnceLock::new(),
+			waiting: AtomicBool::new(false),
+			running: AtomicBool::new(true),
+			want_stop: AtomicBool::new(false),
+			want_start: AtomicBool::new(false),
+			control: AtomicWaker::new(),
+			stage: StageShared::new(),
+			_output: output::State::default(),
 		}
 	}
 }

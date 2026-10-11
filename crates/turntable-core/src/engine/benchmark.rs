@@ -18,12 +18,12 @@ use crate::audio::PcmWriter;
 /// A local-file version of the engine's incoming decoder and sink.
 pub struct Stream {
 	decoder: SymphoniaDecoder,
-	sink: RingSink,
+	sink:    RingSink,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct Decoded {
-	pub frames: u64,
+	pub frames:  u64,
 	pub packets: u64,
 }
 
