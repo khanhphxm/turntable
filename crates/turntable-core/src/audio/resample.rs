@@ -241,8 +241,8 @@ fn pull_decimated(stages: &mut [Input], coefficients: &[f32], out: &mut [f32], p
 	}
 }
 
-/// Eight independent accumulators per channel let LLVM use packed f32 FMAs
-/// over plain contiguous slices, without stereo shuffles or tap-loop bounds checks.
+/// Eight independent accumulators per channel let LLVM pack f32 arithmetic. Keep native
+/// FMA where available; elsewhere ordinary multiply/add avoids software fmaf per tap.
 #[inline]
 fn dot_stereo(left: &[f32], right: &[f32], coefficients: &[f32]) -> [f32; 2] {
 	let mut left_sums = [0.0f32; 8];
@@ -251,8 +251,16 @@ fn dot_stereo(left: &[f32], right: &[f32], coefficients: &[f32]) -> [f32; 2] {
 		for (((left_sum, right_sum), (&left, &right)), &coefficient) in
 			left_sums.iter_mut().zip(&mut right_sums).zip(left.iter().zip(right)).zip(coefficients)
 		{
-			*left_sum = coefficient.mul_add(left, *left_sum);
-			*right_sum = coefficient.mul_add(right, *right_sum);
+			#[cfg(any(target_feature = "fma", target_arch = "aarch64"))]
+			{
+				*left_sum = coefficient.mul_add(left, *left_sum);
+				*right_sum = coefficient.mul_add(right, *right_sum);
+			}
+			#[cfg(not(any(target_feature = "fma", target_arch = "aarch64")))]
+			{
+				*left_sum += coefficient * left;
+				*right_sum += coefficient * right;
+			}
 		}
 	}
 	let [l0, l1, l2, l3, l4, l5, l6, l7] = left_sums;
@@ -603,6 +611,42 @@ mod tests {
 			resampler.process(&mut [], &mut |_| panic!("empty output must not pull"));
 			let mut fresh = Resampler::new(44_100, to);
 			assert_eq!(render_noise(&mut resampler, 333, &[333]), render_noise(&mut fresh, 333, &[333]));
+		}
+	}
+
+	#[test]
+	fn packed_arithmetic_matches_the_previous_fused_fir_below_minus_126_dbfs() {
+		fn fused(left: &[f32], right: &[f32], coefficients: &[f32]) -> [f32; 2] {
+			let mut left_sums = [0.0f32; 8];
+			let mut right_sums = [0.0f32; 8];
+			for ((left, right), coefficients) in
+				left.as_chunks::<8>().0.iter().zip(right.as_chunks::<8>().0).zip(coefficients.as_chunks::<8>().0)
+			{
+				for (((left_sum, right_sum), (&left, &right)), &coefficient) in
+					left_sums.iter_mut().zip(&mut right_sums).zip(left.iter().zip(right)).zip(coefficients)
+				{
+					*left_sum = coefficient.mul_add(left, *left_sum);
+					*right_sum = coefficient.mul_add(right, *right_sum);
+				}
+			}
+			let [l0, l1, l2, l3, l4, l5, l6, l7] = left_sums;
+			let [r0, r1, r2, r3, r4, r5, r6, r7] = right_sums;
+			[((l0 + l1) + (l2 + l3)) + ((l4 + l5) + (l6 + l7)), ((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7))]
+		}
+		let mut seed = 37;
+		for taps in [BASE_TAPS, DECIMATION_TAPS] {
+			for cutoff in [CUTOFF, CUTOFF * 0.5] {
+				let coefficients = design(taps, cutoff, 160, false);
+				for _ in 0..32 {
+					let left: Vec<f32> = (0..taps).map(|_| noise(&mut seed) * 2.0).collect();
+					let right: Vec<f32> = (0..taps).map(|_| noise(&mut seed) * 2.0).collect();
+					for row in coefficients.chunks_exact(taps) {
+						for (actual, previous) in dot_stereo(&left, &right, row).into_iter().zip(fused(&left, &right, row)) {
+							assert!((actual - previous).abs() < 5e-7, "FIR difference: {actual} vs {previous}");
+						}
+					}
+				}
+			}
 		}
 	}
 }
