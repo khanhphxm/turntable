@@ -35,6 +35,10 @@ release, lazy/reused/resized/released path targets, and instance growth with
 pixel readback of a scene larger than the initial capacity. Existing shader,
 atlas generation and headless image tests are retained.
 
+The normalized registry manifest omits the direct `naga` dependency used by
+the retained shader-validation tests. This copy declares it as a development
+dependency so those tests can run when explicitly selecting the vendor package.
+
 ## Linux memory accounting
 
 Use `/proc/<pid>/smaps_rollup` PSS/RSS, not virtual address reservations. GPU
