@@ -1,3 +1,4 @@
+// Modified by Turntable: connect dirty-window demand to the parked frame loop; see TURNTABLE.md.
 use std::{
     cell::{Cell, Ref, RefCell, RefMut},
     ffi::c_void,
@@ -1955,6 +1956,30 @@ impl PlatformWindow for WaylandWindow {
 
     fn is_fullscreen(&self) -> bool {
         self.borrow().fullscreen
+    }
+
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let frame_loop = Rc::downgrade(&self.0.frame_loop);
+        let scheduled_frame_at = Rc::downgrade(&self.0.scheduled_frame_at);
+        let frame_ping = self.0.frame_ping.clone();
+        Some(Rc::new(move || {
+            let (Some(frame_loop), Some(scheduled_frame_at)) =
+                (frame_loop.upgrade(), scheduled_frame_at.upgrade())
+            else {
+                return;
+            };
+            // Invalidation can occur while the window/client state is borrowed.
+            // Scheduling needs only these cells, never a re-entrant state borrow.
+            match frame_loop.get() {
+                FrameLoop::Parked => {
+                    frame_loop.set(FrameLoop::Scheduled);
+                    scheduled_frame_at.set(PlatformFrameSignal::capture(Instant::now));
+                    frame_ping.ping();
+                }
+                FrameLoop::Ticking => frame_loop.set(FrameLoop::RescheduleRequested),
+                _ => {}
+            }
+        }))
     }
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {

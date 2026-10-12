@@ -10,8 +10,8 @@ is Turntable's added, event-loop-independent demand latch.
 
 Upstream starts a periodic RandR-rate timer for every mapped, unobscured window.
 GPUI avoids rendering clean scenes, but every visible window still wakes the
-main loop at the display rate. Wayland already uses compositor callbacks and
-parks clean windows; its scheduling is unchanged.
+main loop at the display rate. Wayland already parks clean windows using
+compositor callbacks; its pacing policy is retained.
 
 - The X11 timer removes itself after a frame with no remaining demand.
 - GPUI's existing `frame_waker` and `schedule_frame` hooks coalesce dirty-view,
@@ -39,6 +39,17 @@ requested frames without redundant pings, and hiding/revealing pending demand:
 rustc --edition=2024 --test vendor/gpui-pre-linux/src/linux/x11/frame_request.rs -o /tmp/x11-frame-request-tests
 /tmp/x11-frame-request-tests
 ```
+
+
+## Wayland dirty-window wakeup
+
+The parked Wayland frame loop already implements `schedule_frame`, but upstream
+does not connect GPUI's `frame_waker` invalidation hook. A worker notification
+after parking could therefore remain unpainted until a native event or explicit
+next-frame request. The patch supplies that hook using weak references to the
+existing frame-loop/signal cells and Calloop ping, without borrowing window or
+client state re-entrantly. Existing compositor callbacks and retry timers keep
+owning the wake while armed; no periodic idle source is added.
 
 Linux graphics in this snapshot use `gpui-pre-wgpu` (Vulkan/OpenGL), not the
 older Blade renderer. Its separate resource-sizing patch is documented in
