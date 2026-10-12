@@ -40,7 +40,12 @@ dependencies used by the retained shader tests and font benchmark. This copy
 declares them as development dependencies. The three upstream font fixtures
 needed by those tests/benchmarks are retained under `test-fonts`, with their
 SIL Open Font License texts, from the exact Zed revision above. They are not
-runtime assets or part of Turntable's UI font bundle.
+runtime assets or part of Turntable's UI font bundle. Vendor packages are
+excluded from workspace membership so their tests can also run explicitly:
+
+```sh
+cargo test --manifest-path vendor/gpui-pre-wgpu/Cargo.toml --features test-support
+```
 
 ## Deferred OpenGL initialization
 
@@ -62,4 +67,5 @@ it selects Mesa llvmpipe and includes LLVM JIT code, software rasterizer heaps,
 worker pools and host-backed textures in the process. Report those separately
 from measurements on a real GPU/compositor. Never subtract all anonymous memory
 as if it were driver memory: Rust state, decoded covers, stacks and font caches
-share that category.
+share that category. LLVM can also be loaded by the hardware Mesa drivers;
+its presence alone does not prove software rendering.

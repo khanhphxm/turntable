@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/turntable", "crates/turntable-core"]
+exclude = ["vendor/gpui-pre-linux", "vendor/gpui-pre-wgpu"]
 resolver = "3"
 
 [workspace.package]
