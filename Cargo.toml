@@ -178,6 +178,8 @@ panic = "abort"
 strip = true
 
 [patch.crates-io]
+# Expose native-element paint context without changing GPUI drawing.
+gpui-pre = { path = "vendor/gpui-pre" }
 # Drop removed layout nodes' measurement contexts rather than retaining old page text.
 taffy = { path = "vendor/taffy" }
 # Park macOS display links when no window redraw or animation is pending.
