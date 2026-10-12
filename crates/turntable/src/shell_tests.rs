@@ -45,8 +45,7 @@ fn setup() -> (Entity<Shell>, VisualTestContext, tempfile::TempDir) {
 	let controller = Controller::fixture(&paths, fixture_state()).unwrap();
 	let mut app = TestAppContext::single();
 	app.update(|cx| {
-		gpui_kit::init(cx);
-		gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+		crate::theme::init(cx);
 		super::bind_keys(cx);
 	});
 	let mut shell = None;

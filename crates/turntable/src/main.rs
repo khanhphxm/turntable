@@ -50,8 +50,7 @@ fn main() {
 	let application = gpui_kit::application().with_assets(assets::Assets);
 	application.on_reopen(desktop::show);
 	application.run(|cx| {
-		gpui_kit::init(cx);
-		gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+		theme::init(cx);
 		desktop::install(cx);
 		shell::bind_keys(cx);
 		menus::install(shell::OpenSettings, cx);

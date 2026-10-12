@@ -2,6 +2,33 @@
 
 use gpui_kit::{Hsla, Pixels, Rgba, px, rgb, rgba};
 
+/// Install component themes without enumerating installed fonts. Name GPUI's
+/// platform UI family explicitly; its normal fallback stack handles missing fonts.
+pub fn init(cx: &mut gpui_kit::App) {
+	use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
+
+	let requested = if cfg!(target_os = "macos") {
+		".AppleSystemUIFont"
+	} else if cfg!(target_os = "windows") {
+		"Segoe UI"
+	} else {
+		"IBM Plex Sans"
+	};
+	let text = cx.text_system();
+	let family = text.get_font_for_id(text.resolve_font(&gpui_kit::font(requested))).map_or_else(|| requested.into(), |font| font.family);
+	cx.set_global(Theme { font_family: family.clone(), mono_font_family: family, ..Theme::default() });
+	gpui_kit::init(cx);
+	// A preinstalled theme skips the component's default-config assignment. Restore
+	// both registered palettes before applying Dark, preserving its normal colours.
+	let registry = ThemeRegistry::global(cx);
+	let light = registry.default_light_theme().clone();
+	let dark = registry.default_dark_theme().clone();
+	let theme = Theme::global_mut(cx);
+	theme.light_theme = light;
+	theme.dark_theme = dark;
+	Theme::change(ThemeMode::Dark, None, cx);
+}
+
 /// The window behind the panels.
 pub fn base() -> Rgba {
 	rgb(0x0000_0000)
@@ -90,4 +117,29 @@ pub const RAISED: u32 = 0x001f_1f1f;
 pub fn parse_hex(s: &str) -> Option<u32> {
 	let h = s.trim_start_matches('#');
 	if h.len() == 6 { u32::from_str_radix(h, 16).ok() } else { None }
+}
+
+#[cfg(test)]
+mod tests {
+	#[test]
+	fn explicit_ui_fonts_preserve_registered_component_palettes() {
+		use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
+
+		let app = gpui_test::TestAppContext::single();
+		app.update(|cx| {
+			super::init(cx);
+			let theme = Theme::global(cx);
+			let registry = ThemeRegistry::global(cx);
+			let family = theme.font_family.clone();
+			assert_ne!(family.as_ref(), ".SystemUIFont");
+			assert_eq!(theme.mono_font_family, family);
+			assert!(theme.is_dark());
+			assert!(std::rc::Rc::ptr_eq(&theme.dark_theme, registry.default_dark_theme()));
+			assert!(std::rc::Rc::ptr_eq(&theme.light_theme, registry.default_light_theme()));
+			Theme::change(ThemeMode::Light, None, cx);
+			assert_eq!(Theme::global(cx).mono_font_family, family);
+			Theme::change(ThemeMode::Dark, None, cx);
+			assert_eq!(Theme::global(cx).mono_font_family, family);
+		});
+	}
 }
