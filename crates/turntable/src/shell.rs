@@ -356,19 +356,11 @@ impl Shell {
 	/// Workers published or a timer came due: take it in.
 	pub fn pump(&mut self, cx: &mut Context<'_, Self>) {
 		let before = self.st().side_panel();
-		// While something plays the clock and seek bar move on every tick.
-		if self.core.pump() || self.st().playing() {
+		// Moving clocks sample the monotonic anchor themselves. Core lyric deadlines still
+		// publish actual line changes; an unchanged timer must not invalidate every region.
+		if self.core.pump() {
 			self.after_change(before, cx);
 		}
-	}
-
-	/// When to wake next: the core's next timer, or the next whole second of playback.
-	pub fn next_wake(&self) -> Option<Instant> {
-		let tick = self.st().playing().then(|| {
-			let ms = self.st().position_ms();
-			self.st().anchor.instant_at(ms - ms % 1000 + 1000)
-		});
-		[self.core.deadline(), tick.flatten()].into_iter().flatten().min()
 	}
 
 	fn after_change(&mut self, panel_before: Option<Panel>, cx: &mut Context<'_, Self>) {
@@ -626,7 +618,7 @@ pub fn run_core(shell: &Entity<Shell>, wake: smol::channel::Receiver<()>, cx: &m
 	let shell = shell.downgrade();
 	cx.spawn(async move |cx| {
 		loop {
-			let deadline = shell.update(cx, |s, _| s.next_wake()).ok().flatten();
+			let deadline = shell.update(cx, |s, _| s.core.deadline()).ok().flatten();
 			let woken = wake.recv();
 			match deadline {
 				Some(at) => {

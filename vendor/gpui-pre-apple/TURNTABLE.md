@@ -72,3 +72,17 @@ A second matched Home-only comparison used the 1× primary display at (320, 260)
 | Compact renderer + parked display links | 114.98 | 52.86 | 4.95 | 11.91 | 1.08 | 0.0% |
 
 Both 1× snapshots had no compressed pages. Physical footprint fell 2.03 MiB and IOAccelerator dirty/charged memory fell 2.70 MiB while RSS was essentially unchanged. Thus the change is a real graphics-footprint improvement, not a clean-page or compression trick. The remaining dominant GPU cost at 2× is retained full-resolution drawables; cover decoding and page/cache retention are separate application-level work.
+
+## Application frame demand
+
+Turntable's monotonic playhead already owns the seek/clock repaint schedule. The application's
+core pump no longer invalidates every cached region just because playback is active, and it
+sleeps until a real core deadline or worker notification rather than adding a whole-second
+playback deadline. Actual state changes still invalidate all dependent regions. The core's
+timed-lyric deadlines continue to update highlighting and following; the miniplayer owns its
+own one-second, visibility-aware repaint without repainting the main window.
+
+The portable GPUI cache tests cover unchanged core pumps while playing as well as actual
+state-change invalidation. This scheduling fix is independent of Metal, antialiasing and
+drawable count. Native compositor animations can then let GPU submission backing retire
+instead of keeping it alive with an otherwise-redundant once-a-second full scene submission.

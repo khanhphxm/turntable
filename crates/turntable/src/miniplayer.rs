@@ -2,9 +2,11 @@
 //! hovering darkens it and shows the controls and progress; the title, the device and ⊕/✓ sit
 //! below. The bar's miniplayer button opens it; its red dot closes it.
 
+use std::time::Duration;
+
 use gpui_kit::{
 	AppContext as _, Bounds, Context, Entity, FontWeight, InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Render,
-	StatefulInteractiveElement as _, Styled as _, Subscription, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, div,
+	StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, WindowBounds, WindowHandle, WindowKind, WindowOptions, div,
 	prelude::FluentBuilder as _, px, relative, size,
 };
 use turntable_core::{
@@ -23,8 +25,9 @@ use crate::{
 const SIDE: f32 = 300.;
 
 pub struct MiniPlayer {
-	shell:  Entity<Shell>,
-	_watch: Subscription,
+	shell:   Entity<Shell>,
+	repaint: Option<Task<()>>,
+	_watch:  Subscription,
 }
 
 impl MiniPlayer {
@@ -52,7 +55,7 @@ impl MiniPlayer {
 		let opened = cx.open_window(options, move |_, cx| {
 			cx.new(|cx| {
 				let watch = cx.observe(&owner, |_, _, cx| cx.notify());
-				Self { shell: owner, _watch: watch }
+				Self { shell: owner, repaint: None, _watch: watch }
 			})
 		});
 		if let Ok(handle) = opened {
@@ -71,6 +74,15 @@ impl MiniPlayer {
 impl Render for MiniPlayer {
 	#[expect(clippy::too_many_lines, reason = "keep the declarative miniplayer layout together")]
 	fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+		if self.repaint.is_none() && window.is_visible() && self.shell.read(cx).st().playing() {
+			self.repaint = Some(cx.spawn_in(window, async move |this, cx| {
+				cx.background_executor().timer(Duration::from_secs(1)).await;
+				let _ = this.update(cx, |this, cx| {
+					this.repaint = None;
+					cx.notify();
+				});
+			}));
+		}
 		let shell = self.shell.read(cx);
 		let st = shell.st();
 		let item = st.item.clone();

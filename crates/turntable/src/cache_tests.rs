@@ -44,6 +44,24 @@ fn playhead_only_draws_reuse_every_static_region() {
 }
 
 #[test]
+fn unchanged_core_pumps_do_not_invalidate_playing_regions() {
+	let mut state = super::fixture_state();
+	state.status = turntable_core::engine::Status::Playing;
+	state.anchor.speed = 1.;
+	state.item.decorations.playback.duration_ms = 180_000;
+	let (shell, mut cx, _directory) = super::setup_with_state(state);
+	cx.read_entity(&shell, |shell, _| assert!(shell.st().playing()));
+	let before = renders(&shell, &cx);
+	cx.update(|window, cx| {
+		for _ in 0..32 {
+			shell.update(cx, |shell, cx| shell.pump(cx));
+			window.draw(cx).clear(cx);
+		}
+	});
+	assert_eq!(renders(&shell, &cx), before);
+}
+
+#[test]
 fn library_hover_and_header_animation_do_not_repaint_other_regions() {
 	let (shell, mut cx, _directory) = setup();
 	let [top, library, page, panel, now, transport, extras] = renders(&shell, &cx);

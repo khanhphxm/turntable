@@ -40,9 +40,13 @@ fn fixture_state() -> State {
 }
 
 fn setup() -> (Entity<Shell>, VisualTestContext, tempfile::TempDir) {
+	setup_with_state(fixture_state())
+}
+
+fn setup_with_state(state: State) -> (Entity<Shell>, VisualTestContext, tempfile::TempDir) {
 	let directory = tempfile::tempdir().unwrap();
 	let paths = Paths { config: directory.path().join("config"), cache: directory.path().join("cache") };
-	let controller = Controller::fixture(&paths, fixture_state()).unwrap();
+	let controller = Controller::fixture(&paths, state).unwrap();
 	let mut app = TestAppContext::single();
 	app.update(|cx| {
 		crate::theme::init(cx);
