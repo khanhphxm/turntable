@@ -35,9 +35,24 @@ release, lazy/reused/resized/released path targets, and instance growth with
 pixel readback of a scene larger than the initial capacity. Existing shader,
 atlas generation and headless image tests are retained.
 
-The normalized registry manifest omits the direct `naga` dependency used by
-the retained shader-validation tests. This copy declares it as a development
-dependency so those tests can run when explicitly selecting the vendor package.
+The normalized registry manifest omits direct `naga` and `criterion`
+dependencies used by the retained shader tests and font benchmark. This copy
+declares them as development dependencies. The three upstream font fixtures
+needed by those tests/benchmarks are retained under `test-fonts`, with their
+SIL Open Font License texts, from the exact Zed revision above. They are not
+runtime assets or part of Turntable's UI font bundle.
+
+## Deferred OpenGL initialization
+
+Native window startup first probes hardware Vulkan alone. If it succeeds,
+there is no unused OpenGL/EGL driver context, software-rasterizer worker pool or
+adapter database kept beside the active Vulkan device. If it fails, startup
+uses the existing combined Vulkan/OpenGL instance and adapter-priority policy,
+including software rendering. The hardware-only probe is important: software
+Vulkan must not displace a usable hardware OpenGL adapter. Multiple windows
+continue to share the chosen instance/device. Recovery retains upstream's
+combined-backend retry path. This is shared renderer code, not an Xvfb, vendor
+or PCI-device special case.
 
 ## Linux memory accounting
 
