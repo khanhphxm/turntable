@@ -69,3 +69,40 @@ from measurements on a real GPU/compositor. Never subtract all anonymous memory
 as if it were driver memory: Rust state, decoded covers, stacks and font caches
 share that category. LLVM can also be loaded by the hardware Mesa drivers;
 its presence alone does not prove software rendering.
+
+## Debian measurements (2026-10-14)
+
+Release, Debian 13/Mesa 25.0.7, 32 logical CPUs, 1280×800 Home. X11 used
+Xvfb/Openbox/llvmpipe (no DRI3); hardware Wayland used Weston headless GL on
+AMD Radeon 610M, verified by amdgpu engine counters. An unshipped inert virtual
+seat supplied Weston's missing `wl_seat`, without host input devices.
+
+Copied isolated `TURNTABLE_HOME`, muted `Turntable Bench Linux`, fresh Connect ID.
+No playback was controlled. Temporary uncommitted UI-only hooks simulated
+playing or froze idle notifications while still draining core events; all were
+removed before checks. Samples: 30 seconds after 20–40 seconds settling, kernel
+PSS/RSS, no screenshot readback; not statistical CPU bounds. CPU 100% = one core.
+
+| Backend / state | Baseline PSS/RSS MiB | Patched PSS/RSS MiB | Baseline/patched CPU % |
+| --- | ---: | ---: | ---: |
+| X11 software, idle visible | 187.60 / 224.75 | 185.24 / 222.43 | 0.167 / 0.000 |
+| X11 software, idle minimized | 187.66 / 224.82 | 185.45 / 222.64 | 0.000 / 0.033 |
+| X11 software, simulated playing | 193.84 / 230.97 | 185.27 / 222.41 | 463.729 / 535.094 |
+| Wayland hardware, idle visible | 132.81 / 169.58 | 114.73 / 144.17 | 0.133 / 0.033 |
+| Wayland hardware, simulated playing | 123.87 / 160.55 | 117.29 / 146.66 | 7.367 / 5.867 |
+
+Compact resources alone: hardware idle 125.29/162.03 MiB PSS/RSS; active-client
+VRAM **capacity** 83,872→34,720 KiB (48 MiB), shared swapchain 18,016 KiB unchanged.
+Deferred GL plus shared theme initialization: further −10.56/−17.86 MiB PSS/RSS,
+61→51 threads. X11 shared-memory residency fell 5.86 MiB. Capacity is not PSS.
+
+**Targets are not met:** hardware PSS ≈120.3 MB idle/123.0 MB simulated playing;
+decoder cost excluded. X11 playing CPU did not improve; llvmpipe is not a real-GPU
+floor. Hardware idle PSS: executable 31.99 MiB, anonymous allocator/driver/stacks
+28.91, fonts 26.67, LLVM/Mesa 19.81, other graphics 5.64, other files 1.69. Font
+enumeration avoidance did not establish Linux font-residency savings. Loaded
+family faces remain cached; these results do not prove the remaining floor irreducible.
+
+Use `python3 scripts/bench/measure-linux.py <PID> --seconds 30` for passive metrics.
+Run Cargo from the repository root (or pass `.cargo/config.toml` explicitly) so
+the existing jemalloc configuration applies to comparable builds.
