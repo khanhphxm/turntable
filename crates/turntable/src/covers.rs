@@ -15,6 +15,10 @@
 //! are held weakly except while decoding; dead sources are swept on misses and
 //! completions. Call `prune` after replacing a library to reclaim them immediately
 //! without a polling task or idle CPU cost.
+//! A smaller request reuses the smallest already-cached larger bucket for the
+//! same source, avoiding another decoded buffer and GPU upload. Blurred and
+//! unblurred artwork never share pixels; a smaller bucket never serves a larger
+//! request, so display resolution is preserved.
 
 use std::{
 	collections::{HashMap, VecDeque},
@@ -117,8 +121,8 @@ impl CoverCache {
 			cx.set_global(Self::default());
 		}
 		let (image, start) = cx.update_global::<Self, _>(|cache, cx| {
-			if cache.entries.contains_key(&key) {
-				return (cache.lookup(key, requester), false);
+			if let Some(cached_key) = cache.cached_key(key) {
+				return (cache.lookup(cached_key, requester), false);
 			}
 			// Rendering temporarily removes the current window from App's map.
 			// Defer atlas release until it is restored, so every window is covered.
@@ -188,6 +192,20 @@ impl CoverCache {
 		if cx.has_global::<Self>() {
 			cx.update_global::<Self, _>(|cache, cx| cache.sweep(|image| cx.defer(move |cx| cx.drop_image(image, None))));
 		}
+	}
+
+	fn cached_key(&self, key: Key) -> Option<Key> {
+		if self.entries.contains_key(&key) {
+			return Some(key);
+		}
+		if key.blur {
+			return None;
+		}
+		BUCKETS
+			.into_iter()
+			.filter(|&side| side > key.side)
+			.map(|side| Key { side, ..key })
+			.find(|larger| self.entries.get(larger).is_some_and(|entry| matches!(entry.state, State::Ready(_))))
 	}
 
 	fn lookup(&mut self, key: Key, requester: AnyWeakEntity) -> Option<Arc<RenderImage>> {
@@ -393,6 +411,49 @@ mod tests {
 			assert_eq!(cache.running, 0);
 			assert!(cache.queue.is_empty());
 		});
+	}
+
+	#[test]
+	fn smaller_requests_reuse_larger_pixels_without_another_buffer_or_upload() {
+		use gpui_kit::AppContext as _;
+
+		let app = gpui_test::TestAppContext::single();
+		app.update(|cx| {
+			let source = source();
+			let expected = image(192);
+			let mut cache = CoverCache::default();
+			let key = pending(&mut cache, &source, 192);
+			cache.complete(key, Some(Arc::clone(&expected)), |_| {});
+			cx.set_global(cache);
+			let requester = cx.new(|_| ());
+			requester.update(cx, |(), cx| {
+				for side in [64, 96, 128, 192] {
+					let hit = CoverCache::get(&source, side, 1., cx);
+					assert!(hit.is_some_and(|image| Arc::ptr_eq(&image, &expected)));
+				}
+			});
+			let cache = cx.global::<CoverCache>();
+			assert_eq!(cache.entries.len(), 1);
+			assert_eq!(cache.bytes, 192 * 192 * 4);
+			assert_eq!(cache.running, 0);
+			assert!(cache.queue.is_empty());
+		});
+	}
+
+	#[test]
+	fn reuse_preserves_resolution_blur_and_pending_decodes() {
+		let mut cache = CoverCache::default();
+		let source = source();
+		for side in [128, 384] {
+			let key = pending(&mut cache, &source, side);
+			cache.complete(key, Some(image(side)), |_| {});
+		}
+		assert_eq!(cache.cached_key(Key::new(&source, 64)), Some(Key::new(&source, 128)));
+		assert_eq!(cache.cached_key(Key::new(&source, 192)), Some(Key::new(&source, 384)));
+		assert_eq!(cache.cached_key(Key::new(&source, 512)), None);
+		assert_eq!(cache.cached_key(Key::blurred(&source)), None);
+		let pending_key = pending(&mut cache, &source, 64);
+		assert_eq!(cache.cached_key(pending_key), Some(pending_key));
 	}
 
 	#[test]
