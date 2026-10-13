@@ -1813,6 +1813,7 @@ impl Window {
                     deferred_force_render |= request_frame_options.force_render;
                     #[cfg(feature = "profiler")]
                     profiler::journal::record_reentrant_frame_skipped(window_id, Instant::now());
+                    invalidator.wake_platform();
                     return;
                 }
                 // Take the deferred flag first: `||` short-circuits, and leaving

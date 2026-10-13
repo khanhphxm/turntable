@@ -95,7 +95,7 @@ impl Playhead {
 		if !self.animating(window) {
 			return;
 		}
-		let compositor = self.clock.is_native() && !self.seek.read(cx).is_dragging();
+		let compositor = self.clock.is_native() && self.seek.read(cx).is_composited();
 		if self.repaint.is_some() && self.compositor_tick == compositor {
 			return;
 		}
@@ -113,7 +113,7 @@ impl Playhead {
 			let _ = this.update_in(cx, |this, window, cx| {
 				this.repaint = None;
 				this.update_clock();
-				if this.clock.is_native() && !this.seek.read(cx).is_dragging() {
+				if this.clock.is_native() && this.seek.read(cx).is_composited() {
 					this.animate(window, cx);
 				} else {
 					cx.notify();

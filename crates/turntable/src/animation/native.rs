@@ -31,7 +31,7 @@ pub struct Link(Rc<Meta>);
 
 impl Link {
 	pub fn is_native(&self) -> bool {
-		self.0.painted.borrow().upgrade().is_some_and(|widget| widget.borrow().canvas.is_some())
+		!self.0.occluded.get() && self.0.painted.borrow().upgrade().is_some_and(|widget| widget.borrow().canvas.is_some())
 	}
 
 	pub fn set_text(&self, label: &SharedString) {
@@ -167,11 +167,6 @@ impl Element for NativeElement {
 		} else {
 			self.link.clone().unwrap_or_default()
 		};
-		if let Some(widget) = link.0.painted.borrow().upgrade()
-			&& let Some(canvas) = &widget.borrow().canvas
-		{
-			canvas.hide();
-		}
 		let parent = Parent::for_window(window);
 		let obscured = registry(cx).0.get(&window.window_handle().window_id()).is_some_and(|state| state.obscured);
 		let composited = parent.is_some() && !self.kind.needs_gpui() && !link.0.occluded.get() && !obscured;
@@ -198,7 +193,7 @@ impl Element for NativeElement {
 		_: Option<&InspectorElementId>,
 		bounds: Bounds<Pixels>,
 		state: &mut Layout,
-		_: &mut (),
+		(): &mut (),
 		window: &mut Window,
 		cx: &mut App,
 	) {
@@ -248,4 +243,19 @@ impl gpui_kit::IntoElement for NativeElement {
 	fn into_element(self) -> Self {
 		self
 	}
+}
+
+#[cfg(test)]
+pub(super) fn assert_paint_lifetime(canvas: Canvas) {
+	let link = Link::default();
+	let widget = Rc::new(RefCell::new(Widget { bounds: Bounds::default(), canvas: Some(canvas) }));
+	*link.0.painted.borrow_mut() = Rc::downgrade(&widget);
+	assert!(link.is_native());
+	// Mode queries must switch before the fallback scene is painted, not one clock tick later.
+	link.0.occluded.set(true);
+	assert!(!link.is_native());
+	link.0.occluded.set(false);
+	assert!(link.is_native());
+	drop(widget);
+	assert!(!link.is_native());
 }

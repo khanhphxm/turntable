@@ -28,11 +28,20 @@ impl Parent {
 	}
 }
 
+#[derive(Clone, Copy, PartialEq)]
+struct Geometry {
+	bounds:        Bounds<Pixels>,
+	clip:          Bounds<Pixels>,
+	scale:         f64,
+	opacity:       f32,
+	parent_height: f64,
+}
+
 pub struct Canvas {
 	host:     Retained<CALayer>,
 	parent:   Retained<CALayer>,
 	nodes:    [Option<Node>; 4],
-	geometry: Option<(Bounds<Pixels>, Bounds<Pixels>, f64, f32, f64)>,
+	geometry: Option<Geometry>,
 }
 
 impl Canvas {
@@ -46,14 +55,10 @@ impl Canvas {
 		})
 	}
 
-	pub fn hide(&self) {
-		transaction(|| self.host.setHidden(true));
-	}
-
 	pub fn paint(&mut self, bounds: Bounds<Pixels>, clip: Bounds<Pixels>, scale: f64, opacity: f32, layers: Layers) {
 		transaction(|| {
 			let parent_height = self.parent.bounds().size.height;
-			let geometry = (bounds, clip, scale, opacity, parent_height);
+			let geometry = Geometry { bounds, clip, scale, opacity, parent_height };
 			if self.geometry != Some(geometry) {
 				self.geometry = Some(geometry);
 				let x = scalar(clip.origin.x);
@@ -66,11 +71,10 @@ impl Canvas {
 				self.host.setContentsScale(scale);
 				self.host.setOpacity(opacity);
 			}
-			self.host.setHidden(false);
 			for (node, spec) in self.nodes.iter_mut().zip(layers) {
 				if let Some(spec) = spec {
 					let node = node.get_or_insert_with(|| Node::new(&self.host, &spec));
-					node.configure(spec, scale);
+					node.configure(&self.host, spec, scale);
 				} else if let Some(node) = node.take() {
 					node.surface.layer().removeFromSuperlayer();
 				}
@@ -143,7 +147,7 @@ impl Node {
 		Self { surface, spec: None, scale: 0. }
 	}
 
-	fn configure(&mut self, spec: Layer, scale: f64) {
+	fn configure(&mut self, host: &CALayer, spec: Layer, scale: f64) {
 		if self.spec.as_ref() == Some(&spec) && self.scale == scale {
 			return;
 		}
@@ -183,7 +187,12 @@ impl Node {
 					text.setString(Some(&NSString::from_str(label)));
 				}
 			},
-			_ => unreachable!("a native element keeps a stable layer appearance kind"),
+			_ => {
+				layer.removeFromSuperlayer();
+				*self = Self::new(host, &spec);
+				self.configure(host, spec, scale);
+				return;
+			},
 		}
 		if self.spec.as_ref().and_then(|old| old.motion) != spec.motion {
 			layer.removeAllAnimations();
@@ -288,14 +297,10 @@ mod tests {
 		assert_eq!(fill.position(), CGPoint::new(0., 8.));
 		// SAFETY: The returned animation is framework-retained and read on this test thread.
 		assert!(unsafe { fill.animationForKey(ns_string!("scalar")) }.is_some());
-		canvas.hide();
-		assert!(canvas.host.isHidden());
-		canvas.paint(bounds, clip, 2., 0.4, model.clone());
-		assert!(!canvas.host.isHidden());
 		parent.0.setBounds(rect(0., 0., 400., 500.));
 		canvas.paint(bounds, clip, 2., 0.4, model);
 		assert_eq!(canvas.host.frame(), rect(88., 272., 104., 40.));
-		drop(canvas);
+		super::super::native::assert_paint_lifetime(canvas);
 		// SAFETY: CALayer retains its own typed sublayers; the array is borrowed for this read.
 		assert!(unsafe { parent.0.sublayers() }.is_none_or(|layers| layers.is_empty()));
 	}

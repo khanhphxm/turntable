@@ -46,7 +46,9 @@ impl Render for Root {
 	}
 }
 
-fn setup() -> (Entity<Root>, VisualTestContext, Rc<Cell<usize>>, Rc<Cell<f32>>) {
+type Fixture = (Entity<Root>, VisualTestContext, Rc<Cell<usize>>, Rc<Cell<f32>>);
+
+fn setup() -> Fixture {
 	let mut app = TestAppContext::single();
 	let paints = Rc::new(Cell::new(0));
 	let opacity = Rc::new(Cell::new(0.));

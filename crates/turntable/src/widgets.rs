@@ -163,6 +163,7 @@ pub struct Slider {
 	dragging: Option<f32>,
 	hovered:  bool,
 	motion:   Option<crate::animation::Motion>,
+	progress: Option<crate::animation::Progress>,
 	bounds:   Rc<Cell<Bounds<Pixels>>>,
 }
 
@@ -170,7 +171,7 @@ impl EventEmitter<SliderEvent> for Slider {}
 
 impl Slider {
 	pub fn new(cx: &mut App, value: f32) -> Entity<Self> {
-		cx.new(|_| Self { value, dragging: None, hovered: false, motion: None, bounds: Rc::default() })
+		cx.new(|_| Self { value, dragging: None, hovered: false, motion: None, progress: None, bounds: Rc::default() })
 	}
 
 	/// The owner's value, unless a drag holds the knob.
@@ -188,8 +189,8 @@ impl Slider {
 		self.set(motion.progress(), cx);
 	}
 
-	pub fn is_dragging(&self) -> bool {
-		self.dragging.is_some()
+	pub fn is_composited(&self) -> bool {
+		self.dragging.is_none() && self.progress.as_ref().is_some_and(crate::animation::Progress::is_native)
 	}
 
 	fn at(&self, p: Point<Pixels>) -> f32 {
@@ -242,7 +243,7 @@ impl Render for Slider {
 		let bounds = self.bounds.clone();
 		let entity = active.then(|| cx.entity());
 		let foreground = match self.motion {
-			Some(motion) => crate::animation::progress(motion, self.hovered, self.dragging),
+			Some(motion) => self.progress.get_or_insert_default().element(motion, self.hovered, self.dragging),
 			None => slider_foreground(shown, active),
 		};
 		div()

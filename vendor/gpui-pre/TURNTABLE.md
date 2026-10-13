@@ -16,6 +16,10 @@ may request a refresh; GPUI rebuilds that scene once before presentation. This k
 native content and newly appearing or disappearing overlays consistent in the same displayed
 frame. Applications without native observers retain the original single paint path.
 
+Re-entrant platform frame requests preserve pending force-render state and wake the platform
+before returning without borrowing the app. Demand-driven backends can therefore retry after
+the in-progress draw unwinds instead of losing the native invalidation.
+
 Only `src/window.rs` is modified. Its modification header identifies this patch. Layout,
 input handling, scene primitives, shaders and native renderer interfaces are unchanged.
 
@@ -33,8 +37,10 @@ does not decide widget roles, playback scheduling or overlay fallback. GPUI pain
 the native canvas, while layout retains only a weak link. Cached paint keeps the canvas alive;
 hidden, clipped-out or removed elements release it. Native content honors the content mask and
 effective ancestor opacity. App overlays and GPUI's deferred overlays/tooltips select GPUI
-fallback, including when the containing region was cached. The native hover knob retains its
-12-pixel white circle, green fill and two medium-shadow components.
+fallback, including when the containing region was cached. The clock and seek fill report their
+compositing modes independently, so a tooltip over only the seek bar still resumes pixel-step
+GPUI updates. The native hover knob retains its 12-pixel white circle, green fill and two
+medium-shadow components.
 
 Normal application state changes, layout, pointer interaction and timed lyric transitions
 still draw the GPUI scene. Compositor clock updates and scalar motion do not request GPUI

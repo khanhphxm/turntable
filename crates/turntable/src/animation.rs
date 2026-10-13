@@ -97,13 +97,28 @@ fn gpui_bars(id: &'static str, size: Pixels) -> AnyElement {
 		.into_any_element()
 }
 
-pub fn progress(motion: Motion, hovered: bool, dragging: Option<f32>) -> AnyElement {
+#[derive(Default)]
+pub struct Progress {
 	#[cfg(target_os = "macos")]
-	return native::element("seek-motion", model::Kind::Progress { motion, hovered, dragging }, None);
-	#[cfg(not(target_os = "macos"))]
-	{
-		let _ = hovered;
-		crate::widgets::slider_foreground(dragging.unwrap_or_else(|| motion.progress()), dragging.is_some())
+	link: native::Link,
+}
+
+impl Progress {
+	pub fn element(&self, motion: Motion, hovered: bool, dragging: Option<f32>) -> AnyElement {
+		#[cfg(target_os = "macos")]
+		return native::element("seek-motion", model::Kind::Progress { motion, hovered, dragging }, Some(self.link.clone()));
+		#[cfg(not(target_os = "macos"))]
+		{
+			let _ = hovered;
+			crate::widgets::slider_foreground(dragging.unwrap_or_else(|| motion.progress()), dragging.is_some())
+		}
+	}
+
+	pub fn is_native(&self) -> bool {
+		#[cfg(target_os = "macos")]
+		return self.link.is_native();
+		#[cfg(not(target_os = "macos"))]
+		false
 	}
 }
 

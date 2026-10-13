@@ -105,12 +105,14 @@ impl Kind {
 
 fn bar_layers(size: Pixels, reduced_motion: bool, epoch: Instant) -> Layers {
 	let extent = f64::from(f32::from(size));
-	std::array::from_fn(|i| {
-		let (period_ms, phase) = BARS[i];
+	let mut left = size * 0.06;
+	BARS.map(|(period_ms, phase)| {
+		let x = left;
+		left += size * 0.24;
 		let height = if reduced_motion { size * super::bar_height(phase) } else { size * 0.25 };
 		let half_period = period_ms as f64 / 2000.;
 		Some(Layer {
-			frame:         Bounds::new(point(size * (0.06 + i as f32 * 0.24), size - height), gpui_kit::size(size * 0.16, height)),
+			frame:         Bounds::new(point(x, size - height), gpui_kit::size(size * 0.16, height)),
 			anchor:        point(0.5, 1.),
 			corner_radius: 0.,
 			appearance:    Appearance::Fill(crate::theme::accent()),
@@ -201,7 +203,11 @@ mod tests {
 	fn paused_zero_duration_and_finished_progress_are_static() {
 		for (position, duration, playing) in [(30_000, 180_000, false), (0, 0, true), (180_000, 180_000, true)] {
 			let motion = Motion {
-				anchor: turntable_core::app::Anchor { at: Instant::now(), position_ms: position, speed: 0. },
+				anchor: turntable_core::app::Anchor {
+					at:          Instant::now(),
+					position_ms: position,
+					speed:       if playing { 1. } else { 0. },
+				},
 				duration_ms: duration,
 				playing,
 			};
@@ -225,7 +231,7 @@ mod tests {
 			assert!(scalar.ping_pong);
 			assert_eq!(scalar.started_at, epoch);
 			assert_eq!(scalar.from, 4.);
-			assert_eq!(scalar.end(), 16.);
+			assert!((scalar.end() - 16.).abs() <= f64::EPSILON * 16.);
 			assert_eq!(scalar.duration * 2000., *period_ms as f64);
 			assert_eq!(scalar.phase, f64::from(*phase) * *period_ms as f64 / 1000.);
 			let reduced = static_layers[i].as_ref().unwrap();
