@@ -33,3 +33,21 @@ Windows release measurements use an isolated `TURNTABLE_HOME` profile with a
 unique device name and regenerated device ID. Report private working set
 (Task Manager's Memory), total working set and CPU separately: private commit
 and GPU memory are not interchangeable with the target metric.
+
+## Retained DirectX resources
+
+- Flip-model swap chains keep two buffers (the DXGI minimum), rather than
+  three. Vsync pacing remains unchanged.
+- The full-window 4x-MSAA path target and its single-sample resolve target are
+  allocated only when a scene contains paths, reused while it does, and
+  released on the first path-free frame. Quad, image and glyph rendering does
+  not use them. Resize and device recovery discard them until needed again;
+  path antialiasing and shaders are unchanged.
+- Glyph and small-image atlas pages start at 512×512 rather than 1024×1024.
+  Polychrome artwork larger than 256px gets a tightly sized page, matching the
+  Metal backend's policy. An unrelated small glyph/image cannot keep that
+  cover's large backing page alive after eviction.
+
+The atlas tests use the WARP device to verify page size, reuse and independent
+release. DirectWrite continues to use its shared system factory and collection;
+font fallback and font-identity caching are intentionally unchanged.

@@ -1,3 +1,5 @@
+// Turntable modification: allocate path targets only for scenes with paths and use two
+// flip-model buffers; see ../TURNTABLE.md.
 use std::{
     slice,
     sync::{Arc, OnceLock},
@@ -73,14 +75,18 @@ struct DirectXResources {
     render_target: Option<ID3D11Texture2D>,
     render_target_view: Option<ID3D11RenderTargetView>,
 
-    // Path intermediate textures (with MSAA)
-    path_intermediate_texture: ID3D11Texture2D,
-    path_intermediate_srv: Option<ID3D11ShaderResourceView>,
-    path_intermediate_msaa_texture: ID3D11Texture2D,
-    path_intermediate_msaa_view: Option<ID3D11RenderTargetView>,
+    // Lazily allocated; most text/image/quad-only windows never need path MSAA.
+    paths: Option<PathResources>,
 
     // Cached viewport
     viewport: D3D11_VIEWPORT,
+}
+
+struct PathResources {
+    texture: ID3D11Texture2D,
+    view: Option<ID3D11ShaderResourceView>,
+    msaa_texture: ID3D11Texture2D,
+    msaa_view: Option<ID3D11RenderTargetView>,
 }
 
 struct DirectXRenderPipelines {
@@ -351,6 +357,11 @@ impl DirectXRenderer {
         scene: &Scene,
         background_appearance: WindowBackgroundAppearance,
     ) -> Result<()> {
+        let devices = self.devices.as_ref().context("devices missing")?;
+        self.resources
+            .as_mut()
+            .context("resources missing")?
+            .prepare_paths(devices, !scene.paths.is_empty())?;
         self.pre_draw(&match background_appearance {
             WindowBackgroundAppearance::Opaque => [1.0f32; 4],
             _ => [0.0f32; 4],
@@ -619,15 +630,16 @@ impl DirectXRenderer {
 
         let devices = self.devices.as_ref().context("devices missing")?;
         let resources = self.resources.as_ref().context("resources missing")?;
+        let paths_target = resources.paths.as_ref().context("path targets missing")?;
         // Clear intermediate MSAA texture
         unsafe {
             devices.device_context.ClearRenderTargetView(
-                resources.path_intermediate_msaa_view.as_ref().unwrap(),
+                paths_target.msaa_view.as_ref().unwrap(),
                 &[0.0; 4],
             );
             // Set intermediate MSAA texture as render target
             devices.device_context.OMSetRenderTargets(
-                Some(slice::from_ref(&resources.path_intermediate_msaa_view)),
+                Some(slice::from_ref(&paths_target.msaa_view)),
                 None,
             );
         }
@@ -660,9 +672,9 @@ impl DirectXRenderer {
         // Resolve MSAA to non-MSAA intermediate texture
         unsafe {
             devices.device_context.ResolveSubresource(
-                &resources.path_intermediate_texture,
+                &paths_target.texture,
                 0,
-                &resources.path_intermediate_msaa_texture,
+                &paths_target.msaa_texture,
                 0,
                 RENDER_TARGET_FORMAT,
             );
@@ -704,6 +716,7 @@ impl DirectXRenderer {
 
         let devices = self.devices.as_ref().context("devices missing")?;
         let resources = self.resources.as_ref().context("resources missing")?;
+        let paths_target = resources.paths.as_ref().context("path targets missing")?;
         self.pipelines.path_sprite_pipeline.update_buffer(
             &devices.device,
             &devices.device_context,
@@ -713,7 +726,7 @@ impl DirectXRenderer {
         // Draw the sprites with the path texture
         self.pipelines.path_sprite_pipeline.draw_with_texture(
             &devices.device_context,
-            slice::from_ref(&resources.path_intermediate_srv),
+            slice::from_ref(&paths_target.view),
             slice::from_ref(&self.globals.sampler),
             sprites.len() as u32,
         )
@@ -889,25 +902,15 @@ impl DirectXResources {
             )?
         };
 
-        let (
-            render_target,
-            render_target_view,
-            path_intermediate_texture,
-            path_intermediate_srv,
-            path_intermediate_msaa_texture,
-            path_intermediate_msaa_view,
-            viewport,
-        ) = create_resources(devices, &swap_chain, width, height)?;
+        let (render_target, render_target_view, viewport) =
+            create_resources(devices, &swap_chain, width, height)?;
         set_rasterizer_state(&devices.device, &devices.device_context)?;
 
         Ok(Self {
             swap_chain,
             render_target: Some(render_target),
             render_target_view,
-            path_intermediate_texture,
-            path_intermediate_msaa_texture,
-            path_intermediate_msaa_view,
-            path_intermediate_srv,
+            paths: None,
             viewport,
         })
     }
@@ -919,22 +922,33 @@ impl DirectXResources {
         width: u32,
         height: u32,
     ) -> Result<()> {
-        let (
-            render_target,
-            render_target_view,
-            path_intermediate_texture,
-            path_intermediate_srv,
-            path_intermediate_msaa_texture,
-            path_intermediate_msaa_view,
-            viewport,
-        ) = create_resources(devices, &self.swap_chain, width, height)?;
+        let (render_target, render_target_view, viewport) =
+            create_resources(devices, &self.swap_chain, width, height)?;
         self.render_target = Some(render_target);
         self.render_target_view = render_target_view;
-        self.path_intermediate_texture = path_intermediate_texture;
-        self.path_intermediate_msaa_texture = path_intermediate_msaa_texture;
-        self.path_intermediate_msaa_view = path_intermediate_msaa_view;
-        self.path_intermediate_srv = path_intermediate_srv;
+        self.paths = None;
         self.viewport = viewport;
+        Ok(())
+    }
+
+    fn prepare_paths(&mut self, devices: &DirectXRendererDevices, needed: bool) -> Result<()> {
+        if !needed {
+            if self.paths.take().is_some() {
+                // D3D's context owns bound SRVs too, even after our last handle
+                // is dropped. Clear the path sampling slots before parking.
+                unsafe {
+                    devices.device_context.VSSetShaderResources(0, Some(&[None]));
+                    devices.device_context.PSSetShaderResources(0, Some(&[None]));
+                }
+            }
+        } else if self.paths.is_none() {
+            let width = self.viewport.Width as u32;
+            let height = self.viewport.Height as u32;
+            let (texture, view) = create_path_intermediate_texture(&devices.device, width, height)?;
+            let (msaa_texture, msaa_view) =
+                create_path_intermediate_msaa_texture_and_view(&devices.device, width, height)?;
+            self.paths = Some(PathResources { texture, view, msaa_texture, msaa_view });
+        }
         Ok(())
     }
 }
@@ -1361,18 +1375,10 @@ fn create_resources(
 ) -> Result<(
     ID3D11Texture2D,
     Option<ID3D11RenderTargetView>,
-    ID3D11Texture2D,
-    Option<ID3D11ShaderResourceView>,
-    ID3D11Texture2D,
-    Option<ID3D11RenderTargetView>,
     D3D11_VIEWPORT,
 )> {
     let (render_target, render_target_view) =
         create_render_target_and_its_view(swap_chain, &devices.device)?;
-    let (path_intermediate_texture, path_intermediate_srv) =
-        create_path_intermediate_texture(&devices.device, width, height)?;
-    let (path_intermediate_msaa_texture, path_intermediate_msaa_view) =
-        create_path_intermediate_msaa_texture_and_view(&devices.device, width, height)?;
     let viewport = D3D11_VIEWPORT {
         TopLeftX: 0.0,
         TopLeftY: 0.0,
@@ -1384,10 +1390,6 @@ fn create_resources(
     Ok((
         render_target,
         render_target_view,
-        path_intermediate_texture,
-        path_intermediate_srv,
-        path_intermediate_msaa_texture,
-        path_intermediate_msaa_view,
         viewport,
     ))
 }
@@ -1692,7 +1694,9 @@ fn report_live_objects(device: &ID3D11Device) -> Result<()> {
     Ok(())
 }
 
-const BUFFER_COUNT: usize = 3;
+// Flip-model swap chains require at least two buffers. Rendering is vsync-paced,
+// so a third full-window buffer only increases retained memory and queue depth.
+const BUFFER_COUNT: usize = 2;
 
 pub(crate) mod shader_resources {
     use anyhow::Result;
@@ -2066,5 +2070,64 @@ mod dxgi {
             (number >> 16) & 0xFFFF,
             number & 0xFFFF
         ))
+    }
+}
+
+#[cfg(test)]
+mod turntable_tests {
+    use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WS_OVERLAPPEDWINDOW};
+    use windows::core::w;
+
+    struct TestWindow(HWND);
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            unsafe { DestroyWindow(self.0).unwrap() };
+        }
+    }
+
+    #[test]
+    fn path_targets_are_lazy_reused_resized_and_released() {
+        let window = TestWindow(unsafe {
+            CreateWindowExW(
+                Default::default(), w!("STATIC"), w!("GPUI path resource test"),
+                WS_OVERLAPPEDWINDOW, 0, 0, 32, 24, None, None, None, None,
+            ).unwrap()
+        });
+        let devices = DirectXDevices::new().unwrap();
+        let mut renderer = DirectXRenderer::new(window.0, &devices, true).unwrap();
+        let appearance = WindowBackgroundAppearance::Opaque;
+        renderer.resize(size(DevicePixels(16), DevicePixels(16))).unwrap();
+        renderer.render_to_image(&Scene::default(), appearance).unwrap();
+        assert!(renderer.resources.as_ref().unwrap().paths.is_none());
+
+        let mut path = Path::new(point(px(0.), px(0.)));
+        path.move_to(point(px(0.), px(0.)));
+        path.line_to(point(px(16.), px(0.)));
+        path.line_to(point(px(16.), px(16.)));
+        path.content_mask = ContentMask { bounds: Bounds::new(Point::default(), size(px(16.), px(16.))) };
+        path.color = rgb(0xff0000).into();
+        let mut scene = Scene::default();
+        scene.insert_primitive(path.scale(1.));
+        scene.finish();
+        let image = renderer.render_to_image(&scene, appearance).unwrap();
+        assert_eq!(image.get_pixel(12, 4).0, [255, 0, 0, 255]);
+        assert_eq!(image.get_pixel(2, 12).0, [255, 255, 255, 255]);
+        let target = renderer.resources.as_ref().unwrap().paths.as_ref().unwrap().texture.clone();
+        renderer.render_to_image(&scene, appearance).unwrap();
+        assert_eq!(renderer.resources.as_ref().unwrap().paths.as_ref().unwrap().texture.as_raw(), target.as_raw());
+        renderer.resize(size(DevicePixels(32), DevicePixels(24))).unwrap();
+        assert!(renderer.resources.as_ref().unwrap().paths.is_none());
+        renderer.render_to_image(&scene, appearance).unwrap();
+        let resized = &renderer.resources.as_ref().unwrap().paths.as_ref().unwrap().texture;
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { resized.GetDesc(&mut desc) };
+        assert_eq!((desc.Width, desc.Height), (32, 24));
+        assert_ne!(resized.as_raw(), target.as_raw());
+        renderer.render_to_image(&Scene::default(), appearance).unwrap();
+        assert!(renderer.resources.as_ref().unwrap().paths.is_none());
+        renderer.resize(size(DevicePixels(16), DevicePixels(16))).unwrap();
+        assert_eq!(renderer.render_to_image(&scene, appearance).unwrap(), image);
     }
 }
