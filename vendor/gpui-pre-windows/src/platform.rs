@@ -430,8 +430,8 @@ impl WindowsPlatform {
     /// Stops vsync and releases the DirectX devices. No window may be open.
     fn detach_gpu(&self) {
         if let Some(stop) = self.vsync_stop.borrow_mut().take() {
-            // Not joined: the thread can be sending this thread a message. It exits after its
-            // next vsync, and drops its reference to the devices then.
+            // Not joined: it may be sending the UI thread a device-loss message.
+            // Waking it also releases its device references when it was parked.
             stop.store(true, Ordering::Release);
             self.frame_scheduler.wake_all();
         }
