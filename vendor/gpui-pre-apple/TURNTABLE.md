@@ -45,6 +45,37 @@ The native Metal tests cover compact-page sharing, independent release of large 
 
 Metal shared buffers and atlas textures are demand-backed: allocated capacity is not the same as resident memory. RSS and physical footprint (the Activity Monitor Memory column) account graphics backing differently. Measure both, and include IOAccelerator graphics, IOSurface and owned-unmapped graphics categories. A first render submission can temporarily allocate over 100 MiB of driver backing even for a 64×64 clear; it can retire a few seconds after submissions stop. Reducing queue capacity from 64 to 3 did not reduce that allocation in the isolated Metal experiment, so this patch does not change command-queue capacity.
 
+### Continuous-playback attribution (2026-10-14)
+
+A startup Metal System Trace with `MallocStackLogging=1` showed 26 driver `Wire 4.00 MiB
+System Memory` events at the first real submission (1.692–1.701 seconds). The app's peak
+`MTLDevice.currentAllocatedSize` was only 28,737,536 bytes. The approximately 104 MiB constant
+submission charge is driver-internal GPU backing, not the renderer's application-visible
+textures or instance buffers. Apple's trace does not name the private backing's purpose.
+
+A 64×64 native probe reproduced approximately 115 MiB footprint with a render clear despite
+less than 1 MiB of app Metal capacity. Blit and compute submissions also incurred large backing
+(approximately 82 and 78 MiB total footprint); an empty command buffer remained around 5 MiB.
+The backing retired about three seconds after nonempty submissions stopped. Reducing queue
+capacity did not avoid it. Full-viewport MSAA/path targets were absent from the path-free Home
+scene, and its real Metal trace used one render encoder. Disabling antialiasing, removing
+triple buffering or replacing the renderer with compute/blit would therefore miss the cause.
+
+GPUI's cached regions cache layout/paint, not the rendered framebuffer. Every requested draw
+still writes the scene's instance data, clears the drawable, traverses all primitive batches
+and submits a command buffer. Four-bar GPUI animations invalidate their containing region at
+15 fps; the old whole-second Shell playback pump additionally invalidated all seven regions
+even when the core had not changed. The playhead itself already avoided those region renders.
+
+In a ten-second Time Profiler capture of the real drawing path, 294 of 540 sampled CPU-ms were
+in GPUI layout/paint/frame completion, 20 in Metal/submission and 27 in the display link; 199
+were other or missing stacks. Taffy layout, bounds-tree insertion and frame copies were visible
+leaves. This was mainly repeated UI work, not audio decoding or shader compilation. The shared
+Shell deadline fix and native compositor application cutover remove that steady frame demand
+without changing GPU rendering quality; ordinary interaction and genuine state changes still
+render normally. The cross-platform native paint boundary is documented in
+`../gpui-pre/TURNTABLE.md`.
+
 ## Native measurements (2026-10-13)
 
 Signed release, copied scratch config/cache with a regenerated Connect ID and device name `Turntable Bench`, `TURNTABLE_BACKGROUND=1`, no playback or system input. The 1280×800 window was visibly positioned on a 2× display without activation. The same no-input script waited 25 seconds on Home, opened the largest saved playlist (144 tracks), scrolled 480 steps of 24 logical pixels at 16 ms intervals, then waited five seconds. Memory was sampled without screenshot readback. Experimental renderer sizing/statistics knobs and the navigation hook were removed from the delivered source.

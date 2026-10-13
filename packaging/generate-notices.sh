@@ -23,7 +23,7 @@ append_notice() {
 		printf '\n'
 	} >> "$output"
 }
-append_notice 'GPUI/Zed attribution (Apache-2.0); Turntable modifications: vendor/gpui-pre-*/TURNTABLE.md' vendor/gpui-pre-apple/LICENSE-APACHE
+append_notice 'GPUI/Zed attribution (Apache-2.0); Turntable modifications: vendor/gpui-pre/TURNTABLE.md and vendor/gpui-pre-*/TURNTABLE.md' vendor/gpui-pre-apple/LICENSE-APACHE
 append_notice 'librespot 0.8.0 (MIT), including all four vendored crates' vendor/librespot-core/LICENSE
 append_notice 'Taffy 0.13.0 (MIT)' vendor/taffy/LICENSE
 append_notice 'num-traits polyfill copied in vendor/taffy/src/util/sys.rs (MIT)' vendor/taffy/LICENSE-num-traits-MIT

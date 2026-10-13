@@ -1680,6 +1680,8 @@ limitations under the License.
 ================================================================================
 Apache License 2.0 (Apache-2.0)
 Used by:
+  - gpui-pre 0.3.9 (https://github.com/zed-industries/zed)
+    Source: https://github.com/khanhphxm/turntable/tree/main/vendor/gpui-pre
   - gpui-pre-apple 0.3.9 (https://github.com/zed-industries/zed)
     Source: https://github.com/khanhphxm/turntable/tree/main/vendor/gpui-pre-apple
   - gpui-pre-macos 0.3.9 (https://github.com/zed-industries/zed)
@@ -1714,8 +1716,6 @@ Used by:
     Source: https://crates.io/api/v1/crates/gpui-pre-ztracing-macro/0.3.9/download
   - gpui-pre-ztracing 0.3.9 (https://github.com/zed-industries/zed)
     Source: https://crates.io/api/v1/crates/gpui-pre-ztracing/0.3.9/download
-  - gpui-pre 0.3.9 (https://github.com/zed-industries/zed)
-    Source: https://crates.io/api/v1/crates/gpui-pre/0.3.9/download
 
 Copyright 2022 - 2025 Zed Industries, Inc.
 
@@ -15258,7 +15258,7 @@ the following restrictions:
 
 
 ================================================================================
-GPUI/Zed attribution (Apache-2.0); Turntable modifications: vendor/gpui-pre-*/TURNTABLE.md
+GPUI/Zed attribution (Apache-2.0); Turntable modifications: vendor/gpui-pre/TURNTABLE.md and vendor/gpui-pre-*/TURNTABLE.md
 
 Copyright 2022 - 2025 Zed Industries, Inc.
 
