@@ -28,6 +28,12 @@ thread and UI message pump still run at the display refresh rate.
   whenever the compositor is woken. Shutdown and GPU detach wake a parked
   thread so its GPU references are released.
 
+The companion GPUI-core patch also re-arms the invalidator when
+`on_request_frame` defers a request because `draw_in_progress()` is true.
+That retry is required for a GPUI-initiated draw that re-enters the native
+message pump (rather than a nested native draw caught by `DrawCoordinator`).
+It is carried by the shared `gpui-pre` patch, not a Windows-only API.
+
 `frame_scheduler::tests` covers coalescing, independent windows and shutdown.
 Windows release measurements use an isolated `TURNTABLE_HOME` profile with a
 unique device name and regenerated device ID. Report private working set
@@ -54,73 +60,46 @@ font fallback and font-identity caching are intentionally unchanged.
 
 ## Windows measurement (2026-10-14)
 
-Windows 11 build 26200.9711, x86-64 MSVC release, NVIDIA RTX 4070, 24 logical
-processors. A 1200×800 window was shown on a 120Hz desktop, using a copied
-benchmark profile, distinct Connect device and zero device volume. No playback
-or transfer commands were issued. Each CPU sample spans 30 seconds after a
-90-second warmup. Memory below is MiB (1,048,576 bytes).
+Windows 11 build 26200.9711, MSVC release, RTX 4070, 24 logical CPUs,
+1200×800 window on a 120Hz desktop. Samples span 30s after 90s warmup with
+an isolated, silent benchmark profile. Temporary uncommitted UI projections
+froze animation for idle and advanced a monotonic anchor for simulated playing;
+the latter refused all player commands. No playback/transfer commands occurred.
+Playing samples confirmed foreground focus at both endpoints. Values are MiB.
 
-Idle UI was projected by a temporary, uncommitted environment-gated override
-of the read-only `State::playing` method. This stopped UI animation without
-pausing or otherwise affecting the user's remote device. It left the normal
-connected session, loaded Home and artwork intact.
+| UI state | Upstream private WS / total WS | Patched private WS / total WS | One-core CPU, upstream → patched |
+| --- | ---: | ---: | ---: |
+| Idle visible | 14.47 / 71.77 | 12.81 / 69.62 | 0.000% → 0.052% |
+| Idle minimized | 13.40 / 66.05 | 13.03 / 66.30 | 0.052% → 0.052% |
+| Simulated playing, foreground | 15.73 / 69.27 | 13.80 / 70.68 | 3.696% → 1.875% |
 
-| Idle UI | Private working set | Total working set | Private commit | One-core CPU |
-| --- | ---: | ---: | ---: | ---: |
-| Upstream, visible | 14.47 | 71.77 | 100.38 | 0.000% |
-| Patched, visible | 12.81 | 69.62 | 74.92 | 0.052% |
-| Upstream, minimized | 13.40 | 66.05 | 100.30 | 0.052% |
-| Patched, minimized | 13.03 | 66.30 | 74.91 | 0.052% |
+Private working set is Task Manager Memory; total WS is RSS. Residency varies
+as Windows pages idle allocations. Idle GPU commitment fell **52.87 → 23.93 MiB**
+and private commit **100.38 → 74.92 MiB**. Playing-UI CPU fell 49.3% (Task Manager
+CPU 0.154% → 0.078%). Idle thread switches fell 9,937 → 2,037 per 30s; the
+remaining ~66Hz thread starts in NVIDIA's `nvwgf2umx.dll`. 0.052% of one core
+is 0.0022% system CPU here, rounding to 0.0%, not an exact measured zero.
+A final clean release launch without any UI override, sampled after a shorter
+30s warmup, was 24.71 MiB private WS / 80.67 MiB total WS and 0.000% CPU.
 
-Working-set residency varies as Windows pages idle allocations. The robust
-resource change is GPU commitment: **52.87 → 23.93 MiB**; dedicated GPU usage
-was **30.25 → 20.43 MiB**. Private commit fell 25.46 MiB. Neither GPU commitment
-nor private commit is Task Manager's target Memory column.
+`VirtualQueryEx`/`QueryWorkingSet` attributed patched idle's 12.81 MiB private
+WS to 9.29 MiB private regions and 3.52 MiB private image pages. The remaining
+56.81 MiB total WS was shared image/mapped pages. DirectWrite's two FontCache
+files (16+8 MiB virtual) and Segoe UI/bold/symbol/emoji mappings contributed
+zero private WS pages; their mapped sizes are not recoverable target memory.
+Playing's remaining floor includes full-window DirectX presentation and scene
+uploads for GPUI seek/clock/EQ changes. Audio decode/output is not simulated or
+included; shared shell-clock/audio changes are outside these branch figures.
 
-An additional 30-second idle sample counted **9,937 → 2,037** total process
-thread context switches. The approximately 120Hz UI and compositor-wait loops
-disappeared. A remaining approximately 66Hz thread starts in NVIDIA's
-`nvwgf2umx.dll`; an independent sample counted 1,975 switches on that driver
-thread and only 28 elsewhere. The measured 0.052% of one core is 0.0022% of
-this machine, which rounds to 0.0% in Task Manager. The CPU counter's tick
-granularity makes short samples unsuitable for claiming an exact zero.
+## Native verification
 
-`VirtualQueryEx` plus `QueryWorkingSet` separated private, image and mapped
-pages. Patched visible idle had 9.29 MiB private-region resident pages and
-3.52 MiB private image pages; most of the remaining 56.81 MiB of total working
-set was shared executable/OS/driver image code. DirectWrite mapped two shared
-FontCache files (16+8 MiB virtual) and Segoe UI, bold, symbol and emoji fonts;
-these mappings contributed **zero private working-set pages** in the sample.
-Discarding the system font collection would not recover their mapped sizes
-from Task Manager Memory and would break fallback behavior.
+Committed sources without simulation passed Windows nightly fmt check,
+workspace/all-targets Clippy `-D warnings`, and workspace/all-targets tests:
+47 UI, 448 core and two integration tests; one existing manual benchmark ignored.
+All 26 backend tests passed in an interactive desktop session, including WARP
+atlas sizing, lazy path reuse/resize/release, pixel readback and emoji tests.
+SSH's service session lacks DXGI HWND/Credential Manager access: use an
+interactive PowerShell or scheduled task, not test skips. Desktop
+`System.Drawing.CopyFromScreen` captures verified Home, seek, EQ curve,
+resize and minimize/restore rendering.
 
-For a matched playing-UI comparison after remote playback paused, a temporary
-uncommitted override projected `Status::Playing` and a speed-1 monotonic anchor
-only after normal controller work. Its command-delivery guard refused every
-player command. It used the real loaded track, Home, artwork, playhead and EQ
-animations; it did not decode or emit audio. Both 30-second samples explicitly
-confirmed the bench window was foreground at the start and end, with the
-pointer outside it. Uncontrolled-focus runs varied substantially, so their
-CPU numbers are not used to claim savings.
-
-| Simulated playing UI, foreground | Private working set | Total working set | Private commit | One-core CPU | Task Manager CPU |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Upstream | 15.73 | 69.27 | 103.44 | 3.696% | 0.154% |
-| Patched | 13.80 | 70.68 | 77.48 | 1.875% | 0.078% |
-
-That sample reduced playing-UI CPU 49.3% and private working set 1.93 MiB;
-total working set was 1.41 MiB higher, demonstrating why the private metric
-must be reported separately. Total context switches fell 20,428 → 13,806.
-GPU commitment was 52.87 → 24.93 MiB. Shared artwork reuse additionally avoids
-118,784 decoded bytes (plus GPU copies) for a cached 192px cover subsequently
-displayed at 64/96/128px; its regression test asserts the same pixel Arc and
-one cache entry, with no queued decode.
-
-Desktop `System.Drawing.CopyFromScreen` captures verified Home artwork/text,
-the seek bar and equalizer curve after the changes, including resize and
-minimize/restore. The remaining playing-UI floor includes full-window DirectX
-presentation and scene-buffer uploads for each changed pixel/animation;
-the app still redraws the GPUI fallback seek/clock and EQ animation. Shared
-shell-clock and audio optimizations being developed separately are not in
-these branch-only figures. Audio decode/output memory and CPU must be measured
-with the offline audio harness, not inferred from this UI-only simulation.

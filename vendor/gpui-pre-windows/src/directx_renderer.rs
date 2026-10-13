@@ -2075,10 +2075,19 @@ mod dxgi {
 
 #[cfg(test)]
 mod turntable_tests {
-    use super::*;
+    use super::DirectXRenderer;
+    use crate::directx_devices::DirectXDevices;
+    use gpui::{
+        Bounds, ContentMask, DevicePixels, Path, Point, Scene, WindowBackgroundAppearance,
+        point, px, rgb, size,
+    };
     use windows::{
-        Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WS_OVERLAPPEDWINDOW},
-        core::w,
+        Win32::{
+            Foundation::HWND,
+            Graphics::Direct3D11::D3D11_TEXTURE2D_DESC,
+            UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WS_OVERLAPPEDWINDOW},
+        },
+        core::{Interface, w},
     };
 
     struct TestWindow(HWND);
@@ -2089,7 +2098,7 @@ mod turntable_tests {
         }
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn path_targets_are_lazy_reused_resized_and_released() {
         let window = TestWindow(unsafe {
             CreateWindowExW(
