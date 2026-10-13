@@ -161,6 +161,8 @@ pub struct Slider {
 	value:    f32,
 	/// The value under the pointer while dragging.
 	dragging: Option<f32>,
+	hovered:  bool,
+	motion:   Option<crate::animation::Motion>,
 	bounds:   Rc<Cell<Bounds<Pixels>>>,
 }
 
@@ -168,7 +170,7 @@ impl EventEmitter<SliderEvent> for Slider {}
 
 impl Slider {
 	pub fn new(cx: &mut App, value: f32) -> Entity<Self> {
-		cx.new(|_| Self { value, dragging: None, bounds: Rc::default() })
+		cx.new(|_| Self { value, dragging: None, hovered: false, motion: None, bounds: Rc::default() })
 	}
 
 	/// The owner's value, unless a drag holds the knob.
@@ -179,6 +181,15 @@ impl Slider {
 				cx.notify();
 			}
 		}
+	}
+
+	pub fn follow(&mut self, motion: crate::animation::Motion, cx: &mut Context<'_, Self>) {
+		self.motion = Some(motion);
+		self.set(motion.progress(), cx);
+	}
+
+	pub fn is_dragging(&self) -> bool {
+		self.dragging.is_some()
 	}
 
 	fn at(&self, p: Point<Pixels>) -> f32 {
@@ -226,30 +237,14 @@ impl Slider {
 
 impl Render for Slider {
 	fn render(&mut self, _: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-		let shown = self.dragging.unwrap_or(self.value);
+		let shown = self.dragging.unwrap_or_else(|| self.motion.map_or(self.value, crate::animation::Motion::progress));
 		let active = self.dragging.is_some();
 		let bounds = self.bounds.clone();
 		let entity = active.then(|| cx.entity());
-		let fill = div()
-			.absolute()
-			.left_0()
-			.top_0()
-			.h_full()
-			.w(relative(shown))
-			.rounded_full()
-			.bg(if active { theme::accent() } else { theme::text() })
-			.group_hover("slider", |s| s.bg(theme::accent()));
-		let knob = div()
-			.absolute()
-			.left(relative(shown))
-			.ml(px(-6.))
-			.size(px(12.))
-			.rounded_full()
-			.bg(theme::text())
-			.shadow_md()
-			.when(!active, |s| s.invisible())
-			.group_hover("slider", |s| s.visible());
-		let rail = div().relative().h(px(4.)).w_full().rounded_full().bg(theme::track()).child(fill);
+		let foreground = match self.motion {
+			Some(motion) => crate::animation::progress(motion, self.hovered, self.dragging),
+			None => slider_foreground(shown, active),
+		};
 		div()
 			.id("slider")
 			.group("slider")
@@ -272,10 +267,49 @@ impl Render for Slider {
 				.absolute()
 				.size_full(),
 			)
-			.child(rail)
-			.child(knob)
+			.child(div().relative().h(px(4.)).w_full().rounded_full().bg(theme::track()))
+			.child(div().absolute().size_full().child(foreground))
+			.on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+				if this.hovered != *hovered {
+					this.hovered = *hovered;
+					cx.notify();
+				}
+			}))
 			.on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, _, cx| this.scrub(e.position, cx)))
 	}
+}
+
+/// The exact GPUI foreground for volume, seek dragging and compositor fallback.
+pub(crate) fn slider_foreground(shown: f32, active: bool) -> gpui_kit::AnyElement {
+	let fill = div()
+		.absolute()
+		.left_0()
+		.top_0()
+		.h_full()
+		.w(relative(shown))
+		.rounded_full()
+		.bg(if active { theme::accent() } else { theme::text() })
+		.group_hover("slider", |s| s.bg(theme::accent()));
+	let knob = div()
+		.absolute()
+		.left(relative(shown))
+		.ml(px(-6.))
+		.size(px(12.))
+		.rounded_full()
+		.bg(theme::text())
+		.shadow_md()
+		.when(!active, |s| s.invisible())
+		.group_hover("slider", |s| s.visible());
+	div()
+		.relative()
+		.w_full()
+		.h(px(16.))
+		.flex()
+		.items_center()
+		.justify_center()
+		.child(div().relative().h(px(4.)).w_full().child(fill))
+		.child(knob)
+		.into_any_element()
 }
 
 /// Spotify's outlined pill button (Follow, Sign out).
@@ -319,30 +353,10 @@ pub fn menu_icon(id: impl Into<ElementId>, glyph: Icon, size: Pixels) -> Statefu
 		.child(icon(glyph, size * OPTICAL, theme::subdued()).group_hover("menu-icon", |s| s.text_color(theme::text())))
 }
 
-/// Spotify's playing indicator: four green bars bouncing out of step (not synced to the audio).
-/// The bars share one phase-locked clock and redraw at most 15 times a second, so a visible
-/// indicator costs little.
+/// Spotify's four out-of-phase bars. macOS delegates their paint lifetime and motion to Core
+/// Animation; other platforms retain the phase-locked, 15-fps GPUI animation.
 pub fn eq_bars(id: &'static str, size: Pixels) -> impl IntoElement {
-	use std::time::Duration;
-
-	use gpui_kit::{Animation, AnimationExt as _};
-	/// Each bar's period and phase, so they never line up.
-	const BARS: [(u64, f32); 4] = [(900, 0.), (700, 0.45), (1100, 0.2), (800, 0.7)];
-	let bar_w = size * 0.16;
-	div().size(size).flex_none().flex().items_end().justify_center().gap(size * 0.08).children(BARS.iter().enumerate().map(
-		move |(i, (ms, phase))| {
-			let phase = *phase;
-			div().w(bar_w).h(size * 0.3).bg(theme::accent()).with_animation(
-				(id, i),
-				Animation::new(Duration::from_millis(*ms)).repeat_synced().with_max_fps(15.),
-				move |el, t| {
-					let x = (t + phase).fract();
-					// Up and back down, never quite flat.
-					el.h(size * (0.25 + 0.75 * (1. - (2. * x - 1.).abs())))
-				},
-			)
-		},
-	))
+	crate::animation::bars(id, size)
 }
 
 /// Hover state for a header that reveals an icon beside its title (Your Library, the right

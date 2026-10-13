@@ -22,18 +22,20 @@ use crate::{
 /// The bar's side columns: 30% of the width, at least this wide.
 const SIDE_MIN_W: f32 = 180.;
 
-/// The only player view that repaints on its own while playing. Sampling the core's monotonic
-/// anchor here redraws the seek slider and its labels, not the library tree, and never pumps the core.
+/// Samples the monotonic anchor without pumping the core. The compositor moves macOS's seek
+/// fill and clock; GPUI repaints only on other platforms or while interacting with the slider.
 pub struct Playhead {
-	seek:           Entity<Slider>,
-	anchor:         Anchor,
-	duration_ms:    u64,
-	playing:        bool,
-	repaint:        Option<Task<()>>,
-	elapsed_second: Option<u64>,
-	elapsed_label:  gpui_kit::SharedString,
-	duration_label: gpui_kit::SharedString,
-	_visibility:    Subscription,
+	seek:            Entity<Slider>,
+	anchor:          Anchor,
+	duration_ms:     u64,
+	playing:         bool,
+	repaint:         Option<Task<()>>,
+	compositor_tick: bool,
+	clock:           crate::animation::Clock,
+	elapsed_second:  Option<u64>,
+	elapsed_label:   gpui_kit::SharedString,
+	duration_label:  gpui_kit::SharedString,
+	_visibility:     Subscription,
 }
 
 /// The shortest gap between repaints (about 60/s).
@@ -64,6 +66,8 @@ impl Playhead {
 			duration_ms: state.duration_ms(),
 			playing: state.playing(),
 			repaint: None,
+			compositor_tick: false,
+			clock: crate::animation::Clock::default(),
 			elapsed_second: None,
 			elapsed_label: gpui_kit::SharedString::default(),
 			duration_label: clock(state.duration_ms()).into(),
@@ -88,32 +92,52 @@ impl Playhead {
 	}
 
 	fn animate(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-		if self.repaint.is_some() || !self.animating(window) {
+		if !self.animating(window) {
 			return;
 		}
-		let track_px = f32::from(window.viewport_size().width) * window.scale_factor();
-		let delay = repaint_delay(self.duration_ms, self.anchor.speed, self.anchor.now_ms(), track_px);
+		let compositor = self.clock.is_native() && !self.seek.read(cx).is_dragging();
+		if self.repaint.is_some() && self.compositor_tick == compositor {
+			return;
+		}
+		self.repaint = None;
+		self.compositor_tick = compositor;
+		let now = self.anchor.now_ms();
+		let delay = if compositor {
+			Duration::from_secs_f64((1000 - now % 1000) as f64 / 1000. / self.anchor.speed).max(MIN_REPAINT)
+		} else {
+			let track_px = f32::from(window.viewport_size().width) * window.scale_factor();
+			repaint_delay(self.duration_ms, self.anchor.speed, now, track_px)
+		};
 		self.repaint = Some(cx.spawn_in(window, async move |this, cx| {
 			cx.background_executor().timer(delay).await;
-			let _ = this.update(cx, |this, cx| {
+			let _ = this.update_in(cx, |this, window, cx| {
 				this.repaint = None;
-				cx.notify();
+				this.update_clock();
+				if this.clock.is_native() && !this.seek.read(cx).is_dragging() {
+					this.animate(window, cx);
+				} else {
+					cx.notify();
+				}
 			});
 		}));
+	}
+
+	fn update_clock(&mut self) {
+		let at = self.anchor.now_ms().min(self.duration_ms);
+		let second = at / 1000;
+		if self.elapsed_second != Some(second) {
+			self.elapsed_second = Some(second);
+			self.elapsed_label = clock(at).into();
+			self.clock.set(&self.elapsed_label);
+		}
 	}
 }
 
 impl Render for Playhead {
 	fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-		let at = self.anchor.now_ms().min(self.duration_ms);
-		// Formatting labels once per second avoids allocating strings on every animation frame.
-		let second = at / 1000;
-		if self.elapsed_second != Some(second) {
-			self.elapsed_second = Some(second);
-			self.elapsed_label = clock(at).into();
-		}
-		let progress = if self.duration_ms == 0 { 0. } else { at as f32 / self.duration_ms as f32 };
-		self.seek.update(cx, |slider, cx| slider.set(progress, cx));
+		self.update_clock();
+		let motion = crate::animation::Motion { anchor: self.anchor, duration_ms: self.duration_ms, playing: self.playing };
+		self.seek.update(cx, |slider, cx| slider.follow(motion, cx));
 		self.animate(window, cx);
 		div()
 			.w_full()
@@ -122,7 +146,7 @@ impl Render for Playhead {
 			.gap_2()
 			.text_size(px(12.))
 			.text_color(theme::subdued())
-			.child(div().w(px(40.)).flex().justify_end().child(self.elapsed_label.clone()))
+			.child(self.clock.element(self.elapsed_label.clone()))
 			.child(div().flex_1().child(self.seek.clone()))
 			.child(div().w(px(40.)).child(self.duration_label.clone()))
 	}

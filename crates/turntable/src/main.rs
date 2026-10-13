@@ -3,6 +3,7 @@
 // A GUI app: no console window on Windows.
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod animation;
 mod assets;
 mod bar;
 mod components;

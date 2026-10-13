@@ -653,6 +653,15 @@ pub fn run_core(shell: &Entity<Shell>, wake: smol::channel::Receiver<()>, cx: &m
 
 impl Render for Shell {
 	fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+		crate::animation::set_obscured(
+			window,
+			cx,
+			self.st().dialog.is_some()
+				|| self.menu.is_some()
+				|| self.shortcuts_open
+				|| self.search_open
+				|| self.st().toast.as_ref().is_some_and(|(id, _)| Some(*id) != self.toast_gone),
+		);
 		if !self.st().signed_in {
 			if self.page == Page::Settings {
 				return div()
