@@ -444,7 +444,11 @@ mod tests {
     fn test_large_images_are_tightly_sized_and_independently_released() {
         let atlas = create_atlas().expect("WARP device");
         let key = make_image_key(1);
-        let large = insert_tile(&atlas, key.clone(), Size { width: DevicePixels(640), height: DevicePixels(640) });
+        let large = insert_tile(
+            &atlas,
+            key.clone(),
+            Size { width: DevicePixels(640), height: DevicePixels(640) },
+        );
         {
             let lock = atlas.0.lock();
             let texture = lock.backend.texture(large.texture_id).unwrap();
@@ -452,7 +456,11 @@ mod tests {
             unsafe { texture.texture.GetDesc(&mut desc) };
             assert_eq!((desc.Width, desc.Height), (640, 640));
         }
-        let small = insert_tile(&atlas, make_image_key(2), Size { width: DevicePixels(64), height: DevicePixels(64) });
+        let small = insert_tile(
+            &atlas,
+            make_image_key(2),
+            Size { width: DevicePixels(64), height: DevicePixels(64) },
+        );
         assert_ne!(small.texture_id, large.texture_id);
         atlas.remove(&key);
         assert!(atlas.get_texture_view(large.texture_id).is_none());

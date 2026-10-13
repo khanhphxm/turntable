@@ -161,8 +161,9 @@ impl WindowsWindowState {
         let initial_placement = None;
 
         let frame_request = Arc::new(FrameRequest::new(frame_scheduler));
-        let direct_manipulation = DirectManipulationHandler::new(hwnd, scale_factor, frame_request.clone())
-            .context("initializing Direct Manipulation")?;
+        let direct_manipulation =
+            DirectManipulationHandler::new(hwnd, scale_factor, frame_request.clone())
+                .context("initializing Direct Manipulation")?;
 
         Ok(Self {
             origin: Cell::new(origin),

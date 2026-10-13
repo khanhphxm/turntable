@@ -51,7 +51,10 @@ pub(crate) struct FrameRequest {
 
 impl FrameRequest {
     pub(crate) fn new(scheduler: Arc<FrameScheduler>) -> Self {
-        Self { pending: AtomicBool::new(false), scheduler }
+        Self {
+            pending: AtomicBool::new(false),
+            scheduler,
+        }
     }
 
     pub(crate) fn request(&self) {
@@ -104,7 +107,15 @@ mod tests {
             std::thread::spawn(move || scheduler.wait(&stop))
         };
         stop.store(true, Ordering::Release);
-        scheduler.wake();
+        scheduler.wake_all();
         assert!(!worker.join().unwrap());
+    }
+
+    #[test]
+    fn stopped_thread_preserves_a_new_generation_wakeup() {
+        let scheduler = FrameScheduler::default();
+        scheduler.wake_all();
+        assert!(!scheduler.wait(&AtomicBool::new(true)));
+        assert!(scheduler.wait(&AtomicBool::new(false)));
     }
 }

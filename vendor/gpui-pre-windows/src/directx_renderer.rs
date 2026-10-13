@@ -2076,8 +2076,10 @@ mod dxgi {
 #[cfg(test)]
 mod turntable_tests {
     use super::*;
-    use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WS_OVERLAPPEDWINDOW};
-    use windows::core::w;
+    use windows::{
+        Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WS_OVERLAPPEDWINDOW},
+        core::w,
+    };
 
     struct TestWindow(HWND);
 
@@ -2091,22 +2093,39 @@ mod turntable_tests {
     fn path_targets_are_lazy_reused_resized_and_released() {
         let window = TestWindow(unsafe {
             CreateWindowExW(
-                Default::default(), w!("STATIC"), w!("GPUI path resource test"),
-                WS_OVERLAPPEDWINDOW, 0, 0, 32, 24, None, None, None, None,
-            ).unwrap()
+                Default::default(),
+                w!("STATIC"),
+                w!("GPUI path resource test"),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                32,
+                24,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
         });
         let devices = DirectXDevices::new().unwrap();
         let mut renderer = DirectXRenderer::new(window.0, &devices, true).unwrap();
         let appearance = WindowBackgroundAppearance::Opaque;
-        renderer.resize(size(DevicePixels(16), DevicePixels(16))).unwrap();
-        renderer.render_to_image(&Scene::default(), appearance).unwrap();
+        renderer
+            .resize(size(DevicePixels(16), DevicePixels(16)))
+            .unwrap();
+        renderer
+            .render_to_image(&Scene::default(), appearance)
+            .unwrap();
         assert!(renderer.resources.as_ref().unwrap().paths.is_none());
 
         let mut path = Path::new(point(px(0.), px(0.)));
         path.move_to(point(px(0.), px(0.)));
         path.line_to(point(px(16.), px(0.)));
         path.line_to(point(px(16.), px(16.)));
-        path.content_mask = ContentMask { bounds: Bounds::new(Point::default(), size(px(16.), px(16.))) };
+        path.content_mask = ContentMask {
+            bounds: Bounds::new(Point::default(), size(px(16.), px(16.))),
+        };
         path.color = rgb(0xff0000).into();
         let mut scene = Scene::default();
         scene.insert_primitive(path.scale(1.));
@@ -2114,10 +2133,18 @@ mod turntable_tests {
         let image = renderer.render_to_image(&scene, appearance).unwrap();
         assert_eq!(image.get_pixel(12, 4).0, [255, 0, 0, 255]);
         assert_eq!(image.get_pixel(2, 12).0, [255, 255, 255, 255]);
-        let target = renderer.resources.as_ref().unwrap().paths.as_ref().unwrap().texture.clone();
+        let target = renderer
+            .resources.as_ref().unwrap()
+            .paths.as_ref().unwrap()
+            .texture.clone();
         renderer.render_to_image(&scene, appearance).unwrap();
-        assert_eq!(renderer.resources.as_ref().unwrap().paths.as_ref().unwrap().texture.as_raw(), target.as_raw());
-        renderer.resize(size(DevicePixels(32), DevicePixels(24))).unwrap();
+        assert_eq!(
+            renderer.resources.as_ref().unwrap().paths.as_ref().unwrap().texture.as_raw(),
+            target.as_raw()
+        );
+        renderer
+            .resize(size(DevicePixels(32), DevicePixels(24)))
+            .unwrap();
         assert!(renderer.resources.as_ref().unwrap().paths.is_none());
         renderer.render_to_image(&scene, appearance).unwrap();
         let resized = &renderer.resources.as_ref().unwrap().paths.as_ref().unwrap().texture;
@@ -2125,9 +2152,13 @@ mod turntable_tests {
         unsafe { resized.GetDesc(&mut desc) };
         assert_eq!((desc.Width, desc.Height), (32, 24));
         assert_ne!(resized.as_raw(), target.as_raw());
-        renderer.render_to_image(&Scene::default(), appearance).unwrap();
+        renderer
+            .render_to_image(&Scene::default(), appearance)
+            .unwrap();
         assert!(renderer.resources.as_ref().unwrap().paths.is_none());
-        renderer.resize(size(DevicePixels(16), DevicePixels(16))).unwrap();
+        renderer
+            .resize(size(DevicePixels(16), DevicePixels(16)))
+            .unwrap();
         assert_eq!(renderer.render_to_image(&scene, appearance).unwrap(), image);
     }
 }
