@@ -1,3 +1,4 @@
+// Turntable modification: demand-driven frame scheduling; see ../TURNTABLE.md.
 #![cfg(target_os = "windows")]
 
 mod clipboard;
@@ -11,6 +12,7 @@ mod directx_renderer;
 mod dispatcher;
 mod display;
 mod events;
+mod frame_scheduler;
 mod keyboard;
 mod platform;
 mod system_notifications;

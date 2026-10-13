@@ -1,3 +1,4 @@
+// Turntable modification: park vsync when no window requests a frame; see ../TURNTABLE.md.
 use std::{
     cell::{Cell, RefCell},
     ffi::{OsStr, OsString},
@@ -37,11 +38,13 @@ use windows::{
 };
 
 use crate::*;
+use crate::frame_scheduler::{FrameRequest, FrameScheduler};
 use gpui::*;
 
 struct TrackedWindow {
     handle: SafeHwnd,
     frame_signal: Arc<PlatformFrameSignal>,
+    frame_request: Arc<FrameRequest>,
 }
 
 impl TrackedWindow {
@@ -57,6 +60,7 @@ pub struct WindowsPlatform {
     initial_windowing: RefCell<Option<WindowingRequest>>,
     /// Set to stop the current `VSyncProvider` thread, which runs while windowed.
     vsync_stop: RefCell<Option<Arc<AtomicBool>>>,
+    frame_scheduler: Arc<FrameScheduler>,
     // The below members will never change throughout the entire lifecycle of the app.
     /// Created with `headless()`: never windowed, and without a real text system.
     headless: bool,
@@ -271,6 +275,7 @@ impl WindowsPlatform {
             raw_window_handles,
             initial_windowing: RefCell::new(None),
             vsync_stop: RefCell::new(None),
+            frame_scheduler: Arc::new(FrameScheduler::default()),
             headless,
             icon,
             background_executor,
@@ -319,6 +324,7 @@ impl WindowsPlatform {
             directx_devices: self.inner.state.directx_devices.borrow().clone().unwrap(),
             invalidate_devices: self.invalidate_devices.clone(),
             draw_coordinator: self.inner.state.draw_coordinator.clone(),
+            frame_scheduler: self.frame_scheduler.clone(),
         }
     }
 
@@ -427,6 +433,7 @@ impl WindowsPlatform {
             // Not joined: the thread can be sending this thread a message. It exits after its
             // next vsync, and drops its reference to the devices then.
             stop.store(true, Ordering::Release);
+            self.frame_scheduler.wake_all();
         }
         if let Some(text_system) = &self.direct_write_text_system {
             text_system.release_gpu();
@@ -449,12 +456,13 @@ impl WindowsPlatform {
         let all_windows = Arc::downgrade(&self.raw_window_handles);
         let text_system = Arc::downgrade(direct_write_text_system);
         let invalidate_devices = self.invalidate_devices.clone();
+        let frame_scheduler = self.frame_scheduler.clone();
 
         std::thread::Builder::new()
             .name("VSyncProvider".to_owned())
             .spawn(move || {
                 let vsync_provider = VSyncProvider::new();
-                loop {
+                while frame_scheduler.wait(&stop) {
                     let signal_source = vsync_provider.wait_for_vsync();
                     let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
                     if stop.load(Ordering::Acquire) {
@@ -477,16 +485,18 @@ impl WindowsPlatform {
                         break;
                     };
                     for hwnd in all_windows.read().iter() {
+                        if !hwnd.frame_request.take() {
+                            continue;
+                        }
                         unsafe {
+                            if !IsWindowVisible(hwnd.as_raw()).as_bool()
+                                || IsIconic(hwnd.as_raw()).as_bool()
+                            {
+                                hwnd.frame_signal.take();
+                                continue;
+                            }
                             if let Some(signal_at) = signal_at {
-                                if IsWindowVisible(hwnd.as_raw()).as_bool()
-                                    && !IsIconic(hwnd.as_raw()).as_bool()
-                                {
-                                    hwnd.frame_signal.record(signal_at, signal_source);
-                                } else {
-                                    // Hidden windows may not consume WM_PAINT until shown again.
-                                    hwnd.frame_signal.take();
-                                }
+                                hwnd.frame_signal.record(signal_at, signal_source);
                             }
                             RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE)
                                 .ok()
@@ -774,7 +784,9 @@ impl Platform for WindowsPlatform {
         self.raw_window_handles.write().push(TrackedWindow {
             handle: handle.into(),
             frame_signal: window.state.frame_signal.clone(),
+            frame_request: window.state.frame_request.clone(),
         });
+        self.frame_scheduler.wake();
 
         Ok(Box::new(window))
     }
@@ -1405,6 +1417,7 @@ impl Drop for WindowsPlatform {
     fn drop(&mut self) {
         if let Some(stop) = self.vsync_stop.borrow_mut().take() {
             stop.store(true, Ordering::Release);
+            self.frame_scheduler.wake_all();
         }
         unsafe {
             if let Some(notification) = self.suspend_resume_notification.borrow_mut().take() {
@@ -1435,6 +1448,7 @@ pub(crate) struct WindowCreationInfo {
     pub(crate) invalidate_devices: Arc<AtomicBool>,
     /// Shared with [`WindowsPlatformState::draw_coordinator`] and every other window.
     pub(crate) draw_coordinator: Rc<DrawCoordinator>,
+    pub(crate) frame_scheduler: Arc<FrameScheduler>,
 }
 
 struct PlatformWindowCreateContext {

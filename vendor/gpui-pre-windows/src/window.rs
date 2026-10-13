@@ -1,5 +1,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
+// Turntable modification: wake the compositor only for pending frames; see ../TURNTABLE.md.
+
 use std::{
     cell::{Cell, RefCell},
     num::NonZeroIsize,
@@ -29,6 +31,7 @@ use windows::{
 };
 
 use crate::direct_manipulation::DirectManipulationHandler;
+use crate::frame_scheduler::{FrameRequest, FrameScheduler};
 use crate::*;
 use gpui::*;
 
@@ -55,6 +58,7 @@ pub struct WindowsWindowState {
 
     pub callbacks: Callbacks,
     pub frame_signal: Arc<PlatformFrameSignal>,
+    pub(crate) frame_request: Arc<FrameRequest>,
     pub input_handler: Cell<Option<PlatformInputHandler>>,
     pub ime_enabled: Cell<bool>,
     pub pending_surrogate: Cell<Option<u16>>,
@@ -123,6 +127,7 @@ impl WindowsWindowState {
         disable_direct_composition: bool,
         invalidate_devices: Arc<AtomicBool>,
         draw_coordinator: Rc<DrawCoordinator>,
+        frame_scheduler: Arc<FrameScheduler>,
     ) -> Result<Self> {
         let scale_factor = {
             let monitor_dpi = unsafe { GetDpiForWindow(hwnd) } as f32;
@@ -155,7 +160,8 @@ impl WindowsWindowState {
         let fullscreen = None;
         let initial_placement = None;
 
-        let direct_manipulation = DirectManipulationHandler::new(hwnd, scale_factor)
+        let frame_request = Arc::new(FrameRequest::new(frame_scheduler));
+        let direct_manipulation = DirectManipulationHandler::new(hwnd, scale_factor, frame_request.clone())
             .context("initializing Direct Manipulation")?;
 
         Ok(Self {
@@ -170,6 +176,7 @@ impl WindowsWindowState {
             min_size,
             callbacks,
             frame_signal: Arc::new(PlatformFrameSignal::new()),
+            frame_request,
             input_handler: Cell::new(input_handler),
             ime_enabled: Cell::new(true),
             pending_surrogate: Cell::new(pending_surrogate),
@@ -280,6 +287,7 @@ impl WindowsWindowInner {
             context.disable_direct_composition,
             context.invalidate_devices.clone(),
             context.draw_coordinator.clone(),
+            context.frame_scheduler.clone(),
         )?;
 
         Ok(Rc::new(Self {
@@ -431,6 +439,7 @@ struct WindowCreateContext {
     directx_devices: DirectXDevices,
     invalidate_devices: Arc<AtomicBool>,
     draw_coordinator: Rc<DrawCoordinator>,
+    frame_scheduler: Arc<FrameScheduler>,
     parent_hwnd: Option<HWND>,
 }
 
@@ -459,6 +468,7 @@ impl WindowsWindow {
             directx_devices,
             invalidate_devices,
             draw_coordinator,
+            frame_scheduler,
         } = creation_info;
         register_window_class(icon);
         let parent_hwnd = if params.kind == WindowKind::Dialog {
@@ -544,6 +554,7 @@ impl WindowsWindow {
             directx_devices,
             invalidate_devices,
             draw_coordinator,
+            frame_scheduler,
             parent_hwnd,
         };
         let creation_result = unsafe {
@@ -968,8 +979,20 @@ impl PlatformWindow for WindowsWindow {
         self.state.is_fullscreen()
     }
 
+    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
+        let window = Rc::downgrade(&self.0);
+        Some(Rc::new(move || {
+            if let Some(window) = window.upgrade()
+                && window.visibility() == WindowVisibility::Visible
+            {
+                window.state.frame_request.request();
+            }
+        }))
+    }
+
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         self.state.callbacks.request_frame.set(Some(callback));
+        self.state.frame_request.request();
     }
 
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>) {

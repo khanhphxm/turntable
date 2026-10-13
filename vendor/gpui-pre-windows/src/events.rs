@@ -1,3 +1,4 @@
+// Turntable modification: retain deferred draws without periodic invalidation; see ../TURNTABLE.md.
 use std::{cell::Cell, rc::Rc, sync::atomic::Ordering};
 
 use anyhow::Context as _;
@@ -1324,12 +1325,9 @@ impl WindowsWindowInner {
             if force_render {
                 self.state.force_render_pending.set(true);
             }
-            // Validate the region so a nested message pump doesn't keep
-            // re-dispatching WM_PAINT for the still-invalid region in a busy
-            // loop until the in-progress draw unwinds. The vsync thread
-            // re-invalidates every window on each vsync (see
-            // `begin_vsync_thread`), so the deferred frame still gets drawn,
-            // at most one vsync late.
+            // Validate before leaving the nested message pump, but preserve the
+            // deferred frame explicitly now that clean windows have no timer.
+            self.state.frame_request.request();
             unsafe { ValidateRect(Some(handle), None).ok().log_err() };
             return Some(0);
         };

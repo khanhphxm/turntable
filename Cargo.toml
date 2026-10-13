@@ -189,6 +189,8 @@ taffy = { path = "vendor/taffy" }
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
 # Park X11 refresh timers when no redraw or animation is pending.
 gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
+# Park Windows compositor waits until a window requests a frame.
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 # Right-size Metal atlas pages, instance buffers and path targets.
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 # Apply the same compact atlas/buffer and lazy path-target policy to wgpu.

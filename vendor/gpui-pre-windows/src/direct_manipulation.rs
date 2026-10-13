@@ -1,5 +1,7 @@
+// Turntable modification: keep compositor frames only during active gestures; see ../TURNTABLE.md.
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::Result;
 use gpui::*;
@@ -12,6 +14,7 @@ use windows::Win32::{
 };
 
 use crate::*;
+use crate::frame_scheduler::FrameRequest;
 
 /// Default viewport size in pixels. The actual content size doesn't matter
 /// because we're using the viewport only for gesture recognition, not for
@@ -26,10 +29,12 @@ pub(crate) struct DirectManipulationHandler {
     window: HWND,
     scale_factor: Rc<Cell<f32>>,
     pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+    active: Rc<Cell<bool>>,
+    frame_request: Arc<FrameRequest>,
 }
 
 impl DirectManipulationHandler {
-    pub fn new(window: HWND, scale_factor: f32) -> Result<Self> {
+    pub fn new(window: HWND, scale_factor: f32, frame_request: Arc<FrameRequest>) -> Result<Self> {
         unsafe {
             let manager: IDirectManipulationManager =
                 CoCreateInstance(&DirectManipulationManager, None, CLSCTX_INPROC_SERVER)?;
@@ -65,12 +70,15 @@ impl DirectManipulationHandler {
 
             let scale_factor = Rc::new(Cell::new(scale_factor));
             let pending_events = Rc::new(RefCell::new(Vec::new()));
+            let active = Rc::new(Cell::new(false));
 
             let event_handler: IDirectManipulationViewportEventHandler =
                 DirectManipulationEventHandler::new(
                     window,
                     Rc::clone(&scale_factor),
                     Rc::clone(&pending_events),
+                    active.clone(),
+                    frame_request.clone(),
                 )
                 .into();
 
@@ -86,6 +94,8 @@ impl DirectManipulationHandler {
                 window,
                 scale_factor,
                 pending_events,
+                active,
+                frame_request,
             })
         }
     }
@@ -101,6 +111,7 @@ impl DirectManipulationHandler {
             if GetPointerType(pointer_id, &mut pointer_type).is_ok() && pointer_type == PT_TOUCHPAD
             {
                 self.viewport.SetContact(pointer_id).log_err();
+                self.frame_request.request();
             }
         }
     }
@@ -108,6 +119,9 @@ impl DirectManipulationHandler {
     pub fn update(&self) {
         unsafe {
             self.update_manager.Update(None).log_err();
+        }
+        if self.active.get() {
+            self.frame_request.request();
         }
     }
 
@@ -143,6 +157,8 @@ struct DirectManipulationEventHandler {
     last_y_offset: Cell<f32>,
     scroll_phase: Cell<TouchPhase>,
     pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+    active: Rc<Cell<bool>>,
+    frame_request: Arc<FrameRequest>,
 }
 
 impl DirectManipulationEventHandler {
@@ -150,6 +166,8 @@ impl DirectManipulationEventHandler {
         window: HWND,
         scale_factor: Rc<Cell<f32>>,
         pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+        active: Rc<Cell<bool>>,
+        frame_request: Arc<FrameRequest>,
     ) -> Self {
         Self {
             window,
@@ -160,6 +178,8 @@ impl DirectManipulationEventHandler {
             last_y_offset: Cell::new(0.0),
             scroll_phase: Cell::new(TouchPhase::Started),
             pending_events,
+            active,
+            frame_request,
         }
     }
 
@@ -213,6 +233,11 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
         if current == previous {
             return Ok(());
         }
+        self.active.set(matches!(
+            current,
+            DIRECTMANIPULATION_RUNNING | DIRECTMANIPULATION_INERTIA
+        ));
+        self.frame_request.request();
 
         // A new gesture interrupted inertia, so end the old sequence.
         if current == DIRECTMANIPULATION_RUNNING && previous == DIRECTMANIPULATION_INERTIA {
