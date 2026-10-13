@@ -1,3 +1,5 @@
+// Modified by Turntable from upstream GPUI/Zed; see ../TURNTABLE.md for changes.
+
 #[cfg(feature = "profiler")]
 use crate::DebugFrameOverlayMode;
 #[cfg(any(feature = "inspector", debug_assertions))]
@@ -731,6 +733,18 @@ pub struct DismissEvent;
 
 type FrameCallback = Box<dyn FnOnce(&mut Window, &mut App)>;
 
+/// The GPUI state an independently composited native element must honor.
+#[derive(Clone, Copy, Debug)]
+pub struct NativeElementPaintContext {
+    /// Effective opacity inherited from the element's ancestors.
+    pub opacity: f32,
+    /// Bounds of a foreground overlay. Deferred panels, prompts and drags conservatively
+    /// occlude the viewport; tooltips use their actual bounds.
+    pub occluding_bounds: Option<Bounds<Pixels>>,
+    /// Origin used by GPUI's phase-locked repeating animations.
+    pub animation_epoch: Instant,
+}
+
 pub(crate) type AnyMouseListener =
     Box<dyn FnMut(&dyn Any, DispatchPhase, &mut Window, &mut App) + 'static>;
 
@@ -1271,6 +1285,7 @@ pub struct Window {
     visibility: WindowVisibility,
     pub(crate) visibility_observers:
         SubscriberSet<(), Box<dyn FnMut(WindowVisibility, &mut Window, &mut App) -> bool>>,
+    native_paint_observers: Option<SubscriberSet<(), AnyObserver>>,
     hovered: Rc<Cell<bool>>,
     pub(crate) needs_present: Rc<Cell<bool>>,
     /// Tracks recent input event timestamps to determine if input is arriving at a high rate.
@@ -2170,6 +2185,7 @@ impl Window {
             active,
             visibility,
             visibility_observers: SubscriberSet::new(),
+            native_paint_observers: None,
             hovered,
             needs_present,
             input_rate_tracker,
@@ -2306,6 +2322,24 @@ impl Window {
                 true
             }),
         );
+        activate();
+        subscription
+    }
+
+    /// Observe a completed GPUI paint, including frames which reuse cached paint ranges.
+    /// This does not create frame demand. A native element which needs GPUI fallback may
+    /// call `refresh` here; that paint is rebuilt once before its scene is presented.
+    pub fn observe_native_element_paint(
+        &mut self,
+        mut callback: impl FnMut(&mut Window, &mut App) + 'static,
+    ) -> Subscription {
+        let (subscription, activate) = self
+            .native_paint_observers
+            .get_or_insert_with(SubscriberSet::new)
+            .insert((), Box::new(move |window, cx| {
+                callback(window, cx);
+                true
+            }));
         activate();
         subscription
     }
@@ -3419,8 +3453,24 @@ impl Window {
 
     /// Produces a new frame and assigns it to `rendered_frame`. To actually show
     /// the contents of the new [`Scene`], use [`Self::present`].
-    #[profiling::function]
     pub fn draw(&mut self, cx: &mut App) -> ArenaClearNeeded {
+        let arena = self.draw_once(cx);
+        let Some(observers) = self.native_paint_observers.clone() else {
+            return arena;
+        };
+        observers.retain(&(), |callback| callback(self, cx));
+        if self.refreshing {
+            arena.clear(cx);
+            let arena = self.draw_once(cx);
+            observers.retain(&(), |callback| callback(self, cx));
+            arena
+        } else {
+            arena
+        }
+    }
+
+    #[profiling::function]
+    fn draw_once(&mut self, cx: &mut App) -> ArenaClearNeeded {
         // Drain every draw in profiler builds so a previous frame's
         // first-invalidation timestamp can't be attributed to this one.
         #[cfg(feature = "profiler")]
@@ -4305,6 +4355,29 @@ impl Window {
     pub(crate) fn element_opacity(&self) -> f32 {
         self.invalidator.debug_assert_paint_or_prepaint();
         self.element_opacity
+    }
+
+    /// Obtain native compositing state during element painting or from
+    /// `observe_native_element_paint`. No native platform types enter this API.
+    pub fn native_element_paint_context(&self, cx: &App) -> NativeElementPaintContext {
+        let frame = if self.invalidator.not_drawing() {
+            &self.rendered_frame
+        } else {
+            &self.next_frame
+        };
+        let occluding_bounds = if self.prompt.is_some()
+            || cx.has_active_drag()
+            || !frame.deferred_draws.is_empty()
+        {
+            Some(Bounds::new(Point::default(), self.viewport_size))
+        } else {
+            self.tooltip_bounds.as_ref().map(|tooltip| tooltip.bounds)
+        };
+        NativeElementPaintContext {
+            opacity: self.element_opacity,
+            occluding_bounds,
+            animation_epoch: cx.synced_animation_epoch,
+        }
     }
 
     /// Obtain the current content mask. This method should only be called during element drawing.
