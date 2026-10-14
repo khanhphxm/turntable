@@ -206,6 +206,8 @@ pub struct Shell {
 	/// The compact keyboard-shortcut reference is open.
 	pub shortcuts_open:       bool,
 	shortcuts_focus:          Option<FocusHandle>,
+	/// The About dialog, while open.
+	pub about:                Option<crate::dialogs::About>,
 	/// The toast last shown, and the one whose time is up (the core never clears toasts).
 	pub toast_shown:          Option<u32>,
 	pub toast_gone:           Option<u32>,
@@ -314,6 +316,7 @@ impl Shell {
 			library_filter: None,
 			shortcuts_open: false,
 			shortcuts_focus: None,
+			about: None,
 			toast_shown: None,
 			toast_gone: None,
 		};
@@ -684,8 +687,44 @@ impl Shell {
 	/// Tells native animations whether an overlay covers the window, so they fall back to GPUI.
 	fn mark_obscured(&self, window: &mut Window, cx: &mut Context<'_, Self>) {
 		let toast = self.st().toast.as_ref().is_some_and(|(id, _)| Some(*id) != self.toast_gone);
-		let covered = self.st().dialog.is_some() || self.menu.is_some() || self.shortcuts_open || self.search_open || toast;
+		let covered =
+			self.st().dialog.is_some() || self.menu.is_some() || self.shortcuts_open || self.search_open || self.about.is_some() || toast;
 		crate::animation::set_obscured(window, cx, covered);
+	}
+
+	/// The window while signed out: sign-in (or Settings), with only About able to open over it.
+	fn signed_out(&mut self, about: Option<AnyElement>, window: &mut Window, cx: &mut Context<'_, Self>) -> AnyElement {
+		let page = if self.page == Page::Settings {
+			div()
+				.size_full()
+				.flex()
+				.flex_col()
+				.bg(theme::base())
+				.text_color(theme::text())
+				.child(
+					div()
+						.id("settings-back-to-sign-in")
+						.p_4()
+						.cursor_pointer()
+						.on_click(cx.listener(|this, _, _, cx| this.open(Page::Core(Route::Home), cx)))
+						.child("Back to sign in"),
+				)
+				.child(div().flex_1().min_h_0().child(self.settings_page(cx)))
+				.children(crate::topbar::window_titlebar(window))
+				.into_any_element()
+		} else {
+			self.welcome_page(window, cx).into_any_element()
+		};
+		// Escape closes About here too.
+		div()
+			.key_context("Shell")
+			.track_focus(&self.focus)
+			.on_action(cx.listener(|this, _: &CloseDialog, window, cx| this.close_about(window, cx)))
+			.size_full()
+			.relative()
+			.child(page)
+			.children(about)
+			.into_any_element()
 	}
 }
 
@@ -709,27 +748,9 @@ impl Render for Shell {
 		}
 		CoverCache::reset(hidden, cx);
 		Self::reclaim_artwork(cx);
+		let about = self.about_dialog(cx);
 		if !self.st().signed_in {
-			if self.page == Page::Settings {
-				return div()
-					.size_full()
-					.flex()
-					.flex_col()
-					.bg(theme::base())
-					.text_color(theme::text())
-					.child(
-						div()
-							.id("settings-back-to-sign-in")
-							.p_4()
-							.cursor_pointer()
-							.on_click(cx.listener(|this, _, _, cx| this.open(Page::Core(Route::Home), cx)))
-							.child("Back to sign in"),
-					)
-					.child(div().flex_1().min_h_0().child(self.settings_page(cx)))
-					.children(crate::topbar::window_titlebar(window))
-					.into_any_element();
-			}
-			return self.welcome_page(window, cx).into_any_element();
+			return self.signed_out(about, window, cx);
 		}
 		self.scale = window.scale_factor();
 		let width = window.viewport_size().width;
@@ -789,6 +810,7 @@ impl Render for Shell {
 			.children(dialog)
 			.children(menu)
 			.when(self.shortcuts_open, |s| s.child(Self::shortcut_help(cx)))
+			.children(about)
 			.into_any_element()
 	}
 }
@@ -904,6 +926,10 @@ impl Shell {
 			.key_context("Shell")
 			.track_focus(&self.focus)
 			.on_action(cx.listener(|this, _: &CloseDialog, window, cx| {
+				if this.about.is_some() {
+					this.close_about(window, cx);
+					return;
+				}
 				if this.shortcuts_open {
 					this.toggle_shortcut_help(window, cx);
 					return;

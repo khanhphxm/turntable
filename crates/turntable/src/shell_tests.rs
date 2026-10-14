@@ -539,6 +539,26 @@ mod shortcuts {
 			assert_eq!(shell.page, Page::Settings);
 		});
 	}
+
+	#[test]
+	fn escape_closes_about_and_returns_focus() {
+		let (shell, mut cx, _directory) = setup();
+		cx.update(|window, cx| {
+			shell.update(cx, |shell, cx| {
+				shell.search.update(cx, |input, cx| input.focus(window, cx));
+				shell.open_about(window, cx);
+			});
+		});
+		frame(&mut cx);
+		cx.read_entity(&shell, |shell, _| assert!(shell.about.is_some()));
+		cx.simulate_keystrokes("escape");
+		frame(&mut cx);
+		cx.update(|window, cx| {
+			let shell = shell.read(cx);
+			assert!(shell.about.is_none());
+			assert!(shell.search.read(cx).focus_handle(cx).is_focused(window));
+		});
+	}
 }
 
 #[test]

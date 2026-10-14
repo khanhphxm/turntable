@@ -40,6 +40,7 @@ icons! {
 		Close => X,
 		Collapse => Minimize2,
 		Computer => Laptop,
+		Copy => Copy,
 		Device => MonitorSpeaker,
 		Disc => Disc3,
 		Ellipsis => Ellipsis,

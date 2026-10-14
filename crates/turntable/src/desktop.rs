@@ -118,6 +118,14 @@ pub fn show(cx: &mut App) {
 	});
 }
 
+/// Shows the window with the About dialog over it (the app menu's About, even while hidden).
+pub fn show_about(cx: &mut App) {
+	show(cx);
+	let Some(desktop) = cx.try_global::<Desktop>() else { return };
+	let (Some(handle), Some(shell)) = (desktop.window, desktop.shell.clone()) else { return };
+	let _ = handle.update(cx, |_, window, cx| shell.update(cx, |shell, cx| shell.open_about(window, cx)));
+}
+
 fn dispatch(command: tray::Command, cx: &mut App) {
 	match command {
 		tray::Command::Show => show(cx),

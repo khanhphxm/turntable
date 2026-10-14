@@ -1,13 +1,9 @@
-//! The application menu (macOS's menu bar; other platforms ignore it) and the About window.
+//! The application menu (macOS's menu bar; other platforms ignore it).
 
 use gpui_kit::{
-	App, AppContext as _, Bounds, Context, FontWeight, IntoElement, Menu, MenuItem, OsAction, ParentElement as _, Render, Styled as _,
-	SystemMenuType, TitlebarOptions, Window, WindowBounds, WindowOptions, actions,
+	App, Menu, MenuItem, OsAction, SystemMenuType, actions,
 	component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo},
-	div, img, point, px, size,
 };
-
-use crate::theme;
 
 actions!(turntable_app, [About, Quit, Hide, HideOthers, ShowAll, Minimize, Zoom]);
 
@@ -17,7 +13,7 @@ pub const NAME: &str = "Turntable";
 /// Installs the menu bar and its app-wide handlers. `settings` opens the settings page in the
 /// main window (bound to ⌘, by the caller's key map).
 pub fn install(settings: impl gpui_kit::Action, cx: &mut App) {
-	cx.on_action(|_: &About, cx| open_about(cx));
+	cx.on_action(|_: &About, cx| crate::desktop::show_about(cx));
 	cx.on_action(|_: &Quit, cx| cx.quit());
 	cx.on_action(|_: &Hide, cx| cx.hide());
 	cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
@@ -75,55 +71,4 @@ pub fn install(settings: impl gpui_kit::Action, cx: &mut App) {
 			disabled: false,
 		},
 	]);
-}
-
-/// A small fixed window, like every Mac app's About panel.
-fn open_about(cx: &mut App) {
-	let bounds = Bounds::centered(None, size(px(360.), px(400.)), cx);
-	let options = WindowOptions {
-		window_bounds: Some(WindowBounds::Windowed(bounds)),
-		titlebar: Some(TitlebarOptions {
-			title:                  Some(format!("About {NAME}").into()),
-			appears_transparent:    true,
-			traffic_light_position: Some(point(px(12.), px(12.))),
-		}),
-		is_resizable: false,
-		is_minimizable: false,
-		..Default::default()
-	};
-	let _ = cx.open_window(options, |_, cx| cx.new(|_| AboutView));
-	cx.activate(true);
-}
-
-struct AboutView;
-
-impl Render for AboutView {
-	fn render(&mut self, _: &mut Window, _: &mut Context<'_, Self>) -> impl IntoElement {
-		let line = |text: &'static str| div().text_size(px(12.)).text_color(theme::subdued()).child(text);
-		div()
-			.size_full()
-			.flex()
-			.flex_col()
-			.items_center()
-			.justify_center()
-			.gap_2()
-			.px_8()
-			.bg(theme::panel())
-			.text_color(theme::text())
-			.font_family(".SystemUIFont")
-			.text_center()
-			.child(img("icons/app.svg").size(px(96.)))
-			.child(div().mt_2().text_size(px(20.)).font_weight(FontWeight::BOLD).child(NAME))
-			.child(line(concat!("Version ", env!("CARGO_PKG_VERSION"))))
-			.child(div().h_4())
-			.child(line("A lightweight, native Spotify player."))
-			.child(line("Requires Spotify Premium."))
-			.child(div().h_2())
-			.child(line("Not affiliated with, endorsed or sponsored by Spotify AB."))
-			.child(line("Spotify is a trademark of Spotify AB."))
-			.child(line("Music, artwork and metadata are provided by Spotify."))
-			.child(div().h_2())
-			.child(line("Built with GPUI and librespot. Icons by Lucide (ISC)."))
-			.child(line("MIT License."))
-	}
 }

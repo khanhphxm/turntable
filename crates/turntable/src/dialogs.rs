@@ -1,18 +1,19 @@
-//! Dialogs over the window: pick a playlist to add songs to, and edit a playlist's details.
-//! The core owns what's open (`State::dialog`) and the edited text; these views draw it and
-//! feed edits back.
+//! Dialogs over the window: About, pick a playlist to add songs to, and edit a playlist's
+//! details. The core owns what's open (`State::dialog`) and the edited text; these views draw it
+//! and feed edits back. About is the shell's own: it needs nothing from the core.
 
 use gpui_kit::{
-	AnyElement, AppContext as _, Context, Div, Entity, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Stateful,
-	StatefulInteractiveElement as _, Styled as _, Window,
+	AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Div, Entity, FocusHandle, FontWeight, InteractiveElement as _,
+	IntoElement, ParentElement as _, Stateful, StatefulInteractiveElement as _, Styled as _, Window,
 	component::input::{Input, InputEvent, InputState, Textarea, TextareaState},
-	div,
+	div, img,
 	prelude::FluentBuilder as _,
 	px,
 };
 use turntable_core::{Dialog, Field, Msg, Route, library::Tile};
 
 use crate::{
+	menus::NAME,
 	shell::Shell,
 	theme,
 	widgets::{Icon, icon, icon_button},
@@ -24,8 +25,25 @@ pub struct DetailsInputs {
 	description: Entity<TextareaState>,
 }
 
-/// The dim layer under a dialog, centring it; a click on the layer closes the dialog.
-fn scrim(card: impl IntoElement, cx: &mut Context<'_, Shell>) -> AnyElement {
+/// The About dialog while it's open.
+pub struct About {
+	/// What had focus before it opened (it takes focus so Escape reaches it).
+	restore: Option<FocusHandle>,
+	/// The version was copied: the copy button shows a check until it closes.
+	copied:  bool,
+}
+
+/// The OS this build runs on and its processor family, as About names them.
+const PLATFORM: (&str, &str) = if cfg!(target_os = "macos") {
+	("macOS", if cfg!(target_arch = "aarch64") { "Apple Silicon" } else { "Intel" })
+} else if cfg!(target_os = "windows") {
+	("Windows", if cfg!(target_arch = "aarch64") { "ARM64" } else { "x64" })
+} else {
+	("Linux", std::env::consts::ARCH)
+};
+
+/// The dim layer under a dialog, centring it; a click on the layer runs `close`.
+fn scrim(card: impl IntoElement, close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> AnyElement {
 	div()
 		.absolute()
 		.inset_0()
@@ -33,7 +51,7 @@ fn scrim(card: impl IntoElement, cx: &mut Context<'_, Shell>) -> AnyElement {
 		.items_center()
 		.justify_center()
 		.bg(theme::alpha(theme::base(), 0.7))
-		.child(div().id("scrim").absolute().inset_0().on_click(cx.listener(|this, _, _, cx| this.send(Msg::CloseDialog, cx))))
+		.child(div().id("scrim").absolute().inset_0().on_click(close))
 		.child(card)
 		.into_any_element()
 }
@@ -63,6 +81,101 @@ fn card(title: &'static str, body: impl IntoElement, cx: &mut Context<'_, Shell>
 }
 
 impl Shell {
+	/// Opens About over the window; Escape, its X or a click outside closes it.
+	pub fn open_about(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+		if self.about.is_none() {
+			self.about = Some(About { restore: window.focused(cx), copied: false });
+		}
+		window.focus(&self.focus, cx);
+		cx.notify();
+	}
+
+	pub fn close_about(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+		let Some(about) = self.about.take() else { return };
+		if let Some(focus) = about.restore {
+			window.focus(&focus, cx);
+		}
+		cx.notify();
+	}
+
+	/// Spotify's About card: the wordmark, this build and its version (copyable for bug reports),
+	/// and the legal notes in an inset.
+	pub fn about_dialog(&self, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
+		let copied = self.about.as_ref()?.copied;
+		let (os, arch) = PLATFORM;
+		let version = env!("CARGO_PKG_VERSION");
+		let copy = cx.listener(move |this, _, _, cx| {
+			cx.write_to_clipboard(ClipboardItem::new_string(format!("{NAME} {version} ({os} {arch})")));
+			if let Some(about) = &mut this.about {
+				about.copied = true;
+			}
+			cx.notify();
+		});
+		let card = div()
+			.id("about")
+			// Its own hitbox: clicks inside must not reach the scrim beneath (which closes it).
+			.occlude()
+			.relative()
+			.w(px(448.))
+			.rounded(px(12.))
+			.bg(theme::raised())
+			.shadow_2xl()
+			.p_6()
+			.flex()
+			.flex_col()
+			.gap_5()
+			.child(
+				div()
+					.flex()
+					.items_center()
+					.justify_between()
+					.child(
+						div()
+							.flex()
+							.items_center()
+							.gap_2()
+							.child(img("icons/app.svg").size(px(32.)))
+							.child(div().text_size(px(22.)).font_weight(FontWeight::BOLD).child(NAME)),
+					)
+					.child(icon_button(
+						"about-close",
+						Icon::Close,
+						px(16.),
+						false,
+						cx.listener(|this, _, window, cx| this.close_about(window, cx)),
+					)),
+			)
+			.child(
+				div()
+					.flex()
+					.flex_col()
+					.child(div().text_size(px(16.)).font_weight(FontWeight::BOLD).child(format!("{NAME} for {os} ({arch})")))
+					.child(
+						div()
+							.flex()
+							.items_center()
+							.gap_1()
+							.child(div().text_size(px(14.)).text_color(theme::subdued()).child(format!("Version {version}")))
+							.child(icon_button("about-copy", if copied { Icon::Check } else { Icon::Copy }, px(14.), false, copy)),
+					),
+			)
+			.child(
+				div()
+					.rounded(px(8.))
+					.bg(theme::panel())
+					.px_4()
+					.py_3()
+					.flex()
+					.flex_col()
+					.gap_1()
+					.text_size(px(12.))
+					.text_color(theme::subdued())
+					.child("Not affiliated with Spotify. Spotify is a trademark of Spotify AB.")
+					.child("MIT License · Built with GPUI and librespot"),
+			);
+		Some(scrim(card, cx.listener(|this, _, window, cx| this.close_about(window, cx))))
+	}
+
 	/// The open dialog, if any, over everything else.
 	pub fn dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
 		match self.st().dialog.clone() {
@@ -140,7 +253,7 @@ impl Shell {
 			.gap_2()
 			.child(div().text_size(px(14.)).text_color(theme::subdued()).truncate().child(label))
 			.child(div().id("pick-list").max_h(px(400.)).overflow_y_scroll().flex().flex_col().child(new).children(rows));
-		scrim(card("Add to playlist", body, cx), cx)
+		scrim(card("Add to playlist", body, cx), cx.listener(|this, _, _, cx| this.send(Msg::CloseDialog, cx)))
 	}
 
 	fn details_dialog(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> AnyElement {
@@ -222,7 +335,7 @@ impl Shell {
 						.child("Save"),
 				),
 			);
-		scrim(card("Edit details", body, cx), cx)
+		scrim(card("Edit details", body, cx), cx.listener(|this, _, _, cx| this.send(Msg::CloseDialog, cx)))
 	}
 
 	/// The name and description fields, filled from the core and feeding it every edit.
