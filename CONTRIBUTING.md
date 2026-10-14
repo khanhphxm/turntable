@@ -3,6 +3,7 @@
 Keep changes focused and explain the user-visible problem in your issue or PR.
 Use synthetic account data in tests and redact logs/screenshots. Report security
 issues privately as described in [SECURITY.md](SECURITY.md).
+Follow our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Build and check
 
@@ -22,6 +23,9 @@ Xcode command-line tools. Run platform checks natively; CI checks all three OSes
 `scripts/lint.sh` also checks rustdoc, unused dependencies (install
 `cargo-machete`) and banned lint patterns. Workflow changes need `actionlint`
 and `zizmor .github/workflows`.
+The default test command skips ignored manual benchmarks and native-desktop
+checks. GPUI TestPlatform journeys run headlessly; backend GPU/window tests
+need a separate interactive desktop session (especially on Windows).
 
 ## Commits and vendored code
 

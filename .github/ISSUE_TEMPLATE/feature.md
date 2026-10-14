@@ -1,6 +1,7 @@
 ---
 name: Feature request
 about: Suggest a focused improvement to Turntable
+labels: enhancement
 ---
 
 ## Problem

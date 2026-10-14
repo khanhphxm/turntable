@@ -1,6 +1,7 @@
 ---
 name: Bug report
 about: Report a reproducible problem in Turntable
+labels: bug
 ---
 
 <!-- Security issue? Use SECURITY.md and private reporting instead.
