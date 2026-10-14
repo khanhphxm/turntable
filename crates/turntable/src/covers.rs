@@ -30,9 +30,11 @@ use image::{DynamicImage, Frame, ImageFormat, RgbaImage};
 use turntable_core::Cover;
 
 const DEFAULT_BUDGET: usize = 12 * 1024 * 1024;
-// Avoid the old 320→640 jump: a 164-logical-pixel shelf cover at 2x needs 328,
-// not 640, physical pixels. Every bucket still covers the requested display size.
-const BUCKETS: [u32; 9] = [64, 96, 128, 192, 256, 320, 384, 512, 640];
+// Match row thumbnails, 164 px shelf cards, 232/240 px headers/full view,
+// and the default 248 px right panel at both 1x and 2x. Intermediate buckets
+// still cover fractional scales and user-resized panels without undersampling.
+const BUCKETS: [u32; 24] =
+	[40, 48, 56, 60, 64, 80, 96, 112, 120, 128, 164, 192, 232, 240, 248, 256, 320, 328, 384, 464, 480, 496, 512, 640];
 const MAX_DECODES: usize = 2;
 /// A blurred backdrop is decoded this small, then blurred: stretched over a panel it reads as
 /// soft colour, like Apple Music's lyrics.
@@ -348,22 +350,34 @@ mod tests {
 	#[test]
 	fn buckets_use_physical_pixels_and_cap_large_requests() {
 		for (size, scale, expected) in [
-			(0, 1., 64),
-			(40, 1., 64),
+			(0, 1., 40),
+			(40, 1., 40),
 			(64, 1., 64),
-			(65, 1., 96),
-			(40, 2., 96),
+			(65, 1., 80),
+			(40, 2., 80),
 			(64, 2., 128),
-			(65, 2., 192),
+			(65, 2., 164),
 			(128, 2.5, 320),
-			(129, 2.5, 384),
-			(164, 2., 384),
-			(232, 2., 512),
+			(129, 2.5, 328),
+			(164, 1.25, 232),
+			(164, 2., 328),
+			(232, 2., 464),
 			(320, 2., 640),
 			(641, 1., 640),
 			(u32::MAX, 3., 640),
 		] {
 			assert_eq!(bucket(size, scale), expected);
+		}
+	}
+
+	#[test]
+	fn actual_display_sizes_are_exact_at_one_and_two_x() {
+		for logical in [40, 48, 56, 60, 64, 164, 232, 240, 248, 320] {
+			assert_eq!(bucket(logical, 1.), logical);
+			assert_eq!(bucket(logical, 2.), logical * 2);
+		}
+		for pair in BUCKETS.windows(2) {
+			assert!(pair[0] < pair[1]);
 		}
 	}
 

@@ -66,6 +66,8 @@ sudo apt install clang cmake pkg-config libssl-dev libdbus-1-dev libasound2-dev 
 **Windows** builds with the MSVC toolchain.
 
 The UI uses the platform's built-in font family, without enumerating installed fonts at startup.
+Artwork is decoded into physical-pixel buckets matching row thumbnails, 164 px shelf covers,
+page headers and the default right panel at 1x and 2x display scales.
 
 ## Privacy
 
