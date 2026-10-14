@@ -1,3 +1,5 @@
+// Modified by Turntable from upstream GPUI/Zed; see ../TURNTABLE.md for changes.
+
 //! Touch gesture recognition vocabulary.
 //!
 //! GPUI recognizes gestures from raw [`TouchEvent`](crate::TouchEvent)s in a
@@ -49,6 +51,61 @@ fn movements_oppose(left: Point<Pixels>, right: Point<Pixels>) -> bool {
 pub struct OngoingScroll {
     last_event: Option<Instant>,
     axis: Option<Axis>,
+    /// Imprecise (mouse wheel) deltas still being eased in; see [`SmoothWheel`].
+    pub(crate) wheel: SmoothWheel,
+}
+
+/// Eases an imprecise, line-based scroll (a mouse wheel notch) over a few frames instead
+/// of jumping the whole notch at once, as browsers do. Precise deltas (trackpads, which
+/// already arrive per frame with momentum) never pass through here.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SmoothWheel {
+    pending: Point<Pixels>,
+    last_tick: Option<Instant>,
+}
+
+impl SmoothWheel {
+    /// About 95% of a notch lands within three time constants (~120 ms).
+    const TIME_CONSTANT: Duration = Duration::from_millis(40);
+
+    /// Queues a wheel delta. Reversing direction drops what is left of the previous one.
+    pub fn push(&mut self, delta: Point<Pixels>, now: Instant) {
+        if movements_oppose(self.pending, delta) {
+            self.pending = Point::default();
+        }
+        if !self.is_active() {
+            self.last_tick = Some(now);
+        }
+        self.pending = point(self.pending.x + delta.x, self.pending.y + delta.y);
+    }
+
+    /// Whether part of a queued delta is still waiting to be applied.
+    pub fn is_active(&self) -> bool {
+        !self.pending.x.is_zero() || !self.pending.y.is_zero()
+    }
+
+    /// The part of the queued delta due by `now`; the remainder once under half a pixel.
+    pub fn step(&mut self, now: Instant) -> Point<Pixels> {
+        let Some(last) = self.last_tick.replace(now) else {
+            return Point::default();
+        };
+        let elapsed = now.saturating_duration_since(last).as_secs_f32();
+        let fraction = 1. - (-elapsed / Self::TIME_CONSTANT.as_secs_f32()).exp();
+        let step = point(self.pending.x * fraction, self.pending.y * fraction);
+        let rest = point(self.pending.x - step.x, self.pending.y - step.y);
+        if rest.x.abs() < px(0.5) && rest.y.abs() < px(0.5) {
+            let all = self.pending;
+            *self = Self::default();
+            return all;
+        }
+        self.pending = rest;
+        step
+    }
+
+    /// Drops whatever is still queued (the content hit an edge, or a precise scroll took over).
+    pub fn stop(&mut self) {
+        *self = Self::default();
+    }
 }
 
 impl OngoingScroll {

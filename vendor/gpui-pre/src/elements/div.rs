@@ -1,3 +1,5 @@
+// Modified by Turntable from upstream GPUI/Zed; see ../../TURNTABLE.md for changes.
+
 //! Div is the central, reusable element that most GPUI trees will be built from.
 //! It functions as a container for other elements, and provides a number of
 //! useful features for laying out and styling its children as well as binding
@@ -3330,6 +3332,18 @@ impl Interactivity {
     ) {
         if let Some(scroll_offset) = self.scroll_offset.clone() {
             let ongoing_scroll = self.ongoing_scroll.clone();
+            // Turntable: ease in the rest of a queued wheel notch; the new offset is laid out
+            // on the next frame, which this requests until the notch has landed.
+            if let Some(ongoing) = &ongoing_scroll {
+                let mut ongoing = ongoing.borrow_mut();
+                if ongoing.wheel.is_active() {
+                    let step = ongoing.wheel.step(scheduler::Instant::now());
+                    let mut offset = scroll_offset.borrow_mut();
+                    offset.x += step.x;
+                    offset.y += step.y;
+                    window.request_animation_frame();
+                }
+            }
             let overflow = style.overflow;
             let allow_concurrent_scroll = style.allow_concurrent_scroll;
             let restrict_scroll_to_axis = style.restrict_scroll_to_axis;
@@ -3375,6 +3389,21 @@ impl Interactivity {
                         } else {
                             delta_x = Pixels::ZERO;
                         }
+                    }
+                    // Turntable: a wheel notch eases in over the next frames (see SmoothWheel);
+                    // precise deltas apply at once and cancel any easing still in flight.
+                    if let Some(ongoing) = &ongoing_scroll {
+                        let mut ongoing = ongoing.borrow_mut();
+                        if !event.delta.precise() {
+                            if !delta_x.is_zero() || !delta_y.is_zero() {
+                                ongoing
+                                    .wheel
+                                    .push(point(delta_x, delta_y), scheduler::Instant::now());
+                                cx.notify(current_view);
+                            }
+                            return;
+                        }
+                        ongoing.wheel.stop();
                     }
                     scroll_offset.y += delta_y;
                     scroll_offset.x += delta_x;
