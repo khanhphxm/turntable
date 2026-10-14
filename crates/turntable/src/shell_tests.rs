@@ -303,7 +303,7 @@ mod scrolling {
 	}
 
 	#[test]
-	fn pixel_wheel_packets_keep_subpixel_motion_and_lines_keep_their_units() {
+	fn pixel_wheel_packets_keep_subpixel_motion_and_wheel_notches_ease_in() {
 		let (shell, mut cx, _directory) = setup();
 		listing(&shell, &mut cx, 100, None);
 		cx.update(|_, cx| {
@@ -322,17 +322,30 @@ mod scrolling {
 			});
 			frame(&mut cx);
 		}
-		cx.read_entity(&shell, |shell, _| {
-			assert_eq!(shell.list.logical_scroll_top().item_ix, 20);
-			assert_eq!(shell.list.logical_scroll_top().offset_in_item, px(14.));
-		});
+		let offset = |cx: &mut VisualTestContext| cx.read_entity(&shell, |shell, _| shell.list.logical_scroll_top().offset_in_item);
+		assert_eq!(offset(&mut cx), px(14.));
+		// A wheel notch (one 20 px line) eases in over a few frames instead of jumping.
 		cx.simulate_event(ScrollWheelEvent {
 			position: point(px(700.), px(420.)),
 			delta: ScrollDelta::Lines(point(0., -1.)),
 			..Default::default()
 		});
+		std::thread::sleep(std::time::Duration::from_millis(8));
 		frame(&mut cx);
-		cx.read_entity(&shell, |shell, _| assert_eq!(shell.list.logical_scroll_top().offset_in_item, px(34.)));
+		let first = offset(&mut cx);
+		assert!(first > px(14.) && first < px(34.), "the first frame moves part of the notch: {first:?}");
+		for _ in 0..100 {
+			if (offset(&mut cx) - px(34.)).abs() < px(0.01) {
+				break;
+			}
+			std::thread::sleep(std::time::Duration::from_millis(8));
+			cx.update(|window, cx| {
+				window.simulate_next_frame(cx);
+			});
+			frame(&mut cx);
+		}
+		let landed = offset(&mut cx);
+		assert!((landed - px(34.)).abs() < px(0.01), "the whole notch lands: {landed:?}");
 	}
 
 	#[test]

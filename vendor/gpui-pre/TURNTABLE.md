@@ -20,7 +20,7 @@ Re-entrant platform frame requests preserve pending force-render state and wake 
 before returning without borrowing the app. Demand-driven backends can therefore retry after
 the in-progress draw unwinds instead of losing the native invalidation.
 
-Only `src/window.rs` is modified. Its modification header identifies this patch. Layout,
+`src/window.rs` carries this boundary; see Smooth wheel scrolling below for the other modified files. Layout,
 input handling, scene primitives, shaders and native renderer interfaces are unchanged.
 
 ## Application compositor use
@@ -50,3 +50,14 @@ four-sample Metal antialiasing nor triple buffering is changed by this applicati
 Regression coverage includes the shared playback/bar models, paused/end/zero-duration
 progress, inherited opacity, cached foreground-overlay changes, same-frame fallback repaint,
 GPUI fallback availability and native layer clipping/scalar/lifetime behavior.
+
+## Smooth wheel scrolling
+
+A mouse-wheel notch arrives as an imprecise, line-based delta. Upstream applied it in one jump;
+browsers ease it in over a few frames instead, which reads as smooth on high-refresh displays.
+`SmoothWheel` (`src/gestures.rs`) queues such deltas and releases them exponentially (40 ms time
+constant, a notch lands in about 120 ms); `Div` scroll containers (`src/elements/div.rs`) and
+`List` (`src/elements/list.rs`) step it once per painted frame and request the next frame until
+it lands. Precise deltas (trackpads, which already arrive per frame with momentum) apply at once
+and cancel any easing in flight; reversing direction drops the rest of the old one. This is
+shared code: every platform's wheel events take the same path.

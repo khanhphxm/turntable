@@ -1,3 +1,5 @@
+// Modified by Turntable from upstream GPUI/Zed; see ../../TURNTABLE.md for changes.
+
 //! A list element that can be used to render a large number of differently sized elements
 //! efficiently. Clients of this API need to ensure that elements outside of the scrolled
 //! area do not change their height for this element to function correctly. If your elements
@@ -73,6 +75,8 @@ struct StateInner {
     measuring_behavior: ListMeasuringBehavior,
     pending_scroll: Option<PendingScroll>,
     follow_state: FollowState,
+    /// Turntable: a mouse-wheel notch still easing in (see `SmoothWheel`).
+    wheel: crate::SmoothWheel,
 }
 
 /// Deferred scroll adjustment applied after the scroll-top item has been remeasured.
@@ -325,6 +329,7 @@ impl ListState {
             measuring_behavior: ListMeasuringBehavior::default(),
             pending_scroll: None,
             follow_state: FollowState::default(),
+            wheel: crate::SmoothWheel::default(),
         })));
         this.splice(0..0, item_count);
         this
@@ -1597,9 +1602,27 @@ impl Element for List {
         let height = bounds.size.height;
         let scroll_top = prepaint.layout.scroll_top;
         let hitbox_id = prepaint.hitbox.id;
+        // Turntable: ease in the rest of a queued wheel notch, a step per frame.
+        let step = {
+            let mut state = self.state.0.borrow_mut();
+            state.wheel.is_active().then(|| state.wheel.step(scheduler::Instant::now()))
+        };
+        if let Some(step) = step {
+            self.state.0.borrow_mut().scroll(&scroll_top, height, step, current_view, window, cx);
+            window.request_animation_frame();
+        }
         let mut accumulated_scroll_delta = ScrollDelta::default();
         window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
             if phase == DispatchPhase::Bubble && hitbox_id.should_handle_scroll(window) {
+                // Turntable: a wheel notch eases in over the next frames; precise deltas
+                // apply at once and cancel any easing still in flight.
+                if !event.delta.precise() {
+                    let delta = event.delta.pixel_delta(px(20.));
+                    list_state.0.borrow_mut().wheel.push(delta, scheduler::Instant::now());
+                    cx.notify(current_view);
+                    return;
+                }
+                list_state.0.borrow_mut().wheel.stop();
                 accumulated_scroll_delta = accumulated_scroll_delta.coalesce(event.delta);
                 let pixel_delta = accumulated_scroll_delta.pixel_delta(px(20.));
                 list_state.0.borrow_mut().scroll(
