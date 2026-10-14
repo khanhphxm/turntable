@@ -124,7 +124,11 @@ fn submitted_search_results_and_recents_survive_restart_only_for_their_account()
 		sub:   "Song • Artist".into(),
 		image: None,
 	};
-	controller.dispatch(Msg::RememberSearch(chosen.clone()));
+	assert_eq!(
+		controller.state().recent_searches(),
+		std::slice::from_ref(&chosen),
+		"selecting a result remembers it without a separate UI message"
+	);
 	drop(controller);
 	let alice = Controller::fixture(&paths, account("alice")).unwrap();
 	assert_eq!(alice.state().recent_searches(), std::slice::from_ref(&chosen));
@@ -139,6 +143,29 @@ fn submitted_search_results_and_recents_survive_restart_only_for_their_account()
 	drop(alice);
 	assert!(Controller::fixture(&paths, account("alice")).unwrap().state().recent_searches().is_empty());
 	assert_eq!(Controller::fixture(&paths, account("bob")).unwrap().state().recent_searches(), &[other]);
+}
+
+#[test]
+fn playing_a_search_result_remembers_it_but_library_playback_does_not() {
+	let (mut controller, _paths, _directory) = fixture("alice");
+	controller.dispatch(Msg::SearchSubmit("fixture query".into()));
+	controller.dispatch(Msg::Navigate(Route::Search));
+	answer(&mut controller, Response::Search {
+		query:   "fixture query".into(),
+		results: SearchResults { tracks: Page { items: data().tracks, ..Page::default() }, ..SearchResults::default() },
+	});
+	controller.dispatch(Msg::PlayRow(controller.state().library.row_target(1).unwrap()));
+	let selected = Tile::track(&data().tracks[1]).unwrap();
+	assert_eq!(controller.state().recent_searches(), std::slice::from_ref(&selected));
+	controller.dispatch(Msg::Navigate(Route::Album("album".into())));
+	answer(&mut controller, Response::Listing {
+		route:   Route::Album("album".into()),
+		offset:  0,
+		listing: Listing { tracks: data().tracks, ..Listing::default() },
+	});
+	controller.dispatch(Msg::Select(controller.state().library.row_target(0).unwrap()));
+	controller.dispatch(Msg::PlayRow(controller.state().library.row_target(0).unwrap()));
+	assert_eq!(controller.state().recent_searches(), &[selected], "ordinary library selections must not become recent searches");
 }
 
 #[test]
