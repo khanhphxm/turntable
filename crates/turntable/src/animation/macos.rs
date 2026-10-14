@@ -176,9 +176,11 @@ impl Node {
 			},
 			(Surface::Text(text), Appearance::Text { label, color: foreground, font_size }) => {
 				let font = NSFont::systemFontOfSize(*font_size);
-				// SAFETY: CATextLayer's font property explicitly accepts NSFont on macOS.
+				let font_ref: *const std::ffi::c_void = std::ptr::from_ref(&*font).cast();
+				// SAFETY: CATextLayer's font property (a CFTypeRef, encoded `^v`) accepts an NSFont on
+				// macOS; the font outlives the call and the layer retains it.
 				unsafe {
-					let _: () = msg_send![&**text, setFont: &*font];
+					let _: () = msg_send![&**text, setFont: font_ref];
 				}
 				text.setFontSize(*font_size);
 				text.setForegroundColor(Some(&color(*foreground)));
