@@ -369,16 +369,21 @@ impl Client {
 			return Ok(body);
 		}
 		let span = trace::start();
-		let (answer, joined) = self.flights.run(&key, || self.request(Method::Get, path, query, None).map(Arc::new));
-		match &answer {
-			Ok(body) if joined => {
-				let reply = trace::Reply { status: 200, bytes: body.len(), via: trace::Via::Joined, ..trace::Reply::default() };
-				span.done("api", "GET", &format!("{}{path}", self.base), reply);
-			},
-			Ok(body) if body.len() <= RECENT_MAX_BYTES => {
-				self.recent.lock().insert(key, body.clone());
-			},
-			_ => {},
+		// The answer is remembered before the flight lands, and a new flight looks again, so a caller
+		// that missed both the memory and the flight still finds the answer.
+		let (answer, joined) = self.flights.run(&key, || {
+			if let Some(body) = self.recent.lock().get(&key) {
+				return Ok(body);
+			}
+			let body = self.request(Method::Get, path, query, None).map(Arc::new)?;
+			if body.len() <= RECENT_MAX_BYTES {
+				self.recent.lock().insert(key.clone(), body.clone());
+			}
+			Ok(body)
+		});
+		if let (Ok(body), true) = (&answer, joined) {
+			let reply = trace::Reply { status: 200, bytes: body.len(), via: trace::Via::Joined, ..trace::Reply::default() };
+			span.done("api", "GET", &format!("{}{path}", self.base), reply);
 		}
 		answer
 	}
