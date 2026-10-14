@@ -20,6 +20,7 @@ pub const BARS: [(u64, f32); 4] = [(900, 0.), (700, 0.45), (1100, 0.2), (800, 0.
 pub struct Motion {
 	pub anchor:      Anchor,
 	pub duration_ms: u64,
+	#[cfg_attr(not(any(target_os = "macos", test)), expect(dead_code, reason = "only the native compositor pauses on it"))]
 	pub playing:     bool,
 }
 
@@ -35,6 +36,8 @@ pub struct Clock {
 	link: native::Link,
 }
 
+// Every platform shares this interface; only macOS keeps native state in `self`.
+#[cfg_attr(not(target_os = "macos"), expect(clippy::unused_self, reason = "the GPUI fallback is stateless"))]
 impl Clock {
 	pub fn element(&self, label: gpui_kit::SharedString) -> AnyElement {
 		#[cfg(target_os = "macos")]
@@ -103,6 +106,7 @@ pub struct Progress {
 	link: native::Link,
 }
 
+#[cfg_attr(not(target_os = "macos"), expect(clippy::unused_self, reason = "the GPUI fallback is stateless"))]
 impl Progress {
 	pub fn element(&self, motion: Motion, hovered: bool, dragging: Option<f32>) -> AnyElement {
 		#[cfg(target_os = "macos")]
