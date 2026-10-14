@@ -45,7 +45,7 @@ use librespot_core::{
 	spclient::TransferRequest,
 };
 use librespot_playback::{
-	config::{Bitrate, PlayerConfig},
+	config::PlayerConfig,
 	mixer::{Mixer, MixerConfig, softmixer::SoftMixer},
 	player::{Player as Decoder, PlayerEvent},
 };
@@ -67,17 +67,19 @@ use crate::audio::PcmWriter;
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
 	/// The Connect device name.
-	pub device_name: String,
+	pub device_name:       String,
 	/// The volume it starts at (0 to 100).
-	pub volume:      u8,
+	pub volume:            u8,
 	/// Where the sign-in and the device id are kept.
-	pub state_dir:   PathBuf,
+	pub state_dir:         PathBuf,
 	/// Where audio files are cached.
-	pub cache_dir:   PathBuf,
+	pub cache_dir:         PathBuf,
 	/// The audio cache's size limit; 0 is no cache at all.
-	pub cache_mb:    u32,
+	pub cache_mb:          u32,
 	/// HTTP CONNECT proxy; empty preserves environment defaults.
-	pub proxy:       String,
+	pub proxy:             String,
+	/// Preferred quality for newly loaded tracks.
+	pub streaming_quality: crate::app::settings::StreamingQuality,
 }
 
 /// The browser sign-in's registered loopback redirect.
@@ -113,6 +115,7 @@ pub struct Engine {
 	runtime:     Option<Runtime>,
 	session:     Session,
 	spirc:       Arc<Spirc>,
+	decoder:     Arc<Decoder>,
 	streams:     Option<Streams>,
 	/// Spirc's task has ended (signed out elsewhere, the session dropped).
 	done:        Arc<AtomicBool>,
@@ -228,7 +231,7 @@ impl Engine {
 		let transitions = Arc::new(Transitions::default());
 		let sink_transitions = transitions.clone();
 		let output_volume = mixer.get_soft_volume();
-		let player_config = PlayerConfig { bitrate: Bitrate::Bitrate320, ..PlayerConfig::default() };
+		let player_config = PlayerConfig { bitrate: config.streaming_quality.bitrate(), ..PlayerConfig::default() };
 		let decoder = Decoder::new(player_config, session.clone(), mixer.get_soft_volume(), move || {
 			Box::new(RingSink::new(writer, sink_transitions, output_volume))
 		});
@@ -252,9 +255,12 @@ impl Engine {
 		let result = runtime.block_on(async {
 			tokio::try_join!(
 				async {
-					network_timeout(NETWORK_TIMEOUT, Spirc::new(connect, session.clone(), credentials, decoder, mixer, Some(snap_tx)))
-						.await
-						.map_err(|error| premium::connection_error(error, &session, account.as_deref()))
+					network_timeout(
+						NETWORK_TIMEOUT,
+						Spirc::new(connect, session.clone(), credentials, decoder.clone(), mixer, Some(snap_tx)),
+					)
+					.await
+					.map_err(|error| premium::connection_error(error, &session, account.as_deref()))
 				},
 				premium::wait(&session, account.as_deref()),
 			)
@@ -283,6 +289,7 @@ impl Engine {
 			runtime: Some(runtime),
 			session,
 			spirc: Arc::new(spirc),
+			decoder,
 			streams: Some(Streams { player, snapshots }),
 			done,
 			stop,
@@ -291,6 +298,11 @@ impl Engine {
 			volume: config.volume,
 			transitions,
 		})
+	}
+
+	/// Updates only future loads, without touching the current decoder or audio output.
+	pub fn set_streaming_quality(&self, quality: crate::app::settings::StreamingQuality) {
+		self.decoder.set_bitrate(quality.bitrate());
 	}
 
 	/// The client the UI drives the player with; `deliver` gets every event, on the engine's

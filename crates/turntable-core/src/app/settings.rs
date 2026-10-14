@@ -87,10 +87,44 @@ impl Default for Playback {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Audio {
-	pub normalize: Normalize,
-	pub mono:      bool,
+	pub normalize:         Normalize,
+	/// Preferred quality for the next track; the current decoder is left alone.
+	pub streaming_quality: StreamingQuality,
+	pub mono:              bool,
 	/// The output device the user picked; `None` plays on the system's default.
-	pub output:    Option<Output>,
+	pub output:            Option<Output>,
+}
+
+/// Streaming qualities supported by the player, named as in Spotify's settings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamingQuality {
+	Normal,
+	High,
+	#[default]
+	#[serde(other)]
+	VeryHigh,
+}
+
+impl StreamingQuality {
+	pub const ALL: [Self; 3] = [Self::Normal, Self::High, Self::VeryHigh];
+
+	pub fn label(self) -> &'static str {
+		match self {
+			Self::Normal => "Normal",
+			Self::High => "High",
+			Self::VeryHigh => "Very high",
+		}
+	}
+
+	pub(crate) fn bitrate(self) -> librespot_playback::config::Bitrate {
+		use librespot_playback::config::Bitrate;
+		match self {
+			Self::Normal => Bitrate::Bitrate96,
+			Self::High => Bitrate::Bitrate160,
+			Self::VeryHigh => Bitrate::Bitrate320,
+		}
+	}
 }
 
 /// An output device by the identifier CoreAudio keeps across reboots, with the name it had.
@@ -175,6 +209,7 @@ pub enum Pref {
 	/// Seconds of overlap on automatic transitions, clamped to `0..=MAX_CROSSFADE`.
 	Crossfade(u8),
 	Normalize(Normalize),
+	StreamingQuality(StreamingQuality),
 	Mono(bool),
 	/// A device to play on (`None`: the system's default).
 	Output(Option<Output>),
@@ -196,6 +231,7 @@ impl Prefs {
 			Pref::Explicit(on) => self.playback.explicit = *on,
 			Pref::Crossfade(seconds) => self.playback.crossfade = (*seconds).min(MAX_CROSSFADE),
 			Pref::Normalize(level) => self.audio.normalize = *level,
+			Pref::StreamingQuality(quality) => self.audio.streaming_quality = *quality,
 			Pref::Mono(on) => self.audio.mono = *on,
 			Pref::Output(device) => self.audio.output.clone_from(device),
 			Pref::StartupVolume(volume) => self.device.volume = (*volume).min(100),
@@ -229,6 +265,34 @@ impl Settings {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn streaming_quality_round_trips_and_unknown_values_preserve_other_settings() {
+		let directory = tempfile::tempdir().unwrap();
+		let dir = directory.path();
+		let mut settings = Settings::default();
+		assert_eq!(settings.prefs.audio.streaming_quality, StreamingQuality::VeryHigh);
+		for quality in StreamingQuality::ALL {
+			settings.prefs.set(&Pref::StreamingQuality(quality));
+			settings.save(dir).unwrap();
+			assert_eq!(Settings::load(dir), settings);
+		}
+		fs::write(dir.join("settings.json"), br#"{"audio":{"streaming_quality":"future","mono":true},"eq_preset":"rock"}"#).unwrap();
+		let loaded = Settings::load(dir);
+		assert_eq!(loaded.prefs.clone().sanitized().audio.streaming_quality, StreamingQuality::VeryHigh);
+		assert!(loaded.prefs.audio.mono);
+		assert_eq!(loaded.eq_preset.as_deref(), Some("rock"));
+		fs::write(dir.join("settings.json"), br#"{"audio":{"mono":true}}"#).unwrap();
+		assert_eq!(Settings::load(dir).prefs.audio.streaming_quality, StreamingQuality::VeryHigh);
+	}
+
+	#[test]
+	fn streaming_quality_maps_to_supported_bitrates() {
+		use librespot_playback::config::Bitrate;
+		assert_eq!(StreamingQuality::Normal.bitrate(), Bitrate::Bitrate96);
+		assert_eq!(StreamingQuality::High.bitrate(), Bitrate::Bitrate160);
+		assert_eq!(StreamingQuality::VeryHigh.bitrate(), Bitrate::Bitrate320);
+	}
 
 	#[test]
 	fn eq_integer_db_settings_migrate_and_half_db_values_survive_restart() {

@@ -37,6 +37,16 @@ mod tests {
 	use crate::app::Msg;
 
 	#[test]
+	fn streaming_quality_applies_without_reconnecting() {
+		use crate::app::settings::StreamingQuality;
+		let mut state = State::default();
+		for quality in StreamingQuality::ALL {
+			assert!(matches!(state.set_pref(&Pref::StreamingQuality(quality)).as_slice(), [Effect::ApplyPrefs]));
+			assert_eq!(state.prefs.audio.streaming_quality, quality);
+		}
+	}
+
+	#[test]
 	fn proxy_changes_validate_and_restart_only_when_changed() {
 		let mut state = State::default();
 		assert!(state.set_pref(&Pref::Proxy("socks5://host:1080".into())).is_empty());

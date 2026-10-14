@@ -98,6 +98,9 @@ impl Controller {
 	pub(super) fn apply_prefs(&mut self) {
 		self.push_stage();
 		self.reconcile_output();
+		if let Some(engine) = &self.engine {
+			engine.set_streaming_quality(self.state.prefs.audio.streaming_quality);
+		}
 		if !self.state.prefs.playback.autoplay && self.state.logged_in {
 			// What follows the song playing decides whether it is the last.
 			self.send_player(Command::GetQueue);
@@ -129,6 +132,10 @@ impl Controller {
 	/// Notes what the engine that just started was started with.
 	pub(super) fn on_engine_started(&mut self) {
 		self.health_at = Instant::now() + HEALTH_EVERY;
+		// A settings edit while sign-in was in flight must reach the newly started player.
+		if let Some(engine) = &self.engine {
+			engine.set_streaming_quality(self.state.prefs.audio.streaming_quality);
+		}
 	}
 
 	pub(super) fn start_engine(&mut self) {
@@ -145,10 +152,11 @@ impl Controller {
 		self.state.notice = Some("Starting the player…".into());
 		self.retry_start_at = None;
 		let launch = Launch {
-			name:     self.engine_name(),
-			volume:   self.state.prefs.device.volume,
-			cache_mb: self.state.prefs.device.cache_mb,
-			proxy:    self.state.prefs.network.proxy.clone(),
+			name:              self.engine_name(),
+			volume:            self.state.prefs.device.volume,
+			cache_mb:          self.state.prefs.device.cache_mb,
+			proxy:             self.state.prefs.network.proxy.clone(),
+			streaming_quality: self.state.prefs.audio.streaming_quality,
 		};
 		// The output starts now (it plays silence-free nothing until audio arrives); the decoder
 		// gets the other end once the player is online.
@@ -435,10 +443,11 @@ impl Controller {
 }
 /// What the player is started with.
 struct Launch {
-	name:     String,
-	volume:   u8,
-	cache_mb: u32,
-	proxy:    String,
+	name:              String,
+	volume:            u8,
+	cache_mb:          u32,
+	proxy:             String,
+	streaming_quality: crate::app::settings::StreamingQuality,
 }
 
 fn start_engine(
@@ -449,12 +458,13 @@ fn start_engine(
 	authorization: &crate::engine::StartAuthorization,
 ) -> Result<Engine, StartError> {
 	let config = EngineConfig {
-		device_name: launch.name.clone(),
-		volume:      launch.volume,
-		state_dir:   paths.config.clone(),
-		cache_dir:   paths.cache.join("player"),
-		cache_mb:    launch.cache_mb,
-		proxy:       launch.proxy.clone(),
+		device_name:       launch.name.clone(),
+		volume:            launch.volume,
+		state_dir:         paths.config.clone(),
+		cache_dir:         paths.cache.join("player"),
+		cache_mb:          launch.cache_mb,
+		proxy:             launch.proxy.clone(),
+		streaming_quality: launch.streaming_quality,
 	};
 	Engine::start(&config, writer, progress, authorization).map_err(|error| {
 		if error.get_ref().is_some_and(|source| source.is::<crate::engine::SignInTimedOut>()) {

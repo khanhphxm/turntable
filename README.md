@@ -20,6 +20,7 @@
 - Synced lyrics
 - Spotify Connect: play here or on your other devices
 - Equalizer, loudness normalization and crossfade
+- Streaming quality: Normal, High or Very high (default); changes apply from the next track without restarting or interrupting playback
 - Media keys and keyboard shortcuts
 
 <!-- screenshot: album -->

@@ -8,6 +8,17 @@ Compared with the registry source:
 
 - `src/player.rs` uses a single-worker Tokio runtime on the dedicated player
   thread instead of one worker per core.
+- `Player::set_bitrate` changes future track loaders on the player's command
+  queue without resetting the sink or touching the current decoder. Existing
+  successor preloads are replaced at the new quality; decoder reuse on repeat
+  or explicit loads checks the originally requested bitrate. In-flight current
+  loads, seeks and pause/resume keep their decoder.
+- File selection retains upstream's first-available format order:
+  - Normal: Vorbis 96, MP3 96, Vorbis 160, MP3 160, MP3 256, Vorbis 320, MP3 320.
+  - High: Vorbis 160, MP3 160, Vorbis 96, MP3 96, MP3 256, Vorbis 320, MP3 320.
+  - Very high: Vorbis 320, MP3 320, MP3 256, Vorbis 160, MP3 160, Vorbis 96, MP3 96.
+  The selected quality is a preference, not a cap. Cache entries are keyed by
+  file ID, so a cached lower-quality file cannot mask a newly selected format.
 - The player exposes automatic `load_next` separately from manual loads. It
   emits `PlayerEvent::Crossfade` at an eligible overlap boundary, hands the
   outgoing preloaded decoder and download lifetime to the opted-in sink, and

@@ -118,6 +118,7 @@ enum PlayerCommand {
     Stop,
     Seek(u32),
     SetSession(Session),
+    SetBitrate(Bitrate),
     AddEventSender(mpsc::UnboundedSender<PlayerEvent>),
     SetSinkEventCallback(Option<SinkEventCallback>),
     EmitVolumeChangedEvent(u16),
@@ -606,6 +607,11 @@ impl Player {
         self.command(PlayerCommand::SetSession(session));
     }
 
+    /// turntable: applies to subsequent loads, never replacing the current decoder.
+    pub fn set_bitrate(&self, bitrate: Bitrate) {
+        self.command(PlayerCommand::SetBitrate(bitrate));
+    }
+
     pub fn get_player_event_channel(&self) -> PlayerEventChannel {
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
         self.command(PlayerCommand::AddEventSender(event_sender));
@@ -696,6 +702,7 @@ impl Drop for Player {
 
 struct PlayerLoadedTrackData {
     decoder: Decoder,
+    requested_bitrate: Bitrate,
     normalisation_data: NormalisationData,
     stream_loader_controller: StreamLoaderController,
     audio_item: AudioItem,
@@ -755,6 +762,7 @@ enum PlayerState {
         track_id: SpotifyUri,
         play_request_id: u64,
         decoder: Decoder,
+        requested_bitrate: Bitrate,
         audio_item: AudioItem,
         normalisation_data: NormalisationData,
         normalisation_factor: f64,
@@ -769,6 +777,7 @@ enum PlayerState {
         track_id: SpotifyUri,
         play_request_id: u64,
         decoder: Decoder,
+        requested_bitrate: Bitrate,
         normalisation_data: NormalisationData,
         audio_item: AudioItem,
         normalisation_factor: f64,
@@ -838,6 +847,7 @@ impl PlayerState {
                 track_id,
                 play_request_id,
                 decoder,
+                requested_bitrate,
                 duration_ms,
                 bytes_per_second,
                 normalisation_data,
@@ -852,6 +862,7 @@ impl PlayerState {
                     play_request_id,
                     loaded_track: PlayerLoadedTrackData {
                         decoder,
+                        requested_bitrate,
                         normalisation_data,
                         stream_loader_controller,
                         audio_item,
@@ -877,6 +888,7 @@ impl PlayerState {
                 track_id,
                 play_request_id,
                 decoder,
+                requested_bitrate,
                 audio_item,
                 normalisation_data,
                 normalisation_factor,
@@ -891,6 +903,7 @@ impl PlayerState {
                     track_id,
                     play_request_id,
                     decoder,
+                    requested_bitrate,
                     audio_item,
                     normalisation_data,
                     normalisation_factor,
@@ -919,6 +932,7 @@ impl PlayerState {
                 track_id,
                 play_request_id,
                 decoder,
+                requested_bitrate,
                 audio_item,
                 normalisation_data,
                 normalisation_factor,
@@ -934,6 +948,7 @@ impl PlayerState {
                     track_id,
                     play_request_id,
                     decoder,
+                    requested_bitrate,
                     audio_item,
                     normalisation_data,
                     normalisation_factor,
@@ -1259,6 +1274,7 @@ impl PlayerTrackLoader {
 
             return Some(PlayerLoadedTrackData {
                 decoder,
+                requested_bitrate: self.config.bitrate,
                 normalisation_data,
                 stream_loader_controller,
                 audio_item,
@@ -1339,6 +1355,7 @@ impl PlayerTrackLoader {
 
         Some(PlayerLoadedTrackData {
             decoder,
+            requested_bitrate: self.config.bitrate,
             normalisation_data,
             stream_loader_controller,
             bytes_per_second,
@@ -2004,6 +2021,7 @@ impl PlayerInternal {
                 track_id,
                 play_request_id,
                 decoder: loaded_track.decoder,
+                requested_bitrate: loaded_track.requested_bitrate,
                 audio_item: loaded_track.audio_item,
                 normalisation_data: loaded_track.normalisation_data,
                 normalisation_factor,
@@ -2023,6 +2041,7 @@ impl PlayerInternal {
                 track_id: track_id.clone(),
                 play_request_id,
                 decoder: loaded_track.decoder,
+                requested_bitrate: loaded_track.requested_bitrate,
                 audio_item: loaded_track.audio_item,
                 normalisation_data: loaded_track.normalisation_data,
                 normalisation_factor,
@@ -2072,10 +2091,11 @@ impl PlayerInternal {
         // This is the case if we're repeating the same track again.
         if let PlayerState::EndOfTrack {
             track_id: previous_track_id,
+            loaded_track,
             ..
         } = &self.state
         {
-            if *previous_track_id == track_id {
+            if *previous_track_id == track_id && loaded_track.requested_bitrate == self.config.bitrate {
                 let mut loaded_track = match mem::replace(&mut self.state, PlayerState::Invalid) {
                     PlayerState::EndOfTrack { loaded_track, .. } => loaded_track,
                     _ => {
@@ -2107,16 +2127,18 @@ impl PlayerInternal {
             track_id: ref current_track_id,
             ref mut stream_position_ms,
             ref mut decoder,
+            requested_bitrate,
             ..
         }
         | PlayerState::Paused {
             track_id: ref current_track_id,
             ref mut stream_position_ms,
             ref mut decoder,
+            requested_bitrate,
             ..
         } = self.state
         {
-            if *current_track_id == track_id {
+            if *current_track_id == track_id && requested_bitrate == self.config.bitrate {
                 // we can use the current decoder. Ensure it's at the correct position.
                 if position_ms != *stream_position_ms {
                     // This may be blocking.
@@ -2130,6 +2152,7 @@ impl PlayerInternal {
                 if let PlayerState::Playing {
                     stream_position_ms,
                     decoder,
+                    requested_bitrate,
                     audio_item,
                     stream_loader_controller,
                     bytes_per_second,
@@ -2141,6 +2164,7 @@ impl PlayerInternal {
                 | PlayerState::Paused {
                     stream_position_ms,
                     decoder,
+                    requested_bitrate,
                     audio_item,
                     stream_loader_controller,
                     bytes_per_second,
@@ -2152,6 +2176,7 @@ impl PlayerInternal {
                 {
                     let loaded_track = PlayerLoadedTrackData {
                         decoder,
+                        requested_bitrate,
                         normalisation_data,
                         stream_loader_controller,
                         audio_item,
@@ -2289,8 +2314,15 @@ impl PlayerInternal {
         } = &self.state
         {
             if *current_track_id == track_id {
+                // A quality change must also reload a repeated song.
+                let same_quality = match &self.state {
+                    PlayerState::Playing { requested_bitrate, .. }
+                    | PlayerState::Paused { requested_bitrate, .. } => *requested_bitrate == self.config.bitrate,
+                    PlayerState::EndOfTrack { loaded_track, .. } => loaded_track.requested_bitrate == self.config.bitrate,
+                    _ => false,
+                };
                 // we already have the requested track loaded.
-                preload_track = false;
+                preload_track = !same_quality;
             }
         }
 
@@ -2429,6 +2461,22 @@ impl PlayerInternal {
 
             PlayerCommand::SetSession(session) => self.session = session,
 
+            PlayerCommand::SetBitrate(bitrate) => {
+                if self.config.bitrate != bitrate {
+                    self.config.bitrate = bitrate;
+                    // Re-prime the successor at the new quality, even if it was ready.
+                    // Do not reset the sink, current state, or a reserved crossfade.
+                    let track_id = match mem::replace(&mut self.preload, PlayerPreload::None) {
+                        PlayerPreload::Loading { track_id, .. }
+                        | PlayerPreload::Ready { track_id, .. } => Some(track_id),
+                        PlayerPreload::None => None,
+                    };
+                    if let Some(track_id) = track_id {
+                        self.handle_command_preload(track_id);
+                    }
+                }
+            }
+
             PlayerCommand::AddEventSender(sender) => self.event_senders.push(sender),
 
             PlayerCommand::SetSinkEventCallback(callback) => self.sink_event_callback = callback,
@@ -2522,6 +2570,14 @@ impl PlayerInternal {
             .retain(|sender| sender.send(event.clone()).is_ok());
     }
 
+    fn track_loader(&self) -> PlayerTrackLoader {
+        PlayerTrackLoader {
+            session: self.session.clone(),
+            config: self.config.clone(),
+            local_file_lookup: self.local_file_lookup.clone(),
+        }
+    }
+
     fn load_track(
         &mut self,
         spotify_uri: SpotifyUri,
@@ -2533,11 +2589,7 @@ impl PlayerInternal {
         // easily. Instead we spawn a thread to do the work and return a one-shot channel as the
         // future to work with.
 
-        let loader = PlayerTrackLoader {
-            session: self.session.clone(),
-            config: self.config.clone(),
-            local_file_lookup: self.local_file_lookup.clone(),
-        };
+        let loader = self.track_loader();
 
         let (result_tx, result_rx) = oneshot::channel();
 
@@ -2625,6 +2677,7 @@ impl fmt::Debug for PlayerCommand {
             PlayerCommand::Stop => f.debug_tuple("Stop").finish(),
             PlayerCommand::Seek(position) => f.debug_tuple("Seek").field(&position).finish(),
             PlayerCommand::SetSession(_) => f.debug_tuple("SetSession").finish(),
+            PlayerCommand::SetBitrate(bitrate) => f.debug_tuple("SetBitrate").field(bitrate).finish(),
             PlayerCommand::AddEventSender(_) => f.debug_tuple("AddEventSender").finish(),
             PlayerCommand::SetSinkEventCallback(_) => {
                 f.debug_tuple("SetSinkEventCallback").finish()
@@ -2788,5 +2841,213 @@ where
 
     fn byte_len(&self) -> Option<u64> {
         Some(self.length)
+    }
+}
+
+#[cfg(test)]
+mod quality_tests {
+    use super::*;
+    use crate::{
+        audio_backend::SinkResult,
+        mixer::{Mixer, MixerConfig, softmixer::SoftMixer},
+    };
+
+    struct CountingSink(Arc<AtomicUsize>);
+
+    impl Sink for CountingSink {
+        fn start(&mut self) -> SinkResult<()> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        fn stop(&mut self) -> SinkResult<()> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        fn reset(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+        fn new_track(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+        fn write(&mut self, _: AudioPacket, _: &mut Converter) -> SinkResult<()> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    struct TestDecoder;
+
+    impl AudioDecoder for TestDecoder {
+        fn seek(&mut self, position_ms: u32) -> crate::decoder::DecoderResult<u32> {
+            Ok(position_ms)
+        }
+        fn next_packet(
+            &mut self,
+        ) -> crate::decoder::DecoderResult<Option<(AudioPacketPosition, AudioPacket)>> {
+            Ok(None)
+        }
+    }
+
+    fn track() -> SpotifyUri {
+        SpotifyUri::Local {
+            artist: "artist".into(),
+            album_title: "album".into(),
+            track_title: "track".into(),
+            duration: Duration::from_secs(1),
+        }
+    }
+
+    fn loaded(bitrate: Bitrate) -> PlayerLoadedTrackData {
+        PlayerLoadedTrackData {
+            decoder: Box::new(TestDecoder),
+            requested_bitrate: bitrate,
+            normalisation_data: NormalisationData::default(),
+            stream_loader_controller: StreamLoaderController::from_local_file(0),
+            audio_item: AudioItem {
+                track_id: track(),
+                uri: "spotify:local:artist:album:track:1".into(),
+                name: "track".into(),
+                duration_ms: 1000,
+                files: Default::default(),
+                covers: vec![],
+                language: vec![],
+                is_explicit: false,
+                availability: Ok(()),
+                alternatives: None,
+                unique_fields: UniqueFields::Local {
+                    artists: None,
+                    album: None,
+                    album_artists: None,
+                    number: None,
+                    disc_number: None,
+                    path: Default::default(),
+                },
+            },
+            bytes_per_second: 1,
+            duration_ms: 1000,
+            stream_position_ms: 42,
+            is_explicit: false,
+        }
+    }
+
+    fn player(calls: Arc<AtomicUsize>) -> PlayerInternal {
+        let config = PlayerConfig {
+            bitrate: Bitrate::Bitrate320,
+            ditherer: None,
+            ..PlayerConfig::default()
+        };
+        PlayerInternal {
+            session: Session::new(Default::default(), None),
+            config,
+            commands: mpsc::unbounded_channel().1,
+            load_handles: Arc::new(Mutex::new(HashMap::new())),
+            state: PlayerState::Stopped,
+            preload: PlayerPreload::None,
+            pending_crossfade: None,
+            sink: Box::new(CountingSink(calls)),
+            sink_status: SinkStatus::Closed,
+            sink_event_callback: None,
+            volume_getter: SoftMixer::open(MixerConfig::default())
+                .unwrap()
+                .get_soft_volume(),
+            event_senders: vec![],
+            converter: Converter::new(None),
+            normalisation_integrators: [0.0; 2],
+            normalisation_peaks: [0.0; 2],
+            normalisation_channel: 0,
+            normalisation_knee_factor: 0.0,
+            auto_normalise_as_album: false,
+            player_id: 0,
+            play_request_id_generator: SeqGenerator::new(0),
+            last_progress_update: Instant::now(),
+            last_packet_duration_ms: 0,
+            local_file_lookup: Arc::new(create_local_file_lookup(&[])),
+        }
+    }
+
+    #[test]
+    fn quality_command_keeps_current_playback_and_next_loader_uses_new_bitrate() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _enter = runtime.enter();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut internal = player(calls.clone());
+        internal.start_playback(track(), 1, loaded(Bitrate::Bitrate320), true);
+        let old_loader = internal.track_loader();
+        let before = calls.load(Ordering::Relaxed);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = Player {
+            commands: Some(tx),
+            thread_handle: None,
+        };
+        handle.set_bitrate(Bitrate::Bitrate96);
+        internal.handle_command(rx.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            before,
+            "quality changes must not touch the sink"
+        );
+        assert!(matches!(
+            internal.state,
+            PlayerState::Playing {
+                requested_bitrate: Bitrate::Bitrate320,
+                stream_position_ms: 42,
+                ..
+            }
+        ));
+        assert_eq!(old_loader.config.bitrate, Bitrate::Bitrate320);
+        assert_eq!(internal.track_loader().config.bitrate, Bitrate::Bitrate96);
+        internal.handle_command(PlayerCommand::Pause).unwrap();
+        internal.handle_command(PlayerCommand::Play).unwrap();
+        assert!(matches!(
+            internal.state,
+            PlayerState::Playing {
+                requested_bitrate: Bitrate::Bitrate320,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn changed_quality_replaces_ready_and_pending_preloads_and_repeated_decoders() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _enter = runtime.enter();
+        let mut internal = player(Arc::new(AtomicUsize::new(0)));
+        internal.preload = PlayerPreload::Ready {
+            track_id: track(),
+            loaded_track: Box::new(loaded(Bitrate::Bitrate320)),
+        };
+        internal
+            .handle_command(PlayerCommand::SetBitrate(Bitrate::Bitrate320))
+            .unwrap();
+        assert!(
+            matches!(internal.preload, PlayerPreload::Ready { .. }),
+            "unchanged quality keeps the preload"
+        );
+        internal
+            .handle_command(PlayerCommand::SetBitrate(Bitrate::Bitrate160))
+            .unwrap();
+        assert!(matches!(internal.preload, PlayerPreload::Loading { .. }));
+        internal
+            .handle_command(PlayerCommand::SetBitrate(Bitrate::Bitrate96))
+            .unwrap();
+        assert!(matches!(internal.preload, PlayerPreload::Loading { .. }));
+        assert_eq!(internal.track_loader().config.bitrate, Bitrate::Bitrate96);
+        internal.state = PlayerState::EndOfTrack {
+            track_id: track(),
+            play_request_id: 1,
+            loaded_track: loaded(Bitrate::Bitrate320),
+        };
+        internal
+            .handle_command(PlayerCommand::Load {
+                track_id: track(),
+                play: true,
+                position_ms: 0,
+                automatic: true,
+            })
+            .unwrap();
+        assert!(
+            matches!(internal.state, PlayerState::Loading { .. }),
+            "repeat must not reuse an old-quality decoder"
+        );
     }
 }

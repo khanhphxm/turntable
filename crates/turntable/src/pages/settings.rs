@@ -16,7 +16,7 @@ use turntable_core::{
 	Msg,
 	app::{
 		rules::{Sleep, SleepChoice},
-		settings::{Output, Pref},
+		settings::{Output, Pref, StreamingQuality},
 	},
 	audio::Normalize,
 };
@@ -134,6 +134,11 @@ impl Shell {
 			]),
 			("Audio", vec![
 				("Output".into(), "Where this computer plays", self.output_menu(cx).into_any_element()),
+				(
+					"Streaming quality".into(),
+					"Applies from the next track",
+					quality_chips(p.audio.streaming_quality, cx).into_any_element(),
+				),
 				(
 					"Normalize volume".into(),
 					"Play every track at the same loudness",
@@ -276,6 +281,20 @@ fn normalize_chips(current: Normalize, cx: &mut Context<'_, Shell>) -> Div {
 			Normalize::Loud => "Loud",
 		};
 		chip(("normalize", i), label, current == level, cx.listener(move |this, _, _, cx| this.send(Msg::Pref(Pref::Normalize(level)), cx)))
+	}))
+}
+
+fn quality_chips(current: StreamingQuality, cx: &mut Context<'_, Shell>) -> Div {
+	div().flex().gap_2().children(StreamingQuality::ALL.iter().enumerate().map(|(i, quality)| {
+		let quality = *quality;
+		chip(
+			("streaming-quality", i),
+			quality.label(),
+			current == quality,
+			cx.listener(move |this, _, _, cx| {
+				this.send(Msg::Pref(Pref::StreamingQuality(quality)), cx);
+			}),
+		)
 	}))
 }
 
