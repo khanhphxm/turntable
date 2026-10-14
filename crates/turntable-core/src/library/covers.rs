@@ -15,7 +15,6 @@ use std::{
 };
 
 use parking_lot::Mutex;
-use sha2::{Digest, Sha256};
 
 use crate::net::{Profile, cache::Cache, trace};
 
@@ -138,7 +137,7 @@ fn fetch_with_agent(url: &str, agent: &ureq::Agent) -> Option<(Vec<u8>, String)>
 
 /// The file a URL is cached in: the hex of its hash.
 fn file_name(url: &str) -> String {
-	format!("{:x}", Sha256::digest(url.as_bytes()))
+	crate::sha256_hex(url.as_bytes())
 }
 
 /// The image type of `bytes` by their first bytes (`None`: not an image, so not a cover we cached).

@@ -18,7 +18,6 @@ use std::{
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::{Home, Listing, Response, Route, Tile};
 use crate::{
@@ -78,7 +77,7 @@ impl Store {
 	}
 
 	fn path(&self, user_id: &str) -> PathBuf {
-		self.dir.join(format!("{:x}.json", Sha256::digest(user_id.as_bytes())))
+		self.dir.join(format!("{}.json", crate::sha256_hex(user_id.as_bytes())))
 	}
 
 	/// A new authorization without a verified identity cannot borrow the previous account's data.

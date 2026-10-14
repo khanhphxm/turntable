@@ -10,7 +10,6 @@ use std::{
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::{session::Reader, snapshot::Store};
 use crate::{
@@ -52,7 +51,7 @@ struct Saved {
 }
 
 fn path(config: &Path, account: &str) -> PathBuf {
-	config.join("playback").join(format!("{:x}.json", Sha256::digest(account.as_bytes())))
+	config.join("playback").join(format!("{}.json", crate::sha256_hex(account.as_bytes())))
 }
 
 pub(super) fn remember(config: &Path, position: PlaybackPosition) -> io::Result<()> {

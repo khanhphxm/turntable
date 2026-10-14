@@ -33,3 +33,14 @@ pub fn forget_sign_in(paths: &Paths) -> std::io::Result<()> {
 	let membership = library::added::clear(&paths.cache);
 	credentials.and(snapshot).and(membership)
 }
+
+/// Lowercase hex SHA-256 of `data`: the stable file name for per-account and per-URL files.
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
+	use std::fmt::Write;
+
+	use sha2::{Digest, Sha256};
+	Sha256::digest(data).iter().fold(String::with_capacity(64), |mut hex, byte| {
+		let _ = write!(hex, "{byte:02x}");
+		hex
+	})
+}
