@@ -213,6 +213,8 @@ pub struct Shell {
 	pub toast_gone:           Option<u32>,
 	/// A pump is queued to fetch covers rendering found missing (see [`Shell::cover_source`]).
 	cover_fetch_queued:       std::cell::Cell<bool>,
+	/// The page header's artwork on screen, by page (see `Shell::header_art_url`).
+	pub header_art:           std::cell::RefCell<Option<(Route, String)>>,
 }
 
 impl Focusable for Shell {
@@ -329,6 +331,7 @@ impl Shell {
 			toast_shown: None,
 			toast_gone: None,
 			cover_fetch_queued: std::cell::Cell::new(false),
+			header_art: std::cell::RefCell::new(None),
 		};
 		shell.send(Msg::Navigate(Route::Home), cx);
 		shell
