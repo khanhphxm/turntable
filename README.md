@@ -20,7 +20,7 @@
 - Synced lyrics
 - Spotify Connect: play here or on your other devices
 - Equalizer, loudness normalization and crossfade
-- Streaming quality: Normal, High or Very high (default); changes apply from the next track without restarting or interrupting playback
+- Streaming quality up to 320 kbps
 - Media keys and keyboard shortcuts
 
 <!-- screenshot: album -->
@@ -64,14 +64,6 @@ scripts/install-linux-deps.sh
 ```
 
 **Windows** builds with the MSVC toolchain.
-
-The UI uses the platform's built-in font family, without enumerating installed fonts at startup.
-Artwork is decoded into physical-pixel buckets matching row thumbnails, 164 px shelf covers,
-page headers and the default right panel at 1x and 2x display scales.
-Only visible render regions retain full-size artwork. Offscreen covers release their GPU atlas
-entries and keep small previews plus encoded sources in a 4 MiB warm cache, so recent Back
-visits show artwork immediately while full-resolution pixels are restored. Older covers reload
-from the on-disk cache; reclamation does not add an idle timer.
 
 ## Privacy
 
