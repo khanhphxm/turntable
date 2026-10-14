@@ -680,17 +680,18 @@ pub fn run_core(shell: &Entity<Shell>, wake: smol::channel::Receiver<()>, cx: &m
 	.detach();
 }
 
+impl Shell {
+	/// Tells native animations whether an overlay covers the window, so they fall back to GPUI.
+	fn mark_obscured(&self, window: &mut Window, cx: &mut Context<'_, Self>) {
+		let toast = self.st().toast.as_ref().is_some_and(|(id, _)| Some(*id) != self.toast_gone);
+		let covered = self.st().dialog.is_some() || self.menu.is_some() || self.shortcuts_open || self.search_open || toast;
+		crate::animation::set_obscured(window, cx, covered);
+	}
+}
+
 impl Render for Shell {
 	fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-		crate::animation::set_obscured(
-			window,
-			cx,
-			self.st().dialog.is_some()
-				|| self.menu.is_some()
-				|| self.shortcuts_open
-				|| self.search_open
-				|| self.st().toast.as_ref().is_some_and(|(id, _)| Some(*id) != self.toast_gone),
-		);
+		self.mark_obscured(window, cx);
 		// Leaving macOS full screen another way (the green button, ⌃⌘F) ends full-screen now playing.
 		if self.full_view == FullView::Screen && !window.is_fullscreen() {
 			self.full_view = FullView::Off;
