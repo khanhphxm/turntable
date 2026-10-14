@@ -211,6 +211,8 @@ pub struct Shell {
 	/// The toast last shown, and the one whose time is up (the core never clears toasts).
 	pub toast_shown:          Option<u32>,
 	pub toast_gone:           Option<u32>,
+	/// A pump is queued to fetch covers rendering found missing (see [`Shell::cover_source`]).
+	cover_fetch_queued:       std::cell::Cell<bool>,
 }
 
 impl Focusable for Shell {
@@ -220,12 +222,9 @@ impl Focusable for Shell {
 }
 
 impl Shell {
-	pub fn new(core: Controller, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
-		let seek = Slider::new(cx, 0.);
-		let playhead = cx.new(|cx| crate::bar::Playhead::new(seek.clone(), core.state(), window, cx));
-		let volume_slider = Slider::new(cx, f32::from(core.state().volume) / 100.);
-		let crossfade = Slider::new(cx, f32::from(core.state().prefs.playback.crossfade) / f32::from(MAX_CROSSFADE));
-		cx.subscribe(&crossfade, |this, _, e: &SliderEvent, cx| {
+	/// Seek, volume and crossfade sliders send their committed (or scrubbed) values to the core.
+	fn wire_sliders(seek: &Entity<Slider>, volume: &Entity<Slider>, crossfade: &Entity<Slider>, cx: &mut Context<'_, Self>) {
+		cx.subscribe(crossfade, |this, _, e: &SliderEvent, cx| {
 			if let SliderEvent::Commit(v) = e {
 				// Whole seconds; at least one while it's on (the switch turns it off).
 				#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "v is 0..=1, so the product is 0..=12")]
@@ -234,7 +233,7 @@ impl Shell {
 			}
 		})
 		.detach();
-		cx.subscribe(&seek, |this, _, e: &SliderEvent, cx| {
+		cx.subscribe(seek, |this, _, e: &SliderEvent, cx| {
 			if let SliderEvent::Commit(v) = e {
 				#[expect(
 					clippy::cast_possible_truncation,
@@ -246,7 +245,7 @@ impl Shell {
 			}
 		})
 		.detach();
-		cx.subscribe(&volume_slider, |this, _, e: &SliderEvent, cx| {
+		cx.subscribe(volume, |this, _, e: &SliderEvent, cx| {
 			let (SliderEvent::Scrub(v) | SliderEvent::Commit(v)) = e;
 			#[expect(
 				clippy::cast_possible_truncation,
@@ -256,6 +255,16 @@ impl Shell {
 			this.send(Msg::Volume((v * 100.).round() as u8), cx);
 		})
 		.detach();
+	}
+}
+
+impl Shell {
+	pub fn new(core: Controller, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
+		let seek = Slider::new(cx, 0.);
+		let playhead = cx.new(|cx| crate::bar::Playhead::new(seek.clone(), core.state(), window, cx));
+		let volume_slider = Slider::new(cx, f32::from(core.state().volume) / 100.);
+		let crossfade = Slider::new(cx, f32::from(core.state().prefs.playback.crossfade) / f32::from(MAX_CROSSFADE));
+		Self::wire_sliders(&seek, &volume_slider, &crossfade, cx);
 		let search = search_input(window, cx);
 		let folder_name = folder_name_input(window, cx);
 		let proxy_input = Self::network_proxy_input(&core.state().prefs.network.proxy, window, cx);
@@ -319,6 +328,7 @@ impl Shell {
 			about: None,
 			toast_shown: None,
 			toast_gone: None,
+			cover_fetch_queued: std::cell::Cell::new(false),
 		};
 		shell.send(Msg::Navigate(Route::Home), cx);
 		shell
@@ -501,15 +511,31 @@ impl Shell {
 	/// A cover at `logical` px, decoded off-thread: `None` until it's ready (the core fetches it).
 	pub fn image(&self, url: Option<&str>, logical: u32, cx: &mut Context<'_, Self>) -> Option<ImageSource> {
 		let url = url?;
-		let cover = CoverCache::source(url, cx).or_else(|| self.st().image(Some(url)).cloned())?;
+		let cover = self.cover_source(url, cx)?;
 		CoverCache::get(url, &cover, logical, self.scale, cx).map(ImageSource::Render)
 	}
 
 	/// The artwork at `url` blurred to soft colour, for a backdrop.
 	pub fn blurred_image(&self, url: Option<&str>, cx: &mut Context<'_, Self>) -> Option<ImageSource> {
 		let url = url?;
-		let cover = CoverCache::source(url, cx).or_else(|| self.st().image(Some(url)).cloned())?;
+		let cover = self.cover_source(url, cx)?;
 		CoverCache::blurred(url, &cover, cx).map(ImageSource::Render)
+	}
+
+	/// The encoded cover, or `None` after recording a miss. The core only fetches misses on
+	/// its next pump, so queue one: a freshly rendered page must not wait for an unrelated wake.
+	fn cover_source(&self, url: &str, cx: &mut Context<'_, Self>) -> Option<std::sync::Arc<turntable_core::Cover>> {
+		let cover = CoverCache::source(url, cx).or_else(|| self.st().image(Some(url)).cloned());
+		if cover.is_none() && !self.cover_fetch_queued.replace(true) {
+			let shell = cx.weak_entity();
+			cx.defer(move |cx| {
+				let _ = shell.update(cx, |this, cx| {
+					this.cover_fetch_queued.set(false);
+					this.pump(cx);
+				});
+			});
+		}
+		cover
 	}
 
 	pub(crate) fn with_artwork<T>(
