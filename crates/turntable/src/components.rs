@@ -505,7 +505,8 @@ impl Shell {
 
 	/// The header's artwork; on the user's own playlist, hovering offers to edit its details.
 	fn header_cover(&self, route: &Route, cover_url: Option<&str>, editable: bool, cx: &mut Context<'_, Self>) -> AnyElement {
-		let art = self.art(route, cover_url, px(232.), cx).shadow_2xl();
+		let url = self.header_art_url(route, cover_url, cx);
+		let art = self.art(route, url.as_deref(), px(232.), cx).shadow_2xl();
 		if !editable {
 			return art.into_any_element();
 		}
@@ -533,6 +534,21 @@ impl Shell {
 					.child(div().text_size(px(16.)).child("Edit details")),
 			)
 			.into_any_element()
+	}
+
+	/// The header's artwork URL. A page can learn a better URL after it opens (an artist's
+	/// overview carries a larger avatar than the library's), and that one still has to load:
+	/// keep showing the artwork already on screen for this page until the new one is ready,
+	/// rather than blanking the header in between.
+	fn header_art_url(&self, route: &Route, wanted: Option<&str>, cx: &mut Context<'_, Self>) -> Option<String> {
+		let wanted = wanted?;
+		let shown = self.header_art.borrow().clone();
+		let wanted_ready = self.image(Some(wanted), 232, cx).is_some();
+		let url = header_art_choice(shown.as_ref(), route, wanted, wanted_ready).to_owned();
+		if url == wanted && wanted_ready || url != wanted && self.image(Some(&url), 232, cx).is_some() {
+			*self.header_art.borrow_mut() = Some((route.clone(), url.clone()));
+		}
+		Some(url)
 	}
 
 	/// The page's "…": what Spotify offers for the open playlist, album or artist.
@@ -669,5 +685,33 @@ impl gpui_kit::Render for DraggedRow {
 impl gpui_kit::Render for DraggedQueue {
 	fn render(&mut self, _: &mut gpui_kit::Window, _: &mut Context<'_, Self>) -> impl IntoElement {
 		drag_chip(&self.title)
+	}
+}
+
+/// The header URL to draw: the wanted one once it's ready, else what this page already shows.
+fn header_art_choice<'a>(shown: Option<&'a (Route, String)>, route: &Route, wanted: &'a str, wanted_ready: bool) -> &'a str {
+	match shown {
+		Some((shown_route, shown_url)) if shown_route == route && shown_url != wanted && !wanted_ready => shown_url,
+		_ => wanted,
+	}
+}
+
+#[cfg(test)]
+mod header_art_tests {
+	use turntable_core::Route;
+
+	use super::header_art_choice;
+
+	#[test]
+	fn a_loading_better_url_keeps_the_page_artwork_on_screen() {
+		let artist = Route::Artist("a".into());
+		let shown = (artist.clone(), "small".to_owned());
+		// The overview's larger avatar is still loading: keep the library's.
+		assert_eq!(header_art_choice(Some(&shown), &artist, "large", false), "small");
+		// Once it's ready, switch.
+		assert_eq!(header_art_choice(Some(&shown), &artist, "large", true), "large");
+		// Another page never inherits this page's artwork.
+		assert_eq!(header_art_choice(Some(&shown), &Route::Artist("b".into()), "other", false), "other");
+		assert_eq!(header_art_choice(None, &artist, "large", false), "large");
 	}
 }
