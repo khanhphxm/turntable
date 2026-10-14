@@ -38,76 +38,11 @@ jobs:
           components: rustfmt
       - run: cargo +nightly fmt --all -- --check
 
-  lint:
-    name: lint (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos
-            runner: macos-14
-          - os: linux
-            runner: ubuntu-24.04
-          - os: windows
-            runner: windows-2025
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
-        with:
-          components: clippy
-      - name: Linux native dependencies
-        if: runner.os == 'Linux'
-        run: scripts/install-linux-deps.sh
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: ci-${{ matrix.os }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - name: Install dependency auditor
-        if: runner.os == 'Linux'
-        run: cargo install cargo-machete --version 0.9.1 --locked
-      - name: Clippy, documentation, dependencies, banned patterns
-        if: runner.os == 'Linux'
-        run: scripts/lint.sh clippy docs deps ban
-      - name: Platform clippy
-        if: runner.os != 'Linux'
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
-
-  test:
-    name: test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos
-            runner: macos-14
-          - os: linux
-            runner: ubuntu-24.04
-          - os: windows
-            runner: windows-2025
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
-      - name: Linux native dependencies
-        if: runner.os == 'Linux'
-        run: scripts/install-linux-deps.sh
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          shared-key: ci-${{ matrix.os }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      # Cargo runs workspace tests, not dependency/backend tests needing a native desktop.
-      # Keep the default ignored-test behavior for manual benchmarks and the native tray test.
-      - run: cargo test --locked --workspace --all-targets
-
-  build:
-    name: build (${{ matrix.os }})
+  # One job per OS: lint, then test, then (on main) a release build, sharing one cache.
+  # Clippy only sees code compiled for its OS, so each platform lints its own cfg'd code.
+  check:
+    name: ${{ matrix.os }}
+    needs: fmt
     strategy:
       fail-fast: false
       matrix:
@@ -122,22 +57,36 @@ jobs:
             runner: windows-2025
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
         with:
+          components: clippy
           targets: ${{ matrix.target }}
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: scripts/install-linux-deps.sh
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ci-build-${{ matrix.os }}
+          shared-key: ci-${{ matrix.os }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - name: Release build including vendored path patches
+      - name: Install dependency auditor
+        if: runner.os == 'Linux'
+        run: cargo install cargo-machete --version 0.9.1 --locked
+      - name: Lint (clippy, docs, dependencies, banned patterns)
+        if: runner.os == 'Linux'
+        run: scripts/lint.sh clippy docs deps ban
+      - name: Lint (clippy)
+        if: runner.os != 'Linux'
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      # Workspace tests only; ignored tests are manual benchmarks and a native-desktop tray test.
+      - name: Test
+        run: cargo test --locked --workspace --all-targets
+      - name: Release build
+        if: github.event_name != 'pull_request'
         env:
           RUST_TARGET: ${{ matrix.target }}
         run: cargo build --release --locked -p turntable --target "$RUST_TARGET"

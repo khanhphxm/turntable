@@ -86,16 +86,11 @@ licensing as well as the Rust crate manifests.
 
 ## CI and release setup
 
-**Actions disabled while private:** leave repository Settings → Actions disabled
-until runner billing/access (including `ubuntu-24.04-arm`) is enabled or the repo
-becomes public. Production triggers are already configured: CI runs on main
-pushes, PRs, merge queues and dispatch; Release runs on `v*` tags and dispatch.
-Public Homebrew installs require publicly downloadable releases.
+CI runs on main pushes, PRs, merge queues and dispatch; Release runs on `v*` tags and
+dispatch. Public Homebrew installs require publicly downloadable releases.
 
-CI uses nightly rustfmt and stable per-OS lint/tests/release builds (Windows MSVC).
-Required check names: `fmt`, `lint (macos)`, `lint (linux)`, `lint (windows)`,
-`test (macos)`, `test (linux)`, `test (windows)`, `build (macos)`, `build (linux)`,
-`build (windows)`, `pr-title`. Squash-merge PR titles must be conventional commits,
+CI runs nightly rustfmt, then one job per OS: lint, tests and (outside PRs) a release build.
+Required check names: `fmt`, `macos`, `linux`, `windows`, `pr-title`. Squash-merge PR titles must be conventional commits,
 e.g. `feat(player): add shuffle`. Fork PRs need no secrets and cannot save caches.
 Tests skip `#[ignore]` manual benchmarks/native tray checks; GPUI TestPlatform
 journeys are headless. Dependency/backend native-desktop tests are not workspace
