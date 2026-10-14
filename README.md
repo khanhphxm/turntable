@@ -34,10 +34,10 @@
 |---------------|-----------:|--------:|------------:|
 | Turntable     |      47 MB |   65 MB |        0.0% |
 | Spotify       |     808 MB |  ~1 GB  |        4.4% |
-| Spotifast¹    | 100–250 MB |         |             |
+| [Spotifast](https://github.com/crmne/spotifast)¹ | 100–250 MB |         |             |
 
 Windows: 13 MB idle, 14 MB playing.²<br>
-<sub>¹ Self-reported. ² Excludes GPU memory, which macOS counts.</sub>
+<sub>¹ From [spotifast.rocks](https://spotifast.rocks). ² Excludes GPU memory, which macOS counts.</sub>
 
 ## Install
 
