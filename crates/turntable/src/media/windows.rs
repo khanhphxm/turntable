@@ -224,7 +224,7 @@ fn thumbnail(bytes: &[u8]) -> windows::core::Result<RandomAccessStreamReference>
 	// SAFETY: SHCreateMemStream copies this valid byte slice into an owned COM
 	// stream. The WinRT bridge and thumbnail retain it; no temporary files,
 	// async wait on an STA, or second encoded-byte copy are needed.
-	let stream = unsafe { SHCreateMemStream(Some(bytes)) }.ok_or_else(windows::core::Error::from_win32)?;
+	let stream = unsafe { SHCreateMemStream(Some(bytes)) }.ok_or_else(windows::core::Error::from_thread)?;
 	// SAFETY: this live, owned IStream supports the interfaces required by the
 	// bridge; the resulting IRandomAccessStream retains it.
 	let stream: IRandomAccessStream = unsafe { CreateRandomAccessStreamOverStream(&stream, BSOS_DEFAULT) }?;
