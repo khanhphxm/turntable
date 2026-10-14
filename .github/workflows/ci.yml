@@ -103,7 +103,7 @@ jobs:
         run: scripts/install-linux-deps.sh
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ci-${{ matrix.os }}
+          shared-key: ci-lint-${{ matrix.os }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Install dependency auditor
         if: runner.os == 'Linux'
@@ -140,7 +140,7 @@ jobs:
         run: scripts/install-linux-deps.sh
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: ci-${{ matrix.os }}
+          shared-key: ci-test-${{ matrix.os }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       # Cargo runs workspace tests, not dependency/backend tests needing a native desktop.
       # Keep the default ignored-test behavior for manual benchmarks and the native tray test.
