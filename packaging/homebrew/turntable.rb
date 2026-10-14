@@ -8,7 +8,7 @@ cask "turntable" do
   desc "Lightweight native Spotify player"
   homepage "https://github.com/khanhphxm/turntable"
 
-  depends_on macos: ">= :monterey"
+  depends_on macos: :monterey
 
   app "Turntable.app"
 end
