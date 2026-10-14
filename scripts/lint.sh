@@ -15,8 +15,7 @@
 #           the former macOS-to-Linux check with a no-op compiler is no longer supported
 #   docs    rustdoc with warnings as errors: broken intra-doc links, bare URLs, bad HTML
 #   deps    cargo machete: dependencies no source uses (`cargo install cargo-machete`)
-#   ban     no #[allow(..)] (use #[expect(lint, reason = "...")]), no #[ignore]d test, no lint set to
-#           "allow" in a manifest
+#   ban     no #[allow(..)] (use #[expect(lint, reason = "...")]), no lint set to "allow" in a manifest
 #
 # CARGO_TARGET_DIR is honoured. RUSTFMT_TOOLCHAIN (default nightly) picks the rustfmt.
 set -u
@@ -72,13 +71,13 @@ run_fmt() {
 }
 
 run_clippy() {
-	step clippy cargo clippy --workspace --all-targets --keep-going -- -D warnings
+	step clippy cargo clippy --locked --workspace --all-targets --keep-going -- -D warnings
 }
 
 run_docs() {
 	RUSTDOCFLAGS="-D warnings"
 	export RUSTDOCFLAGS
-	step docs cargo doc --workspace --no-deps --document-private-items
+	step docs cargo doc --locked --workspace --no-deps --document-private-items
 }
 
 run_deps() {
@@ -103,8 +102,6 @@ ban_rules() {
 	ok=0
 	forbid '#[allow] is banned: #[expect(lint, reason = "...")] fails once the lint stops firing' \
 		-rnE --include='*.rs' '#!?\[(cfg_attr\([^]]*,[[:space:]]*)?allow[[:space:]]*\(' crates || ok=1
-	forbid 'an #[ignore]d test never runs: delete it, or turn it into a script' \
-		-rnE --include='*.rs' '#\[ignore' crates || ok=1
 	forbid 'a lint set to "allow" in a manifest hides a whole class of findings; fix them or use #[expect] at the site' \
 		-nE '=[[:space:]]*"allow"' Cargo.toml crates/*/Cargo.toml || ok=1
 	return $ok

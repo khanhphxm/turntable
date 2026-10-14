@@ -57,11 +57,10 @@ cd turntable
 cargo run --release -p turntable
 ```
 
-**Linux** also needs (Debian/Ubuntu names):
+**Linux** also needs native headers (Debian/Ubuntu; same packages as CI):
 
 ```sh
-sudo apt install clang cmake pkg-config libssl-dev libdbus-1-dev libasound2-dev \
-  libfontconfig1-dev libfreetype6-dev libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libxcb-xkb-dev
+scripts/install-linux-deps.sh
 ```
 
 **Windows** builds with the MSVC toolchain.

@@ -92,11 +92,15 @@ becomes public. Production triggers are already configured: CI runs on main
 pushes, PRs, merge queues and dispatch; Release runs on `v*` tags and dispatch.
 Public Homebrew installs require publicly downloadable releases.
 
-CI uses nightly rustfmt and stable per-OS lint/tests. Required check names:
-`fmt`, `lint (macos)`, `lint (linux)`, `lint (windows)`, `test (macos)`,
-`test (linux)`, `test (windows)`, `pr-title`. Squash-merge PR titles must be
-conventional commits, e.g. `feat(player): add shuffle`. Release builds are
-uncached so published binaries do not depend on CI cache contents.
+CI uses nightly rustfmt and stable per-OS lint/tests/release builds (Windows MSVC).
+Required check names: `fmt`, `lint (macos)`, `lint (linux)`, `lint (windows)`,
+`test (macos)`, `test (linux)`, `test (windows)`, `build (macos)`, `build (linux)`,
+`build (windows)`, `pr-title`. Squash-merge PR titles must be conventional commits,
+e.g. `feat(player): add shuffle`. Fork PRs need no secrets and cannot save caches.
+Tests skip `#[ignore]` manual benchmarks/native tray checks; GPUI TestPlatform
+journeys are headless. Dependency/backend native-desktop tests are not workspace
+members; run those separately in an interactive desktop session, not hosted CI.
+Tag release builds are uncached so published binaries do not depend on CI caches.
 
 Set **Actions secrets** in the `release` environment (Settings → Environments);
 only `v*` tags may deploy. After copying the values, remove the corresponding
