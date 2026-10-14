@@ -67,7 +67,7 @@ turntable-core = { path = "crates/turntable-core" }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 windows = { version = "0.61", default-features = false, features = ["std"] }
 winreg = { version = "0.56" }
-x11rb = { version = "0.13" }
+x11rb = { version = "0.14" }
 
 # Curated additions to Clippy defaults: pedantic conflicts with exact DSP comparisons and intentional precision changes.
 # Document genuine exceptions with local #[expect(..., reason = "...")]; never use blanket allows.
