@@ -88,11 +88,23 @@ impl State {
 			},
 			Msg::Select(row) => {
 				if let Some(i) = self.library.resolve_row(&row) {
+					if row.route == Route::Search
+						&& let Some(tile) = self.library.rows().get(i).and_then(library::Tile::track)
+					{
+						self.remember_search(tile);
+						effects.push(Effect::SaveRecentSearches);
+					}
 					self.library.select(i);
 				}
 			},
 			Msg::PlayRow(row) => {
 				if let Some(i) = self.library.resolve_row(&row) {
+					if row.route == Route::Search
+						&& let Some(tile) = self.library.rows().get(i).and_then(library::Tile::track)
+					{
+						self.remember_search(tile);
+						effects.push(Effect::SaveRecentSearches);
+					}
 					self.play_row(i, &mut effects);
 				}
 			},

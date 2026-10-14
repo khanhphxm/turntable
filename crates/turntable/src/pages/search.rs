@@ -424,6 +424,10 @@ impl Shell {
 			Hit::Page(_) => None,
 		};
 		let target = hit.clone();
+		let play_selection = match hit {
+			Hit::Page(tile) => Some(tile.clone()),
+			Hit::Song(_) => None,
+		};
 		div()
 			.id("top-result")
 			.group("top-result")
@@ -467,6 +471,9 @@ impl Shell {
 				playing,
 				cx.listener(move |this, _, _, cx| {
 					cx.stop_propagation();
+					if let Some(tile) = &play_selection {
+						this.send(Msg::RememberSearch(tile.clone()), cx);
+					}
 					this.send(play.clone(), cx);
 				}),
 			))

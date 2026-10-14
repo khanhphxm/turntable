@@ -326,6 +326,8 @@ impl Shell {
 		let route = tile.route.clone();
 		let play = tile.play.clone();
 		let hovered = tile.route.clone();
+		let search_selection = (self.st().library.route == Route::Search).then(|| tile.clone());
+		let search_play = search_selection.clone();
 		div()
 			.id(id)
 			.group("card")
@@ -340,7 +342,12 @@ impl Shell {
 			.rounded(px(6.))
 			.hover(|s| s.bg(theme::hover()))
 			.cursor_pointer()
-			.on_click(cx.listener(move |this, _, _, cx| this.go(route.clone(), cx)))
+			.on_click(cx.listener(move |this, _, _, cx| {
+				if let Some(tile) = &search_selection {
+					this.send(Msg::RememberSearch(tile.clone()), cx);
+				}
+				this.go(route.clone(), cx);
+			}))
 			.child(div().relative().child(self.art(&tile.route, tile.image.as_deref(), px(theme::CARD_W - 24.), cx).shadow_lg()).when_some(
 				play,
 				|s, uri| {
@@ -356,6 +363,9 @@ impl Shell {
 								playing,
 								cx.listener(move |this, _, _, cx| {
 									cx.stop_propagation();
+									if let Some(tile) = &search_play {
+										this.send(Msg::RememberSearch(tile.clone()), cx);
+									}
 									this.play_context(&uri, cx);
 								}),
 							)),
