@@ -11,9 +11,11 @@ on:
 permissions:
   contents: read
 
+# A new push to a PR replaces its stale run; pushes to main queue instead, so every main
+# commit finishes its checks (and a follow-up push never cancels a release candidate).
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
