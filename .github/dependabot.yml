@@ -1,0 +1,36 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    exclude-paths:
+      - vendor/**
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+    # Local patches are maintained with their upstream notices, not registry bumps.
+    ignore:
+      - dependency-name: gpui-pre
+      - dependency-name: gpui-pre-macos
+      - dependency-name: gpui-pre-linux
+      - dependency-name: gpui-pre-windows
+      - dependency-name: gpui-pre-apple
+      - dependency-name: gpui-pre-wgpu
+      - dependency-name: taffy
+      - dependency-name: librespot-connect
+      - dependency-name: librespot-core
+      - dependency-name: librespot-playback
+      - dependency-name: librespot-audio
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ['*']
