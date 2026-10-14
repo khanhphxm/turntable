@@ -24,8 +24,44 @@ defaults:
     shell: bash
 
 jobs:
+  # Skips the Rust jobs when a change only touches prose (Markdown, license texts, issue
+  # templates). Anything else, including scripts, manifests, vendored crates and workflows,
+  # runs the full pipeline. Manual runs always do.
+  changes:
+    name: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          case "$EVENT" in
+            push) base=$PUSH_BEFORE ;;
+            pull_request) base=$PR_BASE ;;
+            merge_group) base=$QUEUE_BASE ;;
+            *) base= ;;
+          esac
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          code=$(git diff --name-only "$base" HEAD | grep -Ev '(\.md$|^LICENSE|^THIRD_PARTY_NOTICES$|^\.github/ISSUE_TEMPLATE/|^\.github/CODEOWNERS$)' || true)
+          echo "Code changes:"; echo "${code:-none}"
+          if [ -n "$code" ]; then echo "code=true"; else echo "code=false"; fi >> "$GITHUB_OUTPUT"
+
   fmt:
     name: fmt
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -145,6 +181,24 @@ jobs:
         env:
           RUST_TARGET: ${{ matrix.target }}
         run: cargo build --release --locked -p turntable --target "$RUST_TARGET"
+
+  # The one required check. Passes when every job succeeded, or was skipped because the
+  # change was prose-only; skipped matrix jobs can't satisfy required checks themselves.
+  ci:
+    name: ci
+    if: always()
+    needs: [changes, fmt, lint, test, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          for r in $RESULTS; do
+            case "$r" in success|skipped) ;; *) exit 1 ;; esac
+          done
 
   pr-title:
     name: pr-title

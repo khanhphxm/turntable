@@ -91,9 +91,7 @@ dispatch.
 Public Homebrew installs require publicly downloadable releases.
 
 CI runs nightly rustfmt first, then lint and tests per OS; release builds run once both pass.
-Required check names: `fmt`, `lint (macos)`, `lint (linux)`, `lint (windows)`,
-`test (macos)`, `test (linux)`, `test (windows)`, `build (macos)`, `build (linux)`,
-`build (windows)`, `pr-title`. Squash-merge PR titles must be conventional commits,
+Required checks: `ci` (passes when every job succeeds, or when a prose-only change skips them) and `pr-title`. Squash-merge PR titles must be conventional commits,
 e.g. `feat(player): add shuffle`. Fork PRs need no secrets and cannot save caches.
 Tests skip `#[ignore]` manual benchmarks/native tray checks; GPUI TestPlatform
 journeys are headless. Dependency/backend native-desktop tests are not workspace
