@@ -3,10 +3,13 @@
 
 use gpui_kit::{AppContext as _, Context, Entity, IntoElement, Render, Subscription, WeakEntity, Window};
 
-use crate::shell::{FullView, Shell};
+use crate::{
+	covers::{CoverCache, LIBRARY_ROWS, LISTING_ROWS},
+	shell::{FullView, Shell},
+};
 
 #[derive(Clone, Copy)]
-enum Kind {
+pub(crate) enum Kind {
 	Top,
 	Library,
 	Page,
@@ -14,6 +17,12 @@ enum Kind {
 	NowPlaying,
 	Transport,
 	Extras,
+}
+
+impl Kind {
+	pub fn artwork_scope(self) -> u16 {
+		1 << self as u8
+	}
 }
 
 pub(crate) struct Region {
@@ -48,18 +57,26 @@ impl Render for Region {
 			self.renders += 1;
 		}
 		self.shell
-			.update(cx, |shell, cx| match self.kind {
-				Kind::Top => shell.top_bar(window, cx).into_any_element(),
-				Kind::Library => shell.sidebar(cx).into_any_element(),
-				Kind::Page if shell.full_view != FullView::Off => shell.full_view_page(cx),
-				Kind::Page => shell.page_content(cx),
-				Kind::Panel => match shell.side() {
-					Some(side) => shell.right_panel(side, cx).into_any_element(),
-					None => shell.folded_panel(cx).into_any_element(),
-				},
-				Kind::NowPlaying => shell.bar_now(cx).into_any_element(),
-				Kind::Transport => shell.bar_buttons(cx).into_any_element(),
-				Kind::Extras => shell.bar_extras(cx).into_any_element(),
+			.update(cx, |shell, cx| {
+				// List processors run later during layout, outside this render call.
+				match self.kind {
+					Kind::Library => CoverCache::reset(LIBRARY_ROWS, cx),
+					Kind::Page => CoverCache::reset(LISTING_ROWS, cx),
+					_ => {},
+				}
+				shell.with_artwork(self.kind.artwork_scope(), true, cx, |shell, cx| match self.kind {
+					Kind::Top => shell.top_bar(window, cx).into_any_element(),
+					Kind::Library => shell.sidebar(cx).into_any_element(),
+					Kind::Page if shell.full_view != FullView::Off => shell.full_view_page(cx),
+					Kind::Page => shell.page_content(cx),
+					Kind::Panel => match shell.side() {
+						Some(side) => shell.right_panel(side, cx).into_any_element(),
+						None => shell.folded_panel(cx).into_any_element(),
+					},
+					Kind::NowPlaying => shell.bar_now(cx).into_any_element(),
+					Kind::Transport => shell.bar_buttons(cx).into_any_element(),
+					Kind::Extras => shell.bar_extras(cx).into_any_element(),
+				})
 			})
 			// The weak owner may be gone while the window is being torn down.
 			.unwrap_or_else(|_| gpui_kit::Empty.into_any_element())

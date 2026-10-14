@@ -250,6 +250,12 @@ impl Controller {
 		&self.state
 	}
 
+	/// Release encoded artwork not retained by the host's visible views. Missing
+	/// requests remain queued so first-time visible covers can still finish loading.
+	pub fn retain_images(&mut self, retain: impl FnMut(&str) -> bool) {
+		self.state.retain_images(retain);
+	}
+
 	/// Drains worker events, runs due timers and reconciles playback polling.
 	/// Returns true when the host should redraw, including a new current lyric line.
 	/// This never reads host input, blocks waiting for an event or renders a view.

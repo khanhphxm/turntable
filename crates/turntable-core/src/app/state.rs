@@ -430,6 +430,21 @@ impl State {
 		(self.images.len(), self.image_bytes)
 	}
 
+	/// Drop encoded artwork outside the host's current working set. Hosts may keep
+	/// bounded warm decoded previews separately; disk-cached sources reload on demand.
+	pub(crate) fn retain_images(&mut self, mut retain: impl FnMut(&str) -> bool) {
+		let media_cover = self.item.cover(CoverSize::Default);
+		let bytes = &mut self.image_bytes;
+		self.images.retain(|url, entry| {
+			if media_cover == Some(url.as_str()) || retain(url) {
+				true
+			} else {
+				*bytes -= entry.cover.bytes.len();
+				false
+			}
+		});
+	}
+
 	pub(crate) fn cache_image(&mut self, url: String, cover: Cover) {
 		if let Some(cached) = self.images.get(&url) {
 			cached.used.set(self.image_use());

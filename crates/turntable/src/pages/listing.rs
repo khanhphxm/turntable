@@ -9,6 +9,7 @@ use turntable_core::{Msg, Route, spotify::id_of};
 
 use crate::{
 	components::Column,
+	covers::{CoverCache, LISTING_ROWS},
 	shell::Shell,
 	theme,
 	widgets::{Icon, icon, icon_button},
@@ -40,52 +41,55 @@ impl Shell {
 		list(
 			self.list.clone(),
 			cx.processor(move |this, ix: usize, window, cx| {
-				if ix == 0 {
-					return this.listing_header(cx);
-				}
-				let i = ix - 1;
-				let Some(t) = this.st().library.listing.as_ref().and_then(|l| l.tracks.get(i)) else {
-					return this.listing_footer(window, cx);
-				};
-				let plays = this.st().library.listing.as_ref().and_then(|l| l.plays.get(i).copied());
-				let (column, plays) = if album {
-					// An album's rows show play counts when known (and the setting allows).
-					let shown = this.st().prefs.display.play_counts && plays.is_some();
-					(if shown { Column::Plays } else { Column::None }, plays)
-				} else {
-					(Column::AlbumAdded, None)
-				};
-				// A multi-disc album heads each disc's first row, as Spotify does.
-				let disc_head = album
-					&& this.st().library.listing.as_ref().is_some_and(|l| l.disc_count > 1)
-					&& t.disc_number > 0
-					&& (i == 0
-						|| this
-							.st()
-							.library
-							.listing
-							.as_ref()
-							.and_then(|l| l.tracks.get(i - 1))
-							.is_some_and(|p| p.disc_number != t.disc_number));
-				div()
-					.px_6()
-					.when(disc_head, |s| {
-						s.child(
-							div()
-								.h(px(48.))
-								.px(px(16.))
-								.flex()
-								.items_center()
-								.gap_4()
-								.text_size(px(16.))
-								.font_weight(FontWeight::BOLD)
-								.text_color(theme::subdued())
-								.child(div().w(px(24.)).flex().justify_end().child(icon(Icon::Disc, px(16.), theme::subdued())))
-								.child(format!("Disc {}", t.disc_number)),
-						)
-					})
-					.child(this.track_row(i, t, column, plays, !album, cx))
-					.into_any_element()
+				let reset = CoverCache::first_in_batch(LISTING_ROWS, cx);
+				this.with_artwork(LISTING_ROWS, reset, cx, |this, cx| {
+					if ix == 0 {
+						return this.listing_header(cx);
+					}
+					let i = ix - 1;
+					let Some(t) = this.st().library.listing.as_ref().and_then(|l| l.tracks.get(i)) else {
+						return this.listing_footer(window, cx);
+					};
+					let plays = this.st().library.listing.as_ref().and_then(|l| l.plays.get(i).copied());
+					let (column, plays) = if album {
+						// An album's rows show play counts when known (and the setting allows).
+						let shown = this.st().prefs.display.play_counts && plays.is_some();
+						(if shown { Column::Plays } else { Column::None }, plays)
+					} else {
+						(Column::AlbumAdded, None)
+					};
+					// A multi-disc album heads each disc's first row, as Spotify does.
+					let disc_head = album
+						&& this.st().library.listing.as_ref().is_some_and(|l| l.disc_count > 1)
+						&& t.disc_number > 0
+						&& (i == 0
+							|| this
+								.st()
+								.library
+								.listing
+								.as_ref()
+								.and_then(|l| l.tracks.get(i - 1))
+								.is_some_and(|p| p.disc_number != t.disc_number));
+					div()
+						.px_6()
+						.when(disc_head, |s| {
+							s.child(
+								div()
+									.h(px(48.))
+									.px(px(16.))
+									.flex()
+									.items_center()
+									.gap_4()
+									.text_size(px(16.))
+									.font_weight(FontWeight::BOLD)
+									.text_color(theme::subdued())
+									.child(div().w(px(24.)).flex().justify_end().child(icon(Icon::Disc, px(16.), theme::subdued())))
+									.child(format!("Disc {}", t.disc_number)),
+							)
+						})
+						.child(this.track_row(i, t, column, plays, !album, cx))
+						.into_any_element()
+				})
 			}),
 		)
 		.size_full()

@@ -6,7 +6,7 @@
 #[path = "shell_tests.rs"]
 mod tests;
 
-use std::{sync::Arc, time::Instant};
+use std::time::Instant;
 
 use gpui_kit::{
 	AnyElement, AppContext as _, Context, Entity, FocusHandle, Focusable, ImageSource, InteractiveElement as _, IntoElement, KeyBinding,
@@ -26,7 +26,8 @@ use turntable_core::{
 };
 
 use crate::{
-	covers::CoverCache,
+	covers::{CoverCache, LIBRARY_ROWS, LISTING_ROWS, ROOT},
+	regions::Kind,
 	resize::Edge,
 	theme,
 	widgets::{Slider, SliderEvent},
@@ -349,7 +350,7 @@ impl Shell {
 			self.after_change(before, cx);
 		}
 		if sign_out && !self.st().signed_in {
-			CoverCache::prune(cx);
+			CoverCache::clear(cx);
 		}
 	}
 
@@ -496,14 +497,42 @@ impl Shell {
 
 	/// A cover at `logical` px, decoded off-thread: `None` until it's ready (the core fetches it).
 	pub fn image(&self, url: Option<&str>, logical: u32, cx: &mut Context<'_, Self>) -> Option<ImageSource> {
-		let cover = Arc::clone(self.st().image(url)?);
-		CoverCache::get(&cover, logical, self.scale, cx).map(ImageSource::Render)
+		let url = url?;
+		let cover = CoverCache::source(url, cx).or_else(|| self.st().image(Some(url)).cloned())?;
+		CoverCache::get(url, &cover, logical, self.scale, cx).map(ImageSource::Render)
 	}
 
 	/// The artwork at `url` blurred to soft colour, for a backdrop.
 	pub fn blurred_image(&self, url: Option<&str>, cx: &mut Context<'_, Self>) -> Option<ImageSource> {
-		let cover = Arc::clone(self.st().image(url)?);
-		CoverCache::blurred(&cover, cx).map(ImageSource::Render)
+		let url = url?;
+		let cover = CoverCache::source(url, cx).or_else(|| self.st().image(Some(url)).cloned())?;
+		CoverCache::blurred(url, &cover, cx).map(ImageSource::Render)
+	}
+
+	pub(crate) fn with_artwork<T>(
+		&mut self,
+		scope: u16,
+		reset: bool,
+		cx: &mut Context<'_, Self>,
+		build: impl FnOnce(&mut Self, &mut Context<'_, Self>) -> T,
+	) -> T {
+		let previous = CoverCache::enter(scope, reset, cx);
+		let result = build(self, cx);
+		CoverCache::leave(previous, cx);
+		Self::reclaim_artwork(cx);
+		result
+	}
+
+	fn reclaim_artwork(cx: &mut Context<'_, Self>) {
+		if CoverCache::schedule_reclaim(cx) {
+			let shell = cx.weak_entity();
+			cx.defer(move |cx| {
+				// Rendering has restored the window, so atlas release reaches it too.
+				CoverCache::reclaim(cx);
+				let _ = shell.update(cx, |shell, cx| shell.core.retain_images(|url| CoverCache::visible_source(url, cx)));
+				CoverCache::prune(cx);
+			});
+		}
 	}
 
 	// --- Navigation -----------------------------------------------------------------------
@@ -662,6 +691,23 @@ impl Render for Shell {
 				|| self.search_open
 				|| self.st().toast.as_ref().is_some_and(|(id, _)| Some(*id) != self.toast_gone),
 		);
+		// Leaving macOS full screen another way (the green button, ⌃⌘F) ends full-screen now playing.
+		if self.full_view == FullView::Screen && !window.is_fullscreen() {
+			self.full_view = FullView::Off;
+		}
+		let mut hidden = ROOT;
+		if !self.st().signed_in {
+			hidden = u16::MAX;
+		} else {
+			if self.full_view == FullView::Screen {
+				hidden |= Kind::Top.artwork_scope();
+			}
+			if self.full_view != FullView::Off {
+				hidden |= Kind::Library.artwork_scope() | LIBRARY_ROWS | Kind::Panel.artwork_scope() | LISTING_ROWS;
+			}
+		}
+		CoverCache::reset(hidden, cx);
+		Self::reclaim_artwork(cx);
 		if !self.st().signed_in {
 			if self.page == Page::Settings {
 				return div()
@@ -685,10 +731,6 @@ impl Render for Shell {
 			return self.welcome_page(window, cx).into_any_element();
 		}
 		self.scale = window.scale_factor();
-		// Leaving macOS full screen another way (the green button, ⌃⌘F) ends full-screen now playing.
-		if self.full_view == FullView::Screen && !window.is_fullscreen() {
-			self.full_view = FullView::Off;
-		}
 		let width = window.viewport_size().width;
 		self.crowded = width < self.library_w + self.panel_w + px(MAIN_MIN_W) + theme::GAP * 4.;
 		let region_style = StyleRefinement::default().h_full().flex_none();

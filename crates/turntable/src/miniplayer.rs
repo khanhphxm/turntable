@@ -16,6 +16,7 @@ use turntable_core::{
 };
 
 use crate::{
+	covers::MINIPLAYER,
 	shell::Shell,
 	theme,
 	widgets::{Icon, added_badge, cover, icon, icon_button},
@@ -53,8 +54,16 @@ impl MiniPlayer {
 		};
 		let owner = shell.clone();
 		let opened = cx.open_window(options, move |_, cx| {
-			cx.new(|cx| {
+			cx.new(|cx: &mut Context<'_, Self>| {
 				let watch = cx.observe(&owner, |_, _, cx| cx.notify());
+				cx.on_release(|mini, cx| {
+					mini.shell.update(cx, |shell, cx| {
+						shell.mini = None;
+						shell.with_artwork(MINIPLAYER, true, cx, |_, _| ());
+						cx.notify();
+					});
+				})
+				.detach();
 				Self { shell: owner, repaint: None, _watch: watch }
 			})
 		});
@@ -98,7 +107,7 @@ impl Render for MiniPlayer {
 		let width = f32::from(window.viewport_size().width);
 		#[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a window's width is a small positive number")]
 		let side = width.round() as u32;
-		let art = self.shell.update(cx, |s, cx| s.image(url.as_deref(), side, cx));
+		let art = self.shell.update(cx, |s, cx| s.with_artwork(MINIPLAYER, true, cx, |s, cx| s.image(url.as_deref(), side, cx)));
 		let title = if item.uri.is_empty() { "Nothing playing".to_owned() } else { format!("{} • {}", item.name(), item.creators()) };
 		let button = |id: &'static str, glyph: Icon, active: bool, msg: Msg, cx: &mut Context<'_, Self>| {
 			icon_button(id, glyph, px(18.), active, cx.listener(move |this, _, _, cx| this.send(msg.clone(), cx)))

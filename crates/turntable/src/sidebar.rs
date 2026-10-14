@@ -132,7 +132,9 @@ impl Shell {
 					"library",
 					entries.len(),
 					cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
-						range.filter_map(|i| entries.get(i).map(|e| this.library_row(i, e, collapsed, cx))).collect::<Vec<_>>()
+						this.with_artwork(crate::covers::LIBRARY_ROWS, true, cx, |this, cx| {
+							range.filter_map(|i| entries.get(i).map(|e| this.library_row(i, e, collapsed, cx))).collect::<Vec<_>>()
+						})
 					}),
 				)
 				.flex_1()

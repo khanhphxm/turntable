@@ -68,6 +68,10 @@ sudo apt install clang cmake pkg-config libssl-dev libdbus-1-dev libasound2-dev 
 The UI uses the platform's built-in font family, without enumerating installed fonts at startup.
 Artwork is decoded into physical-pixel buckets matching row thumbnails, 164 px shelf covers,
 page headers and the default right panel at 1x and 2x display scales.
+Only visible render regions retain full-size artwork. Offscreen covers release their GPU atlas
+entries and keep small previews plus encoded sources in a 4 MiB warm cache, so recent Back
+visits show artwork immediately while full-resolution pixels are restored. Older covers reload
+from the on-disk cache; reclamation does not add an idle timer.
 
 ## Privacy
 

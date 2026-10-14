@@ -517,6 +517,21 @@ fn recently_used_encoded_covers_keep_identity_under_cache_pressure() {
 	assert!(state.image(Some("cover-0")).is_none());
 }
 
+#[test]
+fn host_working_set_releases_history_without_canceling_visible_loads() {
+	use std::sync::Arc;
+	let mut state = State::default();
+	state.cache_image("visible".into(), Cover { bytes: vec![1, 2, 3], mime: "image/jpeg".into() });
+	state.cache_image("history".into(), Cover { bytes: vec![4, 5], mime: "image/jpeg".into() });
+	let visible = Arc::clone(state.image(Some("visible")).unwrap());
+	assert!(state.image(Some("loading")).is_none());
+	state.retain_images(|url| url == "visible");
+	assert_eq!(state.image_cache_usage(), (1, 3));
+	assert!(Arc::ptr_eq(state.image(Some("visible")).unwrap(), &visible));
+	assert_eq!(state.take_missing_images(), ["loading".to_owned()].into_iter().collect());
+	assert!(state.image(Some("history")).is_none());
+}
+
 fn owned_tracks(uris: &[&str]) -> Result<library::Response, library::added::IndexError> {
 	let mut tracks: Vec<_> = uris.iter().map(|uri| library::added::TrackId::from_uri(uri)).collect::<Result<_, _>>()?;
 	tracks.sort_unstable();
