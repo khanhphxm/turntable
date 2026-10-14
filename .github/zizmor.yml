@@ -1,0 +1,6 @@
+rules:
+  unpinned-uses:
+    config:
+      # Major-version tags (actions/checkout@v7); Dependabot keeps them current.
+      policies:
+        "*": ref-pin
