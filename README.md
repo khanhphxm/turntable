@@ -9,7 +9,7 @@
   Built with <a href="https://www.gpui.rs/">GPUI</a> and <a href="https://github.com/librespot-org/librespot">librespot</a>. Requires Spotify Premium.
 </p>
 
-<!-- screenshot: home -->
+![Turntable home](.github/assets/home.jpg)
 
 ## Features
 
@@ -23,8 +23,10 @@
 - Streaming quality up to 320 kbps
 - Media keys and keyboard shortcuts
 
-<!-- screenshot: album -->
-<!-- screenshot: lyrics -->
+<p>
+  <img src=".github/assets/album.jpg" width="49%" alt="Album page">
+  <img src=".github/assets/lyrics.jpg" width="49%" alt="Synced lyrics">
+</p>
 
 ## Performance
 
