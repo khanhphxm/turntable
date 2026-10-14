@@ -34,7 +34,7 @@ sha2.workspace = true
 smallvec.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
-symphonia = { version = "0.5", default-features = false, optional = true }
+symphonia = { version = "0.6", default-features = false, optional = true }
 tokio.workspace = true
 ureq.workspace = true
 
