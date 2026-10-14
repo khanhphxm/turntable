@@ -7,8 +7,6 @@ updates:
     cooldown:
       default-days: 7
     open-pull-requests-limit: 5
-    exclude-paths:
-      - vendor/**
     groups:
       minor-and-patch:
         update-types: [minor, patch]
