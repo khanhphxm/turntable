@@ -1,49 +1,89 @@
-# Contributing
+# Contributing to Turntable
 
-Keep changes focused and explain the user-visible problem in your issue or PR.
-Use synthetic account data in tests and redact logs/screenshots. Report security
-issues privately as described in [SECURITY.md](SECURITY.md).
-Follow our [Code of Conduct](CODE_OF_CONDUCT.md).
+Pull requests are welcome. Keep each one to a single change you understand and
+can explain. Report security issues privately as described in
+[SECURITY.md](SECURITY.md), never in a public issue.
+
+## Before you start
+
+- **Small fixes** (bugs, docs, narrow improvements): open a pull request directly.
+- **Larger changes** (new features, new dependencies, vendored-crate patches,
+  cross-platform behavior): open an issue first so the approach can be agreed
+  before you write it.
+
+Use synthetic account data in tests, and redact Spotify credentials and personal
+library data from logs and screenshots.
 
 ## Build and check
 
-Use Rust 1.90+ (stable), plus nightly rustfmt:
+Rust 1.90+ (stable) for building; nightly only for rustfmt, because
+`rustfmt.toml` uses unstable options.
 
 ```sh
 rustup toolchain install nightly --component rustfmt
 cargo run --release --locked -p turntable
-cargo +nightly fmt --all -- --check
-cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo +nightly fmt --all                         # apply formatting
+scripts/lint.sh                                  # fmt, clippy, docs, deps, ban
 cargo test --locked --workspace --all-targets
 ```
 
-On Linux, install native headers with `scripts/install-linux-deps.sh`
-(Debian/Ubuntu; uses sudo). Windows requires the MSVC toolchain; macOS requires
-Xcode command-line tools. Run platform checks natively; CI checks all three OSes.
-`scripts/lint.sh` also checks rustdoc, unused dependencies (install
-`cargo-machete`) and banned lint patterns. Workflow changes need `actionlint`
-and `zizmor .github/workflows`.
-The default test command skips ignored manual benchmarks and native-desktop
-checks. GPUI TestPlatform journeys run headlessly; backend GPU/window tests
-need a separate interactive desktop session (especially on Windows).
+- **Linux**: install the headers listed in the [README](README.md#build-from-source),
+  or run `scripts/install-linux-deps.sh` (Ubuntu 24.04, uses sudo) for the full
+  set CI uses. The `deps` lint step needs `cargo install cargo-machete`.
+- **macOS**: Xcode command-line tools. `cargo run`/`cargo test` go through
+  `scripts/run-signed.sh`, which signs the binary for stable Keychain access.
+- **Windows**: the MSVC toolchain.
 
-## Commits and vendored code
+CI runs `fmt` once, `scripts/lint.sh clippy docs deps ban` on Linux, plain clippy
+on macOS and Windows, and the full test suite on all three. Platform code has to
+be checked natively on its OS. Workflow changes also need `actionlint` and
+`zizmor .github/workflows`.
 
-Use conventional commit/PR titles, e.g. `fix(player): preserve shuffle state`.
-Include tests for behavior changes.
+## Pull requests
 
-Vendored crates are selected by `[patch.crates-io]` in the root `Cargo.toml`.
-Edit the matching `vendor/` copy, not your Cargo registry. Keep patches small,
-retain upstream licenses/attribution and record the upstream version plus local
-changes in that crate's `TURNTABLE.md`. For modified Apache-licensed files, also
-retain a prominent in-file modification notice. Commit any necessary lockfile
-update with the patch. See [packaging/README.md](packaging/README.md) for releases.
+- Title it as a conventional commit, e.g. `fix(player): keep shuffle on restore`.
+  CI enforces this; allowed types are `feat`, `fix`, `perf`, `refactor`, `docs`,
+  `test`, `build`, `ci`, `chore`, `style` and `revert`. The title becomes the
+  squash commit and the changelog entry.
+- Fill in the template in your own words: what changed, why, and how you
+  verified it. Passing CI is not enough. Exercise the changed behavior on the
+  platforms it touches and say which ones you could not test.
+- Behavior changes need tests; docs that describe the behavior change with it.
+- No drive-by refactors or unrelated cleanup.
+
+AI tools are fine. You are still responsible for every line: review the full
+diff, keep it within scope, and run the checks yourself before opening the PR.
+
+## Vendored crates
+
+`[patch.crates-io]` in the root `Cargo.toml` points patched dependencies at
+`vendor/`. To change one:
+
+1. Edit the `vendor/` copy, never your Cargo registry. New vendored crates land
+   as a pristine registry copy in their own commit, then the patch on top.
+2. Keep the patch small and keep upstream licenses and attribution.
+3. Record the upstream version and every local change in that crate's
+   `TURNTABLE.md`.
+4. Start each modified upstream file under Apache-2.0 with a one-line notice,
+   e.g. `// Modified by Turntable: <what>; see ../TURNTABLE.md.`
+5. Commit the resulting `Cargo.lock` change with the patch.
+
+## Third-party notices
+
+After changing dependencies or embedded assets, regenerate
+`THIRD_PARTY_NOTICES` with the pinned generator and commit the result:
+
+```sh
+cargo install cargo-about --version 0.9.2 --locked --features cli
+packaging/generate-notices.sh
+```
+
+Releases and packaging are covered in [packaging/README.md](packaging/README.md).
 
 ## Audio benchmark
 
-An offline benchmark runs real files through the playback chain (decoder, EQ,
-normalization, resampler) into a paced null output. It needs no account or audio device.
-Linux only; requires `ffmpeg`.
+Measures the playback chain (decoder, EQ, normalization, resampler) offline into
+a paced null output. Linux only; needs `ffmpeg`, no account or audio device.
 
 ```sh
 sh scripts/audio-fixtures.sh /tmp/turntable-audio 30
@@ -51,5 +91,10 @@ cargo build --release -p turntable-core --example audio-bench --features audio-b
 target/release/examples/audio-bench /tmp/turntable-audio/vorbis.ogg --rate 48000
 ```
 
-To check that a change keeps output identical, compare two builds with
-`python3 scripts/audio-equivalence.py <before> <after> <fixtures-dir>`.
+`python3 scripts/audio-equivalence.py <before> <after> <fixtures-dir>` checks
+that two builds produce identical output.
+
+## License
+
+Contributions are accepted under the project's [MIT license](LICENSE).
+Vendored code keeps its own license.
