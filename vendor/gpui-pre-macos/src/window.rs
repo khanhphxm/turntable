@@ -1,4 +1,5 @@
 // Modified by Turntable from upstream GPUI/Zed; see ../TURNTABLE.md for changes.
+// Retires Metal command storage when the window's existing idle-frame tail parks.
 
 use crate::{
     BoolExt, MacDisplay, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
@@ -3392,8 +3393,12 @@ extern "C" fn step(view: *mut c_void) {
         });
         let mut lock = window_state.lock();
         lock.request_frame_callback = Some(callback);
-        if let Some(frame_source) = lock.frame_source.as_mut() {
-            frame_source.complete_frame();
+        if lock
+            .frame_source
+            .as_mut()
+            .is_some_and(WindowFrameSource::complete_frame)
+        {
+            lock.renderer.park_resources();
         }
     }
 }

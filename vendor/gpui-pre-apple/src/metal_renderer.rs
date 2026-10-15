@@ -1,4 +1,5 @@
 // Modified by Turntable from upstream GPUI/Zed; see ../TURNTABLE.md for changes.
+// Idle Metal command storage retires with the drawable pool.
 
 use crate::metal_atlas::MetalAtlas;
 use anyhow::{Context as _, Result};
@@ -135,7 +136,7 @@ pub struct MetalRenderer {
     presents_with_transaction: bool,
     /// For headless rendering, tracks whether output should be opaque
     opaque: bool,
-    command_queue: CommandQueue,
+    command_queue: Option<CommandQueue>,
     paths_rasterization_pipeline_state: metal::RenderPipelineState,
     path_sprites_pipeline_state: metal::RenderPipelineState,
     shadows_pipeline_state: metal::RenderPipelineState,
@@ -410,7 +411,7 @@ impl MetalRenderer {
             is_apple_gpu,
             is_unified_memory,
             opaque,
-            command_queue,
+            command_queue: Some(command_queue),
             paths_rasterization_pipeline_state,
             path_sprites_pipeline_state,
             shadows_pipeline_state,
@@ -511,6 +512,14 @@ impl MetalRenderer {
 
     pub fn destroy(&self) {
         // nothing to do
+    }
+
+    /// Releases queue-owned command storage after the window's idle-frame tail.
+    /// In-flight command buffers retain their queue until completion. The next
+    /// frame recreates it without changing the layer, pipelines or atlas.
+    #[cfg(target_os = "macos")]
+    pub fn park_resources(&mut self) {
+        self.command_queue = None;
     }
 
     pub fn draw(&mut self, scene: &Scene) {
@@ -756,7 +765,10 @@ impl MetalRenderer {
         texture: &metal::TextureRef,
         viewport_size: Size<DevicePixels>,
     ) -> Result<metal::CommandBuffer> {
-        let command_queue = self.command_queue.clone();
+        let command_queue = self
+            .command_queue
+            .get_or_insert_with(|| self.device.new_command_queue())
+            .clone();
         let command_buffer = command_queue.new_command_buffer();
         let alpha = if self.opaque { 1. } else { 0. };
 
@@ -1761,6 +1773,8 @@ mod tests {
 
             for _ in 0..3 {
                 park_drawables(objc2_layer);
+                renderer.park_resources();
+                assert!(renderer.command_queue.is_none());
                 let device: *mut AnyObject = unsafe { objc2::msg_send![objc2_layer, device] };
                 assert!(device.is_null());
                 let drawable_size = layer.drawable_size();
@@ -1772,6 +1786,7 @@ mod tests {
 
                 renderer.draw(&Scene::default());
                 assert_eq!(layer.device().as_ptr(), renderer.device.as_ptr());
+                assert!(renderer.command_queue.is_some());
                 assert_eq!(renderer.layer_ptr(), layer.as_ptr());
             }
         });
@@ -1896,6 +1911,24 @@ mod tests {
                 .unwrap();
             for pixel in image.pixels() {
                 assert_eq!(pixel.0, [51, 34, 17, 255]);
+            }
+            #[cfg(target_os = "macos")]
+            for _ in 0..3 {
+                // Retiring a queue with a frame still in flight must not drop
+                // its resources, invalidate atlas tiles or lose the next draw.
+                renderer
+                    .render_scene(&scene, size(DevicePixels(16), DevicePixels(16)))
+                    .unwrap();
+                renderer.park_resources();
+                assert!(renderer.command_queue.is_none());
+                assert!(renderer.sprite_atlas.metal_texture(tile.texture_id).is_some());
+                assert_eq!(
+                    renderer
+                        .render_scene_to_image(&scene, size(DevicePixels(16), DevicePixels(16)))
+                        .unwrap(),
+                    image
+                );
+                assert!(renderer.command_queue.is_some());
             }
             renderer.sprite_atlas.remove(&key);
             assert!(renderer.sprite_atlas.metal_texture(tile.texture_id).is_none());

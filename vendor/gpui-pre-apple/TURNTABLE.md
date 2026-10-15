@@ -37,6 +37,50 @@ Rejected alternatives: setting `drawableSize` to zero retained all three large s
 
 The remaining drawable floor is one full-resolution presented surface: approximately 3.97 MiB at 1280×800 or 7.09 MiB at 1920×950, multiplied by four at 2× scale. This patch does not remove the driver's approximately 105 MiB submission transient while continuous GPUI animations run; animation frame demand is a separate cost.
 
+## Idle command storage (macOS)
+
+The existing three-unused-frame drawable-parking transition also releases the
+renderer-owned `MTLCommandQueue`. Command buffers already submitted retain their
+queue and encoded resources through completion. The next actual draw creates a
+new queue; the device, backing layer, pipelines, atlas, viewport resolution and
+triple buffering stay unchanged. There is no additional timer or idle wakeup.
+iOS and headless callers do not invoke the macOS parking hook.
+
+An isolated 64×64 Metal clear probe fell from 6.594 to 5.579 MiB physical
+footprint when its completed queue was released; `currentAllocatedSize` fell
+from 0.906 to 0.453 MiB. A 1920×950 clear probe measured queue recreation at
+0.146–0.305 ms and encoding at 0.293–0.466 ms after idle retirement. Completed
+clears took 3.456–4.288 ms versus 0.331–2.277 ms with a retained queue, excluding
+each process's first submission. These are completion timings, not display-vsync
+measurements; the small resume cost does not change continuous-frame pacing.
+
+Signed release Turntable A/B, 1920×950 at 1×, cached signed-in Home, private
+profile, 30-second settle, no playback, back-to-back `/tmp/ttm.sh` runs:
+
+| Queue policy | Physical footprint MiB | IOSurface MiB | IOAccelerator dirty MiB | Owned-unmapped graphics MiB | Malloc Small MiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Baseline retained queue | 48.048 | 7.094 | 5.313 | 1.234 | 12.547 |
+| Retired idle queue | 46.970 | 7.094 | 5.406 | 0.000 | 12.500 |
+
+The repeatable saving is the owned-unmapped graphics charge; ordinary atlas
+textures remain resident. Recycled instance-buffer counts and Rust/system heap
+residency vary between launches, so the total alone is not the attribution.
+Both processes sampled 0.0% idle CPU. The approximately 4.5 MiB previously
+attributed to encoder creation ends at `IOGPUResourceCreate` and
+`IOGPUMetalResourcePoolCreatePooledResource`: it is command-storage VM backing,
+not demonstrated malloc heap. Its unused pages were already zero-dirty/purgeable
+before retirement and are not counted again as physical-footprint savings.
+
+Native regression coverage parks/resumes the same layer and queue repeatedly,
+including transaction presentation, overlay identity and an in-flight headless
+frame followed by pixel readback of cached sprites on the new queue.
+
+This queue-retirement operation is Metal-specific. wgpu's shared device/queue
+and D3D11's device/immediate context have no direct equivalent to dropping this
+per-window Metal queue. Those renderers are intentionally unchanged; a port
+would first need backend-specific idle driver-cache attribution and a lifecycle
+that does not disrupt other windows or in-flight submissions.
+
 ## Regression coverage
 
 The native Metal tests cover compact-page sharing, independent release of large cover textures, tile-space reuse, buffer growth preserving earlier bindings, lazy/reused/resized/released path targets, and rendered image/path pixels after allocation and lifetime changes.
