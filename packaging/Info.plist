@@ -10,8 +10,8 @@
 	<key>CFBundleName</key><string>Turntable</string>
 	<key>CFBundleDisplayName</key><string>Turntable</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
-	<key>CFBundleShortVersionString</key><string>0.1.1</string>
-	<key>CFBundleVersion</key><string>0.1.1</string>
+	<key>CFBundleShortVersionString</key><string>0.1.2</string>
+	<key>CFBundleVersion</key><string>0.1.2</string>
 	<key>LSApplicationCategoryType</key><string>public.app-category.music</string>
 	<key>LSMinimumSystemVersion</key><string>12.0</string>
 	<!-- LaunchServices-only memory policy: one malloc magazine reduces fragmentation and xzone pointer-type buckets. -->
