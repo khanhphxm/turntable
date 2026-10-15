@@ -51,7 +51,7 @@ objc2-service-management = { version = "0.3", default-features = false, features
 plist = { version = "1" }
 parking_lot = { version = "0.12" }
 protobuf = { version = "3.7" }
-rand = { version = "0.9" }
+rand = { version = "0.10" }
 raw-window-handle = { version = "0.6" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }

@@ -13,7 +13,6 @@ use librespot_protocol::{
 	},
 };
 use protobuf::{Message, MessageField};
-use rand::RngCore;
 
 use super::Reader;
 use crate::{
@@ -247,8 +246,7 @@ impl Reader {
 	}
 
 	pub(in crate::library) fn create_playlist(&mut self, name: &str, uris: &[String]) -> spotify::Result<Playlist> {
-		let mut raw = [0; 16];
-		rand::rng().fill_bytes(&mut raw);
+		let raw: [u8; 16] = rand::random();
 		let id = SpotifyId::from_raw(&raw).map_err(spotify::Error::from)?.to_base62().map_err(spotify::Error::from)?;
 		let uri = format!("spotify:playlist:{id}");
 		self.shared
