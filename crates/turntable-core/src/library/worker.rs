@@ -228,6 +228,15 @@ pub(super) struct Session {
 	/// Artist pages' popular songs and About, and the tint of a cover (`None`: Spotify had no color for it).
 	pub(super) popular:   Cache<String, Popularity>,
 	pub(super) colors:    Cache<String, Option<String>>,
+	/// A refused volume is idempotent: retain only the latest value until the native gate opens.
+	pending_volume:       Option<PendingVolume>,
+}
+
+struct PendingVolume {
+	at:       Instant,
+	device:   String,
+	volume:   u8,
+	revision: u64,
 }
 
 /// How long the first page of a listing is reused, and how many listings are kept.
@@ -261,6 +270,7 @@ impl Session {
 			web: WEB.clone(),
 			popular: Cache::new(12, Duration::from_secs(1800)),
 			colors: Cache::new(64, Duration::from_secs(24 * 3600)),
+			pending_volume: None,
 		}
 	}
 
@@ -444,7 +454,7 @@ fn serve(context: RequestContext<'_>, request: Request) {
 					if matches!(e, spotify::Error::Network(_)) {
 						deliver(Response::Offline(true));
 					}
-					deliver(Response::Error { route, message: e.user_message() });
+					deliver(Response::error(route, &e));
 				},
 			}
 		},
@@ -568,9 +578,9 @@ fn connect_session(
 		store.load(Some(&identity.id));
 		(store.connected(), store.home(), store.rootlist())
 	};
-	let client = match session.take().filter(|previous| previous.me == identity.id) {
-		Some(previous) => previous.client,
-		None => Client::without_token(web_api),
+	let (client, pending_volume) = match session.take().filter(|previous| previous.me == identity.id) {
+		Some(previous) => (previous.client, previous.pending_volume),
+		None => (Client::without_token(web_api), None),
 	};
 	let (me, playlists) = if let Some(Response::Connected { me, playlists }) = cached {
 		trace::hit("library", "Connected", "disk");
@@ -587,6 +597,7 @@ fn connect_session(
 		(identity, Vec::new())
 	};
 	let mut s = Session::new(client, me, playlists, snapshots.clone());
+	s.pending_volume = pending_volume;
 	let loaded = reader.profile(s.me_name.as_deref()).and_then(|(me, plan)| {
 		if is_free(plan.as_deref()) {
 			return Err(spotify::Error::PremiumRequired);
@@ -620,7 +631,7 @@ fn connect_session(
 		},
 		Err(error) => {
 			deliver(Response::Offline(matches!(error, spotify::Error::Network(_))));
-			deliver(Response::Error { route: None, message: error.user_message() });
+			deliver(Response::error(None, &error));
 		},
 	}
 	s.player = Some(reader);
@@ -632,7 +643,7 @@ fn connect_session(
 fn player_reply<T>(result: spotify::Result<T>) -> spotify::Result<Result<T, String>> {
 	match result {
 		Ok(value) => Ok(Ok(value)),
-		Err(e @ spotify::Error::NativeAuthRequired) => Err(e),
+		Err(e @ (spotify::Error::NativeAuthRequired | spotify::Error::RateLimited { .. })) => Err(e),
 		Err(spotify::Error::DeviceNotFound) => Ok(Err("Spotify doesn't see that device anymore. Open Spotify on it and try again.".into())),
 		Err(e) => Ok(Err(e.user_message())),
 	}
@@ -673,7 +684,7 @@ fn queue_context(player: Option<&mut Reader>, route: &Route) -> Response {
 			uris.retain(|uri| uri.starts_with("spotify:track:") || uri.starts_with("spotify:episode:"));
 			Response::Queue(uris, title)
 		},
-		Err(error) => Response::Error { route: None, message: error.user_message() },
+		Err(error) => Response::error(None, &error),
 	}
 }
 
@@ -686,7 +697,7 @@ fn add_context_to_playlist(player: Option<&mut Reader>, route: Route) -> Respons
 			uris.retain(|uri| uri.starts_with("spotify:track:"));
 			Response::ContextToPlaylist(route, uris, title)
 		},
-		Err(error) => Response::Error { route: None, message: error.user_message() },
+		Err(error) => Response::error(None, &error),
 	}
 }
 
@@ -880,7 +891,7 @@ fn search_result(web: Result<spotify::SearchResults, String>, client: &Client, q
 	}
 }
 
-fn connect_request(s: &Session, request: Request) -> spotify::Result<Option<Response>> {
+fn connect_request(s: &mut Session, request: Request) -> spotify::Result<Option<Response>> {
 	Ok(Some(match request {
 		Request::Devices => Response::Devices(player_reply(match &s.player {
 			Some(player) => player.devices(),
@@ -897,12 +908,28 @@ fn connect_request(s: &Session, request: Request) -> spotify::Result<Option<Resp
 			Ok(()) => Response::Transferred,
 			Err(message) => Response::PlayerError(message),
 		},
-		Request::Control { device, command, revision } => match player_reply(match &s.player {
-			Some(player) => player.control(&device, command),
-			None => s.client.control(&device, &command),
-		})? {
-			Ok(()) => return Ok(None),
-			Err(message) => Response::ControlFailed { revision, message },
+		Request::Control { device, command, revision } => {
+			if matches!(command, spotify::PlayerCommand::Volume(_)) {
+				s.pending_volume = None;
+			}
+			let result = match &s.player {
+				Some(player) => player.control(&device, command),
+				None => s.client.control(&device, &command),
+			};
+			match result {
+				Err(error) if error.rate_limit_wait().is_some() => {
+					if let spotify::PlayerCommand::Volume(volume) = command {
+						let wait =
+							error.rate_limit_wait().unwrap_or(librespot_core::http_client::DEFAULT_RETRY_AFTER).max(Duration::from_secs(1));
+						s.pending_volume = Some(PendingVolume { at: Instant::now() + wait, device, volume, revision });
+					}
+					Response::RateLimited { limited: true, revision: Some(revision) }
+				},
+				result => match player_reply(result)? {
+					Ok(()) => return Ok(None),
+					Err(message) => Response::ControlFailed { revision, message },
+				},
+			}
 		},
 		_ => return Ok(None),
 	}))

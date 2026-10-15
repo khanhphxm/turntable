@@ -122,6 +122,14 @@ impl Request {
 }
 
 impl Response {
+	pub(super) fn error(route: Option<Route>, error: &spotify::Error) -> Self {
+		if error.rate_limit_wait().is_some() {
+			Self::RateLimited { limited: true, revision: None }
+		} else {
+			Self::Error { route, message: error.user_message() }
+		}
+	}
+
 	/// The variant and what it is about, for traces (see [`crate::net::trace`]).
 	pub fn label(&self) -> String {
 		match self {
@@ -151,6 +159,12 @@ pub enum Response {
 	},
 	/// A network failure, or a successful online account refresh (never a disk snapshot).
 	Offline(bool),
+	/// A native rate-limit incident survives loading attempts and cached responses.
+	/// Only a real network success clears it; a refused control rolls back its own revision.
+	RateLimited {
+		limited:  bool,
+		revision: Option<u64>,
+	},
 	NeedsLogin,
 	/// A definitive subscription refusal tears down the whole account, not just this worker.
 	SignInRejected(crate::engine::SignInError),

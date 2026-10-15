@@ -170,6 +170,7 @@ impl SessionReader {
 		if *stop.borrow() {
 			return Err(librespot_core::Error::unavailable("player session stopped").into());
 		}
+		self.session.http_client().check_rate_limit().map_err(E::from)?;
 		self.runtime.block_on(async {
 			tokio::select! {
 				biased;
@@ -438,7 +439,7 @@ pub struct Client {
 /// Commands and asynchronous failures share the engine's immediate event loop.
 enum Request {
 	Command { command: Command, id: u64 },
-	Failed { id: u64, message: String },
+	Failed { id: u64, error: librespot_core::Error },
 }
 
 impl Client {
@@ -536,14 +537,14 @@ impl Forward {
 					match self.spirc.playback(self.takeover_id, PlaybackCommand::Activate) {
 						Ok(()) => self.flush_deferred(),
 						Err(error) => {
-							self.failed(self.takeover_id, error.to_string());
+							self.failed_native(self.takeover_id, &error);
 							self.deferred.clear();
 						},
 					}
 				},
 				Some(request) = requests.recv() => match request {
 					Request::Command { command, id } => self.command(command, id),
-					Request::Failed { id, message } => self.failed(id, message),
+					Request::Failed { id, error } => self.failed_native(id, &error),
 				},
 			}
 		}
@@ -561,7 +562,7 @@ impl Forward {
 				let resume = TransferOptions { restore_paused: Some("resume".to_owned()), ..TransferOptions::default() };
 				if let Err(error) = self.spirc.playback(id, PlaybackCommand::Transfer(Some(TransferRequest { transfer_options: resume }))) {
 					self.takeover_by = None;
-					self.failed(id, error.to_string());
+					self.failed_native(id, &error);
 				}
 			},
 			command if self.takeover_by.is_some() => self.deferred.push((command, id)),
@@ -583,7 +584,7 @@ impl Forward {
 			&& !self.state.active
 			&& let Err(error) = self.spirc.playback(id, PlaybackCommand::Activate)
 		{
-			self.failed(id, error.to_string());
+			self.failed_native(id, &error);
 			return;
 		}
 		let result = if let Command::Load(start) = command {
@@ -593,13 +594,22 @@ impl Forward {
 			dispatch(&self.spirc, command, id)
 		};
 		if let Err(error) = result {
-			self.failed(id, error.to_string());
+			self.failed_native(id, &error);
 		}
 	}
 
 	fn failed(&mut self, id: u64, message: String) {
 		crate::net::trace::playback("command-failed", "playback", None);
 		(self.deliver)(Incoming::CommandFailed { id, message });
+	}
+
+	fn failed_native(&mut self, id: u64, error: &librespot_core::Error) {
+		let error = crate::spotify::Error::from_native(error);
+		if error.rate_limit_wait().is_some() {
+			(self.deliver)(Incoming::RateLimited { id, limited: true });
+		} else {
+			self.failed(id, error.user_message());
+		}
 	}
 
 	fn event(&mut self, event: Event) {
@@ -646,12 +656,15 @@ impl Forward {
 	}
 
 	fn snapshot(&mut self, snap: StateSnapshot) {
-		if let Some((id, message)) = snap.command_error {
+		if let Some(limited) = snap.rate_limited {
+			(self.deliver)(Incoming::RateLimited { id: 0, limited });
+		}
+		if let Some((id, error)) = snap.command_error {
 			if id == self.takeover_id {
 				self.takeover_by = None;
 				self.deferred.clear();
 			}
-			self.failed(id, message);
+			self.failed_native(id, &error);
 			return;
 		}
 		if let Some(cluster) = snap.cluster {

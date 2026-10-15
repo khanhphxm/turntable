@@ -41,7 +41,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
-use tokio::{sync::mpsc, time::sleep};
+use tokio::{sync::{mpsc, watch}, time::{Instant, sleep, sleep_until}};
 
 #[derive(Debug, Error)]
 enum SpircError {
@@ -95,6 +95,7 @@ struct SpircTask {
     user_attributes_mutation: BoxedStreamResult<UserAttributesMutation>,
 
     commands: Option<mpsc::UnboundedReceiver<SpircCommand>>,
+    volume_updates: watch::Receiver<u16>,
     player_events: Option<PlayerEventChannel>,
 
     context_resolver: ContextResolver,
@@ -105,9 +106,8 @@ struct SpircTask {
     /// is set when transferring, and used after resolving the contexts to finish the transfer
     pub transfer_state: Option<TransferState>,
 
-    /// when set to true, it will update the volume after [VOLUME_UPDATE_DELAY],
-    /// when no other future resolves, otherwise resets the delay
-    update_volume: bool,
+    /// One debounced volume report, postponed to the shared native backoff deadline after a 429.
+    volume_update_at: Option<Instant>,
 
     /// when set to true, it will update the volume after [UPDATE_STATE_DELAY],
     /// when no other future resolves, otherwise resets the delay
@@ -133,7 +133,6 @@ enum SpircCommand {
     RepeatTrack(bool),
     Disconnect { pause: bool },
     SetPosition(u32),
-    SetVolume(u16),
     Activate,
     Transfer(Option<TransferRequest>),
     Load(LoadRequest),
@@ -229,7 +228,9 @@ pub struct StateSnapshot {
     /// This is registration's response (including a failed/empty cluster read).
     pub initial_cluster: bool,
     /// A local transport command was rejected while executing (not while enqueueing).
-    pub command_error: Option<(u64, String)>,
+    pub command_error: Option<(u64, Arc<Error>)>,
+    /// Native throttling has changed after a real request, independently of player events.
+    pub rate_limited: Option<bool>,
 }
 
 
@@ -237,12 +238,18 @@ const CONTEXT_FETCH_THRESHOLD: usize = 2;
 
 // delay to update volume after a certain amount of time, instead on each update request
 const VOLUME_UPDATE_DELAY: Duration = Duration::from_millis(500);
+
+fn volume_update_deadline(now: Instant, rate_limit_until: Option<Instant>) -> Instant {
+    let debounced = now + VOLUME_UPDATE_DELAY;
+    rate_limit_until.map_or(debounced, |until| until.max(debounced))
+}
 // to reduce updates to remote, we group some request by waiting for a set amount of time
 const UPDATE_STATE_DELAY: Duration = Duration::from_millis(200);
 
 /// The spotify connect handle
 pub struct Spirc {
     commands: mpsc::UnboundedSender<SpircCommand>,
+    volume: watch::Sender<u16>,
 }
 
 impl Spirc {
@@ -320,6 +327,7 @@ impl Spirc {
         let _ = session.login5().auth_token().await?;
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (volume_tx, volume_rx) = watch::channel(0);
 
         let player_events = player.get_player_event_channel();
 
@@ -346,6 +354,7 @@ impl Spirc {
             user_attributes_update,
             user_attributes_mutation,
             commands: Some(cmd_rx),
+            volume_updates: volume_rx,
             player_events: Some(player_events),
 
             context_resolver: ContextResolver::new(session.clone()),
@@ -354,13 +363,13 @@ impl Spirc {
             session,
 
             transfer_state: None,
-            update_volume: false,
+            volume_update_at: None,
             update_state: false,
 
             spirc_id,
         };
 
-        let spirc = Spirc { commands: cmd_tx };
+        let spirc = Spirc { commands: cmd_tx, volume: volume_tx };
 
         let initial_volume = task.connect_state.device_info().volume;
         task.connect_state.set_volume(0);
@@ -370,7 +379,7 @@ impl Spirc {
                 task.set_volume(volume);
                 // we don't want to update the volume initially,
                 // we just want to set the mixer to the correct volume
-                task.update_volume = false;
+                task.volume_update_at = None;
             }
             Err(why) => error!("failed to update initial volume: {why}"),
         };
@@ -470,11 +479,10 @@ impl Spirc {
         Ok(self.commands.send(SpircCommand::RepeatTrack(repeat))?)
     }
 
-    /// Update the volume to the given value.
-    ///
-    /// Does nothing if we are not the active device.
+    /// Applies the newest local volume and debounces its Connect report. A slider burst
+    /// replaces pending values instead of enqueueing one HTTP state update per step.
     pub fn set_volume(&self, volume: u16) -> Result<(), Error> {
-        Ok(self.commands.send(SpircCommand::SetVolume(volume))?)
+        self.volume.send(volume).map_err(Error::unavailable)
     }
 
     /// Updates the position to the given value.
@@ -557,7 +565,7 @@ impl SpircTask {
 
             // when state and volume update have a higher priority than context resolving
             // because of that the context resolving has to wait, so that the other tasks can finish
-            let allow_context_resolving = !self.update_state && !self.update_volume;
+            let allow_context_resolving = !self.update_state && self.volume_update_at.is_none();
 
             tokio::select! {
                 // startup of the dealer requires a connection_id, which is retrieved at the very beginning
@@ -615,6 +623,10 @@ impl SpircTask {
                     session_update,
                     match |session_update| self.handle_session_update(session_update)
                 },
+                Ok(()) = self.volume_updates.changed(), if self.connect_established => {
+                    let volume = *self.volume_updates.borrow_and_update();
+                    self.set_volume(volume);
+                },
                 cmd = async { commands?.recv().await }, if commands.is_some() && self.connect_established => if let Some(cmd) = cmd {
                     let (cmd, revision) = match cmd {
                         SpircCommand::Playback { revision, command } => (command.into_command(), revision),
@@ -630,7 +642,7 @@ impl SpircTask {
                     if let Err(error) = result {
                         debug!("could not dispatch command: {error}");
                         if let Some(tx) = &self.snapshots {
-                            let _ = tx.send(StateSnapshot { command_error: Some((revision, error.to_string())), ..StateSnapshot::default() });
+                            let _ = tx.send(StateSnapshot { command_error: Some((revision, Arc::new(error))), ..StateSnapshot::default() });
                         }
                     }
                 },
@@ -646,19 +658,37 @@ impl SpircTask {
                         error!("state update: {why}")
                     }
                 },
-                _ = async { sleep(VOLUME_UPDATE_DELAY).await }, if self.update_volume => {
-                    self.update_volume = false;
-
-                    info!("delayed volume update for all devices: volume is now {}", self.connect_state.device_info().volume);
-                    if let Err(why) = self.connect_state.notify_volume_changed(&self.session).await {
-                        error!("error updating connect state for volume update: {why}")
+                _ = async {
+                    match self.volume_update_at {
+                        Some(at) => sleep_until(at).await,
+                        None => std::future::pending().await,
                     }
-
-                    // for some reason the web-player does need two separate updates, so that the
-                    // position of the current track is retained, other clients also send a state
-                    // update before they send the volume update
-                    if let Err(why) = self.notify().await {
-                        error!("error updating connect state for volume update: {why}")
+                }, if self.volume_update_at.is_some() => {
+                    // A report already in flight is awaited by this loop. Its successor uses
+                    // only the newest slider value, never a queue of intermediate steps.
+                    if self.volume_updates.has_changed().unwrap_or(false) {
+                        let volume = *self.volume_updates.borrow_and_update();
+                        self.set_volume(volume);
+                    }
+                    self.volume_update_at = None;
+                    let result = async {
+                        self.connect_state.notify_volume_changed(&self.session).await?;
+                        // Spotify's web player needs both reports to retain track position.
+                        self.notify().await
+                    }.await;
+                    if let Err(error) = result {
+                        error!("error updating connect state for volume update: {error}");
+                        if error.kind == crate::core::error::ErrorKind::ResourceExhausted {
+                            self.volume_update_at = self.session.http_client().rate_limit_until()
+                                .map(Instant::from_std)
+                                .map(|until| volume_update_deadline(Instant::now(), Some(until)));
+                        }
+                        if let Some(tx) = &self.snapshots {
+                            let _ = tx.send(StateSnapshot { command_error: Some((0, Arc::new(error))), ..StateSnapshot::default() });
+                        }
+                    } else if let Some(tx) = &self.snapshots {
+                        let limited = self.session.http_client().rate_limit_until().is_some();
+                        let _ = tx.send(StateSnapshot { rate_limited: Some(limited), ..StateSnapshot::default() });
                     }
                 },
                 // context resolver handling, the idea/reason behind it the following:
@@ -798,13 +828,18 @@ impl SpircTask {
             SpircCommand::Pause => self.handle_pause(),
             SpircCommand::Prev => self.handle_prev()?,
             SpircCommand::Next => self.handle_next(None, false)?,
-            SpircCommand::VolumeUp => self.handle_volume_up(),
-            SpircCommand::VolumeDown => self.handle_volume_down(),
+            SpircCommand::VolumeUp => {
+                self.handle_volume_up();
+                return Ok(());
+            }
+            SpircCommand::VolumeDown => {
+                self.handle_volume_down();
+                return Ok(());
+            }
             SpircCommand::Shuffle(shuffle) => self.handle_shuffle(shuffle)?,
             SpircCommand::Repeat(repeat) => self.handle_repeat_context(repeat)?,
             SpircCommand::RepeatTrack(repeat) => self.handle_repeat_track(repeat),
             SpircCommand::SetPosition(position) => self.handle_seek(position),
-            SpircCommand::SetVolume(volume) => self.set_volume(volume),
             SpircCommand::Load(command) => self.handle_load(command, None, None).await?,
             SpircCommand::EditQueue { revision, edit } => {
                 if let QueueEdit::Jump { uid } = edit {
@@ -1991,6 +2026,7 @@ impl SpircTask {
             cluster: None,
             initial_cluster: false,
             command_error: None,
+            rate_limited: None,
         };
         let _ = tx.send(snapshot);
     }
@@ -2008,7 +2044,10 @@ impl SpircTask {
         let old_volume = self.connect_state.device_info().volume;
         let new_volume = volume as u32;
         if old_volume != new_volume || self.mixer.volume() != volume {
-            self.update_volume = true;
+            self.volume_update_at = Some(volume_update_deadline(
+                Instant::now(),
+                self.session.http_client().rate_limit_until().map(Instant::from_std),
+            ));
 
             self.connect_state.set_volume(new_volume);
             self.mixer.set_volume(volume);
@@ -2026,5 +2065,57 @@ impl SpircTask {
 impl Drop for SpircTask {
     fn drop(&mut self) {
         debug!("drop Spirc[{}]", self.spirc_id);
+    }
+}
+
+#[cfg(test)]
+mod volume_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn slider_bursts_send_only_the_latest_value_before_and_during_a_report() {
+        let (commands, mut queued) = mpsc::unbounded_channel();
+        let (volume, mut updates) = watch::channel(0);
+        let spirc = Spirc { commands, volume };
+        for volume in 1..=1000 {
+            spirc.set_volume(volume).unwrap();
+        }
+        assert!(queued.try_recv().is_err(), "volume must not reach handle_command's immediate notify");
+        updates.changed().await.unwrap();
+        let first_report = *updates.borrow_and_update();
+        assert_eq!(first_report, 1000);
+        assert!(!updates.has_changed().unwrap());
+
+        // The report is in flight: the receiver does not consume until it completes.
+        for volume in 1001..=2000 {
+            spirc.set_volume(volume).unwrap();
+        }
+        updates.changed().await.unwrap();
+        let next_report = *updates.borrow_and_update();
+        assert_eq!(next_report, 2000);
+        assert!(!updates.has_changed().unwrap());
+        assert!(queued.try_recv().is_err());
+        assert_eq!([first_report, next_report], [1000, 2000], "2000 slider steps need only two reports");
+    }
+
+    #[test]
+    fn slider_changes_cannot_shorten_a_native_backoff_or_schedule_idle_work() {
+        let now = Instant::now();
+        let backoff = now + Duration::from_secs(60);
+        for step in 0..1000 {
+            let at = now + Duration::from_millis(step);
+            assert_eq!(volume_update_deadline(at, Some(backoff)), backoff);
+        }
+        assert_eq!(volume_update_deadline(now, None), now + VOLUME_UPDATE_DELAY);
+        assert_eq!(volume_update_deadline(backoff, Some(backoff)), backoff + VOLUME_UPDATE_DELAY);
+    }
+
+    #[test]
+    fn a_stopped_reporter_rejects_new_volume_instead_of_silently_losing_it() {
+        let (commands, _queued) = mpsc::unbounded_channel();
+        let (volume, updates) = watch::channel(0);
+        let spirc = Spirc { commands, volume };
+        drop(updates);
+        assert!(spirc.set_volume(42).is_err());
     }
 }

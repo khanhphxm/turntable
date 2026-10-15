@@ -392,7 +392,7 @@ impl State {
 	/// Whether the player is on its way up (the setup page shows progress instead of the button).
 	/// Offline retries run in the background without showing setup progress again.
 	pub fn starting_player(&self) -> bool {
-		self.starting && !self.offline
+		self.starting && !self.offline && !self.library.rate_limited
 	}
 
 	/// Whether the setup steps still have something for the user to do.

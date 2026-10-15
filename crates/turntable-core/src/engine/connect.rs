@@ -77,7 +77,7 @@ impl Forward {
 		let requests = self.requests.clone();
 		tokio::spawn(async move {
 			if let Err(error) = super::network_timeout(super::NETWORK_TIMEOUT, transfer(&session, &device, play)).await {
-				let _ = requests.send(super::Request::Failed { id, message: format!("Couldn't transfer playback: {error}") });
+				let _ = requests.send(super::Request::Failed { id, error });
 			}
 		});
 	}
@@ -95,6 +95,7 @@ impl SessionReader {
 	}
 
 	pub(crate) fn control(&self, device: &str, command: PlayerCommand) -> Result<(), librespot_core::Error> {
+		self.session().http_client().check_rate_limit()?;
 		let (method, endpoint, body) = command_request(self.session().device_id(), device, command);
 		let body = serde_json::to_vec(&body)?;
 		self.block_on(async {

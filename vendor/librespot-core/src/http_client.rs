@@ -1,5 +1,5 @@
 use std::{
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -39,11 +39,15 @@ use crate::{
 pub const RATE_LIMIT_INTERVAL: Duration = Duration::from_secs(30);
 pub const RATE_LIMIT_MAX_WAIT: Duration = Duration::from_secs(10);
 pub const RATE_LIMIT_CALLS_PER_INTERVAL: u32 = 300;
+/// Native services do not always include Retry-After. A short shared pause avoids request bursts.
+pub const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
 pub enum HttpClientError {
     #[error("Response status code: {0}")]
     StatusCode(hyper::StatusCode),
+    #[error("Rate limited, retry in {retry_after:?}")]
+    RateLimited { retry_after: Duration },
 }
 
 impl From<HttpClientError> for Error {
@@ -88,6 +92,7 @@ impl From<HttpClientError> for Error {
                     _ => Error::unknown(err),
                 }
             }
+            HttpClientError::RateLimited { .. } => Error::resource_exhausted(err),
         }
     }
 }
@@ -101,6 +106,8 @@ pub struct HttpClient {
 
     rate_limiter:
         RateLimiter<String, DefaultKeyedStateStore<String>, MonotonicClock, NoOpMiddleware>,
+    // Shared by all of a session's HTTP and Mercury readers, not by just the rejected request.
+    rate_limit_until: Mutex<Option<Instant>>,
 }
 
 impl HttpClient {
@@ -141,6 +148,7 @@ impl HttpClient {
             proxy_url: proxy_url.cloned(),
             hyper_client: OnceLock::new(),
             rate_limiter,
+            rate_limit_until: Mutex::new(None),
         }
     }
 
@@ -188,6 +196,41 @@ impl HttpClient {
             .get_or_init(|| Self::try_create_hyper_client(self.proxy_url.as_ref()).unwrap())
     }
 
+    /// The incident remains visible after its deadline until a real network request succeeds.
+    /// Cached responses and attempts rejected by the gate must not make the UI flicker.
+    pub fn rate_limit_until(&self) -> Option<Instant> {
+        *self.rate_limit_until.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// Refuses requests locally while a native service has asked this session to slow down.
+    pub fn check_rate_limit(&self) -> Result<(), Error> {
+        if let Some(until) = self.rate_limit_until() {
+            let retry_after = until.saturating_duration_since(Instant::now());
+            if !retry_after.is_zero() {
+                return Err(HttpClientError::RateLimited { retry_after }.into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Starts or extends a session-wide pause. Zero headers still allow at most one retry/second.
+    pub fn rate_limit(&self, retry_after: Option<Duration>) -> Error {
+        let retry_after = retry_after.unwrap_or(DEFAULT_RETRY_AFTER).max(Duration::from_secs(1));
+        let now = Instant::now();
+        let until = now.checked_add(retry_after).unwrap_or(now + Duration::from_secs(u32::MAX.into()));
+        let retry_after = until.saturating_duration_since(now);
+        let mut current = self.rate_limit_until.lock().unwrap_or_else(|error| error.into_inner());
+        *current = Some(current.map_or(until, |current| current.max(until)));
+        HttpClientError::RateLimited { retry_after }.into()
+    }
+
+    pub(crate) fn clear_rate_limit(&self) {
+        let mut current = self.rate_limit_until.lock().unwrap_or_else(|error| error.into_inner());
+        if current.is_some_and(|until| until <= Instant::now()) {
+            *current = None;
+        }
+    }
+
     pub async fn request(&self, req: Request<Bytes>) -> Result<Response<Incoming>, Error> {
         debug!("Requesting {}", req.uri());
 
@@ -195,6 +238,7 @@ impl HttpClient {
         // As correct as that may be technically, we now need all this boilerplate to clone it
         // ourselves, as any `Request` is moved in the loop.
         let (parts, body_as_bytes) = req.into_parts();
+        let mut retried = false;
 
         loop {
             let mut req = Request::builder()
@@ -211,14 +255,16 @@ impl HttpClient {
                 let code = response.status();
 
                 if code == StatusCode::TOO_MANY_REQUESTS {
-                    if let Some(duration) = Self::get_retry_after(response.headers()) {
-                        warn!(
-                            "Rate limited by service, retrying in {} seconds...",
-                            duration.as_secs()
-                        );
-                        tokio::time::sleep(duration).await;
-                        continue;
+                    let wait = Self::retry_after(response.headers()).unwrap_or(DEFAULT_RETRY_AFTER).max(Duration::from_secs(1));
+                    let error = self.rate_limit(Some(wait));
+                    // Only this GET gets one backoff wakeup. Other callers fail fast at the
+                    // shared gate; writes are never replayed and long waits are surfaced.
+                    if retried || parts.method != http::Method::GET || wait > RATE_LIMIT_MAX_WAIT {
+                        return Err(error);
                     }
+                    retried = true;
+                    tokio::time::sleep(wait).await;
+                    continue;
                 }
 
                 if !code.is_success() {
@@ -227,6 +273,7 @@ impl HttpClient {
             }
 
             let response = response?;
+            self.clear_rate_limit();
             return Ok(response);
         }
     }
@@ -241,6 +288,7 @@ impl HttpClient {
     }
 
     pub fn request_fut(&self, mut req: Request<Bytes>) -> Result<ResponseFuture, Error> {
+        self.check_rate_limit()?;
         let headers_mut = req.headers_mut();
         headers_mut.insert(USER_AGENT, self.user_agent.clone());
 
@@ -260,16 +308,17 @@ impl HttpClient {
             None => String::from(""),
         };
         self.rate_limiter.check_key(&domain).map_err(|e| {
-            Error::resource_exhausted(format!(
-                "rate limited for at least another {} seconds",
-                e.wait_time_from(Instant::now()).as_secs()
-            ))
+            self.rate_limit(Some(e.wait_time_from(Instant::now())))
         })?;
 
         Ok(self.hyper_client().request(req.map(Full::new)))
     }
 
     pub fn get_retry_after(headers: &HeaderMap<HeaderValue>) -> Option<Duration> {
+        Self::retry_after(headers).filter(|duration| *duration <= RATE_LIMIT_MAX_WAIT)
+    }
+
+    fn retry_after(headers: &HeaderMap<HeaderValue>) -> Option<Duration> {
         let now = Date::now_utc().as_timestamp_ms();
 
         let mut retry_after_ms = None;
@@ -291,24 +340,11 @@ impl HttpClient {
             // Generic RFC compliant (including *.spotify.com)
             if let Ok(retry_after) = header_val.to_str() {
                 if let Ok(duration) = retry_after.parse::<i64>() {
-                    retry_after_ms = Some(duration * 1000)
+                    retry_after_ms = Some(duration.saturating_mul(1000))
                 }
             }
         }
 
-        if let Some(retry_after) = retry_after_ms {
-            let duration = Duration::from_millis(retry_after as u64);
-            if duration <= RATE_LIMIT_MAX_WAIT {
-                return Some(duration);
-            } else {
-                debug!(
-                    "Waiting {} seconds would exceed {} second limit",
-                    duration.as_secs(),
-                    RATE_LIMIT_MAX_WAIT.as_secs()
-                );
-            }
-        }
-
-        None
+        retry_after_ms.map(|milliseconds| Duration::from_millis(milliseconds.max(0) as u64))
     }
 }

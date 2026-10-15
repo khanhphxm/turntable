@@ -36,9 +36,41 @@ pub enum Error {
 }
 
 impl Error {
+	pub(crate) const RATE_LIMIT_MESSAGE: &str = "Spotify asked us to slow down. Try again in a few seconds.";
+
 	/// A 403: the token lacks a scope, or Development Mode doesn't serve this item.
 	pub fn is_forbidden(&self) -> bool {
 		matches!(self, Self::Http { status: 403, .. })
+	}
+
+	/// Preserves native HTTP/Mercury rate limits before any error becomes UI text.
+	pub(crate) fn from_native(error: &librespot_core::Error) -> Self {
+		use librespot_core::{
+			error::ErrorKind,
+			http_client::{DEFAULT_RETRY_AFTER, HttpClientError},
+		};
+
+		let status = error.error.downcast_ref::<HttpClientError>();
+		if error.kind == ErrorKind::ResourceExhausted
+			|| matches!(status, Some(HttpClientError::StatusCode(http::StatusCode::TOO_MANY_REQUESTS)))
+		{
+			let retry_after = match status {
+				Some(HttpClientError::RateLimited { retry_after }) => *retry_after,
+				_ => DEFAULT_RETRY_AFTER,
+			};
+			Self::RateLimited { retry_after: Some(retry_after) }
+		} else if error.kind == ErrorKind::Unauthenticated {
+			Self::NativeAuthRequired
+		} else {
+			Self::Network(error.to_string())
+		}
+	}
+
+	pub(crate) fn rate_limit_wait(&self) -> Option<Duration> {
+		match self {
+			Self::RateLimited { retry_after } => Some(retry_after.unwrap_or(librespot_core::http_client::DEFAULT_RETRY_AFTER)),
+			_ => None,
+		}
 	}
 
 	/// One calm sentence for the UI (Display is for logs and the CLI).
@@ -49,7 +81,7 @@ impl Error {
 			Self::Http { status: 403, .. } => "Spotify doesn't allow that for this item.".into(),
 			Self::Http { status: 404, .. } => "That isn't available on Spotify anymore.".into(),
 			Self::Http { .. } | Self::Parse(_) | Self::Io(_) => "Something went wrong talking to Spotify.".into(),
-			Self::RateLimited { .. } => "Spotify asked us to slow down. Try again in a few seconds.".into(),
+			Self::RateLimited { .. } => Self::RATE_LIMIT_MESSAGE.into(),
 			Self::QuotaExceeded { retry_after } => match retry_after {
 				Some(d) if d.as_secs() >= 3600 => {
 					format!("Your Spotify app hit its daily request limit. It resets in about {} h.", d.as_secs().div_ceil(3600))
@@ -126,16 +158,50 @@ impl From<io::Error> for Error {
 
 impl From<librespot_core::Error> for Error {
 	fn from(err: librespot_core::Error) -> Self {
-		if err.kind == librespot_core::error::ErrorKind::Unauthenticated {
-			Self::NativeAuthRequired
-		} else {
-			Self::Network(err.to_string())
-		}
+		Self::from_native(&err)
 	}
 }
 
 impl From<serde_json::Error> for Error {
 	fn from(err: serde_json::Error) -> Self {
 		Self::Parse(err.to_string())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use librespot_core::http_client::HttpClientError;
+
+	use super::*;
+
+	#[test]
+	fn native_429_uses_the_existing_rate_limit_message() {
+		let native: librespot_core::Error = HttpClientError::StatusCode(http::StatusCode::TOO_MANY_REQUESTS).into();
+		assert_eq!(native.to_string(), "Resource has been exhausted { Response status code: 429 Too Many Requests }");
+		let error = Error::from(native);
+		assert_eq!(error.user_message(), Error::RateLimited { retry_after: None }.user_message());
+		assert!(matches!(error, Error::RateLimited { .. }));
+	}
+
+	#[test]
+	fn native_resource_exhaustion_status_429_and_mercury_share_the_same_error() {
+		use librespot_core::{
+			error::ErrorKind,
+			mercury::{MercuryError, MercuryResponse},
+		};
+
+		for native in [
+			librespot_core::Error::resource_exhausted("native service budget exhausted"),
+			librespot_core::Error {
+				kind:  ErrorKind::Unknown,
+				error: Box::new(HttpClientError::StatusCode(http::StatusCode::TOO_MANY_REQUESTS)),
+			},
+			MercuryError::Response(MercuryResponse { uri: "hm://test".into(), status_code: 429, payload: Vec::new() }).into(),
+		] {
+			let error = Error::from(native);
+			assert!(matches!(error, Error::RateLimited { retry_after: Some(wait) } if wait == Duration::from_secs(5)));
+			assert_eq!(error.user_message(), Error::RateLimited { retry_after: None }.user_message());
+		}
+		assert!(matches!(Error::from(librespot_core::Error::unauthenticated("expired")), Error::NativeAuthRequired));
 	}
 }

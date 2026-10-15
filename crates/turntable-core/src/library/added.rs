@@ -621,7 +621,10 @@ impl Membership {
 	}
 
 	fn failed(error: &IndexError, deliver: &dyn Fn(Response)) {
-		deliver(Response::Error { route: None, message: format!("Couldn't update playlist membership: {error}") });
+		match error {
+			IndexError::Spotify(error) => deliver(Response::error(None, &crate::spotify::Error::from_native(error))),
+			error => deliver(Response::Error { route: None, message: format!("Couldn't update playlist membership: {error}") }),
+		}
 	}
 }
 

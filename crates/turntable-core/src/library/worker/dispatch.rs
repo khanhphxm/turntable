@@ -7,6 +7,7 @@ use std::{
 		atomic::{AtomicU64, Ordering},
 		mpsc,
 	},
+	time::Instant,
 };
 
 use parking_lot::Mutex;
@@ -23,6 +24,7 @@ pub(super) struct Runner {
 	player:            Option<Reader>,
 	added:             Membership,
 	refresh_added:     bool,
+	rate_limited:      bool,
 	urgent:            watch::Receiver<()>,
 	generation:        Arc<AtomicU64>,
 	active_generation: u64,
@@ -47,6 +49,7 @@ impl Runner {
 			player: None,
 			added: Membership::new(cache),
 			refresh_added: false,
+			rate_limited: false,
 			urgent,
 			generation,
 			active_generation: 0,
@@ -69,6 +72,9 @@ impl Runner {
 				self.process(request);
 				continue;
 			}
+			if self.retry_volume() {
+				continue;
+			}
 			if let Some(session) = &mut self.session {
 				session.client.forget_recent();
 				session.pages.evict_expired();
@@ -81,11 +87,17 @@ impl Runner {
 					}
 				};
 				self.refresh_added = !self.added.refresh(self.urgent.clone(), &deliver);
+				self.publish_rate_limit();
 				continue;
 			}
-			match rx.recv() {
+			let received = match self.session.as_ref().and_then(|session| session.pending_volume.as_ref()) {
+				Some(volume) => rx.recv_timeout(volume.at.saturating_duration_since(Instant::now())),
+				None => rx.recv().map_err(|_error| mpsc::RecvTimeoutError::Disconnected),
+			};
+			match received {
 				Ok(request) => queue.push(request),
-				Err(_) => break,
+				Err(mpsc::RecvTimeoutError::Timeout) => {},
+				Err(mpsc::RecvTimeoutError::Disconnected) => break,
 			}
 		}
 	}
@@ -116,6 +128,7 @@ impl Runner {
 					self.serve(Request::Connect);
 				} else if let Some(session) = &mut self.session {
 					session.attach(None, &output);
+					session.pending_volume = None;
 				}
 			},
 			Inbox::Request(_, request) => {
@@ -128,6 +141,37 @@ impl Runner {
 				self.serve(request);
 			},
 		}
+		self.publish_rate_limit();
+	}
+
+	fn publish_rate_limit(&mut self) {
+		let limited =
+			self.session.as_ref().and_then(|session| session.player.as_ref()).or(self.player.as_ref()).is_some_and(Reader::rate_limited);
+		if limited != self.rate_limited {
+			self.rate_limited = limited;
+			if self.generation.load(Ordering::Acquire) == self.active_generation {
+				(self.deliver)(self.active_generation, Response::RateLimited { limited, revision: None });
+			}
+		}
+	}
+
+	fn retry_volume(&mut self) -> bool {
+		let Some(session) = &mut self.session else { return false };
+		if self.active_generation != self.generation.load(Ordering::Acquire) {
+			session.pending_volume = None;
+			return false;
+		}
+		if session.pending_volume.as_ref().is_none_or(|volume| volume.at > Instant::now()) {
+			return false;
+		}
+		let Some(volume) = session.pending_volume.take() else { return false };
+		self.serve(Request::Control {
+			device:   volume.device,
+			command:  crate::spotify::PlayerCommand::Volume(volume.volume),
+			revision: volume.revision,
+		});
+		self.publish_rate_limit();
+		true
 	}
 
 	fn serve(&mut self, request: Request) {

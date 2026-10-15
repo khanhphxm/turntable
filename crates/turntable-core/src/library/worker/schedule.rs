@@ -161,4 +161,21 @@ mod tests {
 		);
 		assert!(queue.pop(true).is_none());
 	}
+
+	#[test]
+	fn a_volume_slider_burst_queues_one_latest_report_not_a_request_per_step() {
+		let mut queue = Queue::default();
+		for volume in 0..=100 {
+			queue.push(Inbox::Request(0, Request::Control {
+				device:   "phone".into(),
+				command:  crate::spotify::PlayerCommand::Volume(volume),
+				revision: 0,
+			}));
+		}
+		assert!(matches!(
+			queue.pop(true),
+			Some(Inbox::Request(0, Request::Control { command: crate::spotify::PlayerCommand::Volume(100), .. }))
+		));
+		assert!(queue.pop(true).is_none(), "101 slider values cause one worker send");
+	}
 }
