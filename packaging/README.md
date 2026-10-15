@@ -16,7 +16,7 @@ cargo build --release --locked -p turntable --target x86_64-apple-darwin
 mkdir -p target/universal/release
 lipo -create target/aarch64-apple-darwin/release/turntable \
   target/x86_64-apple-darwin/release/turntable -output target/universal/release/turntable
-export TURNTABLE_VERSION=0.1.1  # match Cargo.toml
+export TURNTABLE_VERSION=0.1.2  # match Cargo.toml
 export CODESIGN_IDENTITY='Developer ID Application: Khanh Pham (24U222KA6B)'
 packaging/bundle-macos.sh
 packaging/dmg-macos.sh
@@ -36,7 +36,7 @@ the app before archiving, then notarizes/staples the signed DMG too.
 ### Linux
 
 Build natively on Ubuntu 24.04 for each CPU, then run
-`TURNTABLE_VERSION=0.1.1 packaging/bundle-linux.sh [binary]`.
+`TURNTABLE_VERSION=0.1.2 packaging/bundle-linux.sh [binary]`.
 `TURNTABLE_ARCH=x86_64|aarch64` overrides CPU detection. Each tarball includes
 `bin/turntable`, a `.desktop` entry, hicolor PNG/SVG icons, LICENSE,
 THIRD_PARTY_NOTICES and INSTALL.md;
@@ -49,7 +49,7 @@ See [INSTALL-linux.md](INSTALL-linux.md); shared CI build headers are installed 
 ### Windows
 
 Build with `cargo build --release -p turntable`, then run
-`packaging/bundle-windows.ps1 -Version 0.1.1 [-Binary PATH]` in PowerShell.
+`packaging/bundle-windows.ps1 -Version 0.1.2 [-Binary PATH]` in PowerShell.
 Install [Inno Setup 6](https://jrsoftware.org/isinfo.php) first (preinstalled on
 `windows-2025`); `-Iscc PATH` overrides its standard Program Files (x86) location.
 The script produces a portable ZIP and per-user `-setup.exe`. The installer in
@@ -144,7 +144,7 @@ keys with **Allow write access**, and save the private key as `HOMEBREW_TAP_KEY`
 
 1. Update `[workspace.package].version` and `Cargo.lock`; all workspace packages
    must match. Merge after CI passes, then tag that main commit, substituting
-   the real version: `git tag -a v0.1.1 -m 'Turntable 0.1.1' && git push origin v0.1.1`.
+   the real version: `git tag -a v0.1.2 -m 'Turntable 0.1.2' && git push origin v0.1.2`.
 2. Watch **Release**. For manual dispatch, select the **existing release tag**
    in the workflow ref dropdown (not `main`) and use the same tag as the input;
    the `release` environment only permits `v*` tag refs. It validates the
