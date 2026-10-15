@@ -53,8 +53,9 @@ name and regenerated device ID; never benchmark with the live user profile.
 ## Idle Metal command storage
 
 `WindowFrameSource::complete_frame` reports its existing parked-frame transition
-to the window. That callback then retires the renderer's command queue after
-drawable parking. This does not add a timer, alter the three-unused-frame tail,
+to the window. That callback then retires an idle renderer command queue after
+drawable parking; pending GPU frames keep their existing queue and order.
+This does not add a timer, alter the three-unused-frame tail,
 park during live resize, change visibility handling, or replace the backing
 layer. The renderer recreates its queue on the next actual draw. See
 `../gpui-pre-apple/TURNTABLE.md` for resource ownership, measurements and the
