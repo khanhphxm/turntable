@@ -5117,7 +5117,7 @@ impl Window {
     }
 
     /// Paint an image into the scene for the next frame at the current z-index.
-    /// This method will panic if the frame_index is not valid
+    /// Returns an error if the frame index is invalid or its pixels cannot be regenerated.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
     /// Paint an image into `bounds`, positioning and scaling it according to `image_bounds`.
@@ -5153,10 +5153,8 @@ impl Window {
             .get_or_insert_with(params.into(), &mut || {
                 Ok(Some((
                     data.size(frame_index),
-                    Cow::Borrowed(
-                        data.as_bytes(frame_index)
-                            .expect("It's the caller's job to pass a valid frame index"),
-                    ),
+                    data.as_bytes(frame_index)
+                        .context("Image frame pixels are unavailable")?,
                 )))
             })?
             .expect("Callback above only returns Some");
