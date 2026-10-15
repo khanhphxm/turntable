@@ -99,10 +99,9 @@ jobs:
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: scripts/install-linux-deps.sh
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-cache
         with:
-          shared-key: ci-lint-${{ matrix.os }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          key: ci-${{ matrix.os }}
       - name: Install dependency auditor
         if: runner.os == 'Linux'
         run: cargo install cargo-machete --version 0.9.1 --locked
@@ -136,10 +135,9 @@ jobs:
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: scripts/install-linux-deps.sh
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-cache
         with:
-          shared-key: ci-test-${{ matrix.os }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          key: ci-${{ matrix.os }}
       # Cargo runs workspace tests, not dependency/backend tests needing a native desktop.
       # Keep the default ignored-test behavior for manual benchmarks and the native tray test.
       - run: cargo test --locked --workspace --all-targets
@@ -173,10 +171,9 @@ jobs:
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: scripts/install-linux-deps.sh
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-cache
         with:
-          shared-key: ci-build-${{ matrix.os }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          key: ci-${{ matrix.os }}
       - name: Release build including vendored path patches
         env:
           RUST_TARGET: ${{ matrix.target }}

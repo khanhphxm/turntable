@@ -1,0 +1,22 @@
+name: Rust cache
+description: >
+  Caches the Cargo registry and compiler outputs. rust-cache alone drops the vendored path
+  crates from its target cache (they sit inside the workspace), so gpui and librespot rebuilt on
+  every run; sccache caches each rustc output by content instead, path crates included.
+inputs:
+  key:
+    description: Registry cache key; the registry is the same for every job on one OS.
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: ${{ inputs.key }}
+        cache-targets: false
+        save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    - uses: mozilla-actions/sccache-action@v0.0.11
+    - shell: bash
+      run: |
+        echo SCCACHE_GHA_ENABLED=true >> "$GITHUB_ENV"
+        echo RUSTC_WRAPPER=sccache >> "$GITHUB_ENV"
