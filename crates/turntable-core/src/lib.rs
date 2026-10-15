@@ -1,4 +1,4 @@
-//! UI-agnostic Spotify playback, audio processing, library and application state.
+//! UI-agnostic (probe) Spotify playback, audio processing, library and application state.
 //!
 //! [`Controller`] owns the workers and engine. The application host renders [`State`],
 //! sends [`Msg`], and schedules [`Controller::pump`] using wakes and deadlines.
