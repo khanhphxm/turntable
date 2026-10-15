@@ -146,8 +146,7 @@ jobs:
 
   build:
     name: build (${{ matrix.os }})
-    # Release builds are slow; only spend them once lint and tests pass everywhere.
-    needs: [lint, test]
+    needs: fmt
     strategy:
       fail-fast: false
       matrix:
