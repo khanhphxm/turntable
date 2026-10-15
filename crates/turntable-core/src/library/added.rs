@@ -29,7 +29,6 @@ use librespot_core::{Session, SpotifyId, SpotifyUri};
 use librespot_metadata::{Metadata, Playlist};
 use librespot_protocol::playlist4_external::{ListItems, SelectedListContent};
 use protobuf::Message;
-use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 use tempfile::NamedTempFile;
 use thiserror::Error;
@@ -176,8 +175,7 @@ impl PlaylistIndex {
 		if username.is_empty() {
 			return Err(IndexError::InvalidData("empty username"));
 		}
-		let key = Sha256::digest(username.as_bytes());
-		let cache_path = cache_dir.join("playlist-index").join(format!("{key:x}.plidx"));
+		let cache_path = cache_dir.join("playlist-index").join(format!("{}.plidx", crate::sha256_hex(username.as_bytes())));
 		let mut index =
 			Self { username: username.to_owned(), cache_path, playlists: HashMap::new(), by_track: HashMap::new(), cache_dirty: true };
 		let file = match File::open(&index.cache_path) {

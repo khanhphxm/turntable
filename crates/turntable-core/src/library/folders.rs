@@ -9,7 +9,6 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::{Entry, Kind, Library, Request, Sort, model::fold};
 use crate::{app::config, spotify::Playlist};
@@ -289,7 +288,7 @@ struct Saved {
 }
 
 fn path(config: &Path, account: &str) -> PathBuf {
-	config.join("library-folders").join(format!("{:x}.json", Sha256::digest(account.as_bytes())))
+	config.join("library-folders").join(format!("{}.json", crate::sha256_hex(account.as_bytes())))
 }
 
 pub(super) fn load(config: &Path, account: &str) -> io::Result<HashSet<String>> {

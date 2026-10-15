@@ -6,8 +6,6 @@ use std::{
 	path::{Path, PathBuf},
 };
 
-use sha2::{Digest, Sha256};
-
 use super::{State, config};
 use crate::library::{Route, Tile};
 
@@ -19,7 +17,7 @@ pub(crate) struct RecentSearches {
 
 impl RecentSearches {
 	fn path(config: &Path, account: &str) -> PathBuf {
-		config.join("recent-searches").join(format!("{:x}.json", Sha256::digest(account.as_bytes())))
+		config.join("recent-searches").join(format!("{}.json", crate::sha256_hex(account.as_bytes())))
 	}
 
 	pub(crate) fn load(&mut self, config: &Path, account: Option<String>) {

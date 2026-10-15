@@ -7,7 +7,6 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::app::config;
 
@@ -21,7 +20,7 @@ struct Saved {
 }
 
 fn path(config: &Path, account: &str) -> PathBuf {
-	config.join("library-pins").join(format!("{:x}.json", Sha256::digest(account.as_bytes())))
+	config.join("library-pins").join(format!("{}.json", crate::sha256_hex(account.as_bytes())))
 }
 
 pub(super) fn load(config: &Path, account: &str) -> io::Result<Vec<String>> {
