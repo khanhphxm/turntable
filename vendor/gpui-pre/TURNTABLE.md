@@ -81,4 +81,55 @@ IOSurface (7,438,336 bytes), IOAccelerator graphics (5,570,560 bytes) and owned 
 graphics (1,294,336 bytes) were unchanged. System Malloc Small changed by −65,536 bytes;
 the change itself only affects Rust arena allocations.
 
+## Regenerable image pixels
+
+`RenderImage::new_with_reloader` accepts an already-decoded single BGRA frame and a
+thread-safe callback that can reproduce it. `as_bytes` returns a `Cow`: ordinary
+frames are still borrowed without copying; regenerable images transfer their first
+buffer into the atlas upload and generate an owned buffer only on a later atlas
+miss. Dimensions, delay, byte length and image identity remain available without
+decoding. The reload must preserve dimensions; a failed or mismatched reload is
+reported as unavailable pixels instead of uploading an invalid byte range.
+
+`src/assets.rs` owns this generic mechanism; `Window::paint_image` in `src/window.rs`
+passes the bytes directly to the existing atlas callback. Atlas hits, layout and
+cached paint do not reload. No renderer/backend, texture resolution, image sampling,
+animation or atlas page policy changes. The default persistent constructor remains
+appropriate for images that cannot be reproduced cheaply.
+
+Turntable's cover cache supplies the same JPEG/PNG/WebP resize, blur and BGRA
+conversion for initial background decoding and reloads, using weak encoded-source
+references so eviction still releases artwork. Full-size CPU pixels need not live
+as long as their uploaded tiles. Cache budgets use the uncompressed byte length
+without consuming initial pixels. The initial background decode also prepares a
+≤96 px BGRA preview before transferring the full buffer; retiring a page reuses
+that preview without synchronously decoding large images on the UI thread. Both
+full resource size and the small preview count against the active cache budget.
+Warm previews retain the existing no-placeholder Back behavior.
+
+Tests cover buffer ownership transfer without a copy, metadata after transfer,
+borrowed persistent frames, invalid indices, failed/mismatched reloads, and a real
+image element that reloads only after its atlas entry is explicitly removed.
+
+Measured on macOS/Apple Silicon, 1920×950 at 1x, using the real app in the
+offscreen Metal harness and the same cached account. Values are dirty footprint
+MiB (baseline 54bf15b → this patch); offscreen targets omit the native drawable:
+
+| Navigation stage | jemalloc (Tag 15) | IOAccelerator (graphics) | Total |
+| --- | ---: | ---: | ---: |
+| Home | 10.953 → 9.344 | 3.312 → 3.344 | 29.094 → 27.438 |
+| Playlist | 11.156 → 10.219 | 2.719 → 2.781 | 28.813 → 27.860 |
+| Liked Songs | 11.000 → 10.328 | 3.000 → 3.062 | 29.001 → 28.376 |
+| Home after both pages | 12.375 → 10.422 | 4.234 → 4.594 | 31.579 → 29.938 |
+
+This is a CPU-pixel reduction, not a GPU-allocation reduction: tile dimensions
+are unchanged and atlas packing varies with decode completion order. Full-frame
+1x screenshots, immediate Back and settled Back at 1x/2x matched pixel-for-pixel;
+the initial 2x shot differed in 191 edge colour channels (maximum 10/255) at one
+circular image's antialiased boundary, with unchanged image interiors and text.
+Preparing the previews off-thread removed the rejected synchronous variant's
+23–28 ms navigation penalty. Native idle samples remained 0.0% CPU. Final
+native-window footprint comparison was inconclusive after the desktop locked:
+Home's covers were not painted while occluded, even with the display awake.
+
 
