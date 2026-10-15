@@ -81,6 +81,28 @@ IOSurface (7,438,336 bytes), IOAccelerator graphics (5,570,560 bytes) and owned 
 graphics (1,294,336 bytes) were unchanged. System Malloc Small changed by −65,536 bytes;
 the change itself only affects Rust arena allocations.
 
+## Layout capacity after cached frames
+
+`src/taffy.rs` releases Taffy's peak node storage after two consecutive frames
+use less than a quarter of that peak (and the peak exceeded 256 nodes). Stable
+full layouts and alternating full/cached layouts retain their reusable capacity;
+the replacement reserves enough nodes for the smaller frame and keeps rounding
+disabled. Layout IDs are valid only within the frame that requested them, and
+cached views retain bounds and paint operations rather than Taffy node IDs.
+This runs inside normal frame cleanup, without timers, extra redraws or idle work.
+
+On macOS arm64, back-to-back offscreen Metal release runs at 1920×950, 1x,
+reduced jemalloc dirty footprint relative to the integrated arena/image changes:
+Home 9,142,272 → 8,454,144 bytes; Playlist 10,010,624 → 9,306,112;
+Liked Songs 10,272,768 → 9,437,184; Home after both pages 10,240,000 →
+9,551,872. Total footprint fell by 0.53–0.84 MiB across those stages. GPU
+allocation variation is independent of this CPU-only layout change. The locked
+desktop made native-window painting invalid, so these offscreen measurements do
+not include the native drawable or establish a new native idle CPU result.
+
+Regression tests cover the two-small-frame threshold, stable/alternating reuse
+and preservation of fractional layouts after replacement.
+
 ## Regenerable image pixels
 
 `RenderImage::new_with_reloader` accepts an already-decoded single BGRA frame and a
