@@ -49,8 +49,9 @@ and GPU memory are not interchangeable with the target metric.
   released on the first path-free frame. Quad, image and glyph rendering does
   not use them. Resize and device recovery discard them until needed again;
   path antialiasing and shaders are unchanged.
-- Monochrome glyph pages start at 512×512 rather than 1024×1024. If existing
-  rectangles cannot hold a color tile, its longest edge selects a new page:
+- Monochrome glyph pages start at 256×256 rather than 1024×1024 and grow to fit
+  oversized masks without resampling. If existing rectangles cannot hold a
+  color tile, its longest edge selects a new page:
   up to 128px uses 256×256; up to one third of 512px (170px) uses 512×512;
   larger artwork gets exact dimensions, matching Metal and wgpu. Texture-size
   limits and explicit image ownership are unchanged.
@@ -79,6 +80,12 @@ Content-sized color pages additionally saved 360,448 charged graphics bytes
 nine 164×164 images still fit one 512×512 page. WARP regressions cover exact
 248×248 and 248×106 backing. This is a direct allocator-policy port, not a
 Windows runtime result; see the [native comparison](../gpui-pre-apple/TURNTABLE.md#content-sized-color-pages).
+
+Monochrome A8/R8 pages now start at 256×256 and still grow to fit larger
+glyphs/SVGs; subpixel-color pages are unchanged. Native Metal Home saved another
+114,688 graphics bytes (112 KiB), with one 1-LSB screenshot pixel difference.
+WARP regressions cover small/oversized masks and last-tile release;
+see the [native comparison](../gpui-pre-apple/TURNTABLE.md#compact-monochrome-pages).
 
 ## Windows measurement (2026-10-14)
 

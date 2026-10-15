@@ -10,8 +10,9 @@ to this copy. Modified upstream files carry Turntable notices.
 This follows the resource policy already used by Turntable's Metal renderer,
 without changing image/glyph resolution, text sampling, antialiasing or cache ownership:
 
-- Monochrome glyphs use 512×512 pages rather than 1024×1024. When no existing
-  rectangle fits a color tile, a new page uses 256×256 for edges up to 128px,
+- Monochrome glyphs use 256×256 pages rather than 1024×1024, growing to fit
+  oversized masks without changing their pixels. When no existing rectangle
+  fits a color tile, a new page uses 256×256 for edges up to 128px,
   512×512 for edges up to one third of that shared page (170px), and exact
   dimensions for larger tiles. A 640×640 cover reserves 1.56 MiB rather than
   4 MiB; device texture-size limits and explicit image ownership are unchanged.
@@ -52,6 +53,12 @@ Content-sized color pages additionally saved 360,448 charged graphics bytes
 nine 164×164 images still fit one 512×512 page. The 248×248 and 248×106 cases
 have exact-page regressions. This is a direct allocator-policy port, not a
 Linux runtime measurement; see the [native comparison](../gpui-pre-apple/TURNTABLE.md#content-sized-color-pages).
+
+Monochrome A8/R8 pages now start at 256×256 and still grow to fit larger
+glyphs/SVGs; subpixel-color pages are unchanged. Native Metal Home saved another
+114,688 graphics bytes (112 KiB), with one 1-LSB screenshot pixel difference.
+Small and oversized mask allocations and last-tile release have regressions;
+see the [native comparison](../gpui-pre-apple/TURNTABLE.md#compact-monochrome-pages).
 
 Regression tests cover compact-page sharing/reuse, independent large-image
 release, lazy/reused/resized/released path targets, and instance growth with

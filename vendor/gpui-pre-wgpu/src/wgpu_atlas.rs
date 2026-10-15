@@ -1,4 +1,4 @@
-// Modified by Turntable: adaptive atlas sizing and exact packing; see ../TURNTABLE.md.
+// Modified by Turntable: compact glyph pages, adaptive color sizing and exact packing; see ../TURNTABLE.md.
 use anyhow::{Context as _, Result};
 use gpui::{
     AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
@@ -211,6 +211,8 @@ impl WgpuAtlasTextures {
             } else {
                 min_size.max(&DEFAULT_ATLAS_SIZE).min(&max_atlas_size)
             }
+        } else if kind == AtlasTextureKind::Monochrome {
+            min_size.max(&SMALL_ATLAS_SIZE).min(&max_atlas_size)
         } else {
             min_size.max(&DEFAULT_ATLAS_SIZE).min(&max_atlas_size)
         };
@@ -504,6 +506,28 @@ mod tests {
         atlas.remove(&big_key_a);
         let tile_b = insert(big_key_b, big);
         assert_eq!(tile_b.texture_id, keeper_tile.texture_id);
+        Ok(())
+    }
+
+    #[test]
+    fn monochrome_pages_are_compact_without_limiting_tile_size() -> anyhow::Result<()> {
+        let (device, queue) = test_device_and_queue()?;
+        let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
+        for (width, height, page_width, page_height) in [(64, 64, 256, 256), (320, 144, 320, 256)] {
+            let size = Size { width: DevicePixels(width), height: DevicePixels(height) };
+            let key = AtlasKey::Svg(gpui::RenderSvgParams { path: "mono-page-size-test".into(), size });
+            let tile = atlas.get_or_insert_with(key.clone(), &mut || {
+                Ok(Some((size, Cow::Owned(vec![0; width as usize * height as usize]))))
+            })?.context("monochrome tile should exist")?;
+            {
+                let state = atlas.0.lock();
+                let texture = state.backend.storage.get(tile.texture_id).context("monochrome texture")?;
+                assert_eq!((texture.texture.width(), texture.texture.height()), (page_width as u32, page_height as u32));
+                assert_eq!(texture.texture.format(), wgpu::TextureFormat::R8Unorm);
+            }
+            atlas.remove(&key);
+            assert!(atlas.get_texture_info(tile.texture_id).is_none());
+        }
         Ok(())
     }
 

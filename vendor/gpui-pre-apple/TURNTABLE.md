@@ -4,7 +4,7 @@ Based on gpui-pre-apple 0.3.9 (Apache-2.0), the Apple Metal renderer used by gpu
 
 ## Resource sizing and lifetime
 
-- Monochrome glyphs share 512×512 atlas pages instead of 1024×1024 pages. New color pages use 256×256 backing for tiles up to 128px, 512×512 backing when tiles fit at least three across, and exact backing for larger tiles. Existing pages are reused first. A 640×640 BGRA cover therefore reserves 1.56 MiB instead of 4 MiB. Image pixels, glyph rasterization and rendering resolution are unchanged.
+- Monochrome glyphs share 256×256 atlas pages instead of 1024×1024 pages; oversized glyphs/SVGs still grow a page to fit. New color pages use 256×256 backing for tiles up to 128px, 512×512 backing when tiles fit at least three across, and exact backing for larger tiles. Existing pages are reused first. A 640×640 BGRA cover therefore reserves 1.56 MiB instead of 4 MiB. Image pixels, glyph rasterization and rendering resolution are unchanged.
 - Instance buffers start at 128 KiB instead of 2 MiB per in-flight frame. The existing geometric growth, 256-byte binding alignment, 256 MiB maximum, Metal command-buffer resource retention, and completion-handler recycling remain unchanged. Complex scenes still grow normally; reducing the initial reservation is not a primitive-count limit.
 - Full-viewport path resolve/MSAA textures are allocated only for scenes containing paths, reused while their size matches, and released when a scene no longer needs them. Metal retains resources used by older in-flight command buffers. Four-sample antialiasing and Apple GPU memoryless MSAA are unchanged.
 
@@ -144,6 +144,32 @@ levels, in the portrait; text and the rest of the window match exactly. All
 image dimensions and sampling geometry are unchanged. The same page policy is
 ported directly to wgpu and DirectX; these are macOS, not cross-platform,
 footprint figures.
+
+### Compact monochrome pages
+
+Exact packing lets monochrome pages start at 256×256 instead of 512×512.
+The Home glyphs and SVGs fit two 81,920-byte pages instead of one 278,528-byte
+page, saving **114,688 graphics bytes (112 KiB)**. Pages still grow to the
+requested tile dimensions; a 320×144 mask gets a 320×256 page, not a clipped or
+rescaled mask. The A8/R8 formats, rasterization and sampling are unchanged.
+The wgpu and DirectX ports leave their subpixel-color page policy unchanged.
+
+Back-to-back signed native Home measurements, 1920×950 at 1×, 30 seconds:
+
+| Category | Original baseline | 512px monochrome pages | 256px monochrome pages |
+| --- | ---: | ---: | ---: |
+| Physical footprint | 51,168,240 | 44,073,944 | 43,795,416 |
+| IOAccelerator graphics | 5,570,560 | 3,833,856 | 3,719,168 |
+| IOSurface | 7,438,336 | 7,438,336 | 7,438,336 |
+| Owned-unmapped graphics | 1,294,336 | 0 | 0 |
+| Malloc Small | 13,828,096 | 13,860,864 | 13,680,640 |
+| App-Specific Tag 15 | 12,976,128 | 8,945,664 | 8,978,432 |
+
+The paired total reduction is 278,528 bytes; heap residency is not attributed to
+the page change. All three sampled 0.0% idle CPU. Native screenshots differ in
+one of 1,824,000 pixels by one channel level. Tests exercise small and oversized
+monochrome allocations and last-tile release on all three backends.
+
 
 ## Idle drawable pools
 

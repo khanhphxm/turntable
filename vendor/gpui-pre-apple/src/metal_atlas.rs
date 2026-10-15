@@ -1,4 +1,4 @@
-// Modified by Turntable: adaptive atlas sizing, exact packing and texture lifetime; see ../TURNTABLE.md.
+// Modified by Turntable: compact glyph pages, adaptive color sizing and exact packing; see ../TURNTABLE.md.
 
 use anyhow::{Context as _, Result};
 use derive_more::{Deref, DerefMut};
@@ -153,6 +153,8 @@ impl MetalAtlasTextures {
             } else {
                 min_size.max(&DEFAULT_ATLAS_SIZE)
             }
+        } else if kind == AtlasTextureKind::Monochrome {
+            min_size.max(&SMALL_ATLAS_SIZE)
         } else {
             min_size.max(&DEFAULT_ATLAS_SIZE)
         };
@@ -417,6 +419,23 @@ mod tests {
         assert_eq!(first.texture_id, second.texture_id);
         let texture = atlas.metal_texture(first.texture_id).unwrap();
         assert_eq!((texture.width(), texture.height()), (256, 256));
+    }
+
+    #[test]
+    fn test_monochrome_pages_are_compact_without_limiting_tile_size() {
+        let atlas = create_atlas().expect("Metal device");
+        for (width, height, page_width, page_height) in [(64, 64, 256, 256), (320, 144, 320, 256)] {
+            let size = Size { width: DevicePixels(width), height: DevicePixels(height) };
+            let key = AtlasKey::Svg(gpui::RenderSvgParams { path: "mono-page-size-test".into(), size });
+            let tile = atlas.get_or_insert_with(key.clone(), &mut || {
+                Ok(Some((size, Cow::Owned(vec![0; width as usize * height as usize]))))
+            }).unwrap().unwrap();
+            let texture = atlas.metal_texture(tile.texture_id).unwrap();
+            assert_eq!((texture.width(), texture.height()), (page_width as u64, page_height as u64));
+            drop(texture);
+            atlas.remove(&key);
+            assert!(atlas.metal_texture(tile.texture_id).is_none());
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-// Modified by Turntable: adaptive atlas sizing and exact packing; see ../TURNTABLE.md.
+// Modified by Turntable: compact glyph pages, adaptive color sizing and exact packing; see ../TURNTABLE.md.
 use guillotiere::AtlasAllocator;
 use parking_lot::Mutex;
 use windows::Win32::Graphics::{
@@ -186,6 +186,8 @@ impl DirectXAtlasTextures {
             } else {
                 min_size.max(&DEFAULT_ATLAS_SIZE)
             }
+        } else if kind == AtlasTextureKind::Monochrome {
+            min_size.max(&SMALL_ATLAS_SIZE)
         } else {
             min_size.max(&DEFAULT_ATLAS_SIZE)
         };
@@ -454,6 +456,28 @@ mod tests {
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { texture.texture.GetDesc(&mut desc) };
         assert_eq!((desc.Width, desc.Height), (256, 256));
+    }
+
+    #[test]
+    fn test_monochrome_pages_are_compact_without_limiting_tile_size() {
+        let atlas = create_atlas().expect("WARP device");
+        for (width, height, page_width, page_height) in [(64, 64, 256, 256), (320, 144, 320, 256)] {
+            let size = Size { width: DevicePixels(width), height: DevicePixels(height) };
+            let key = AtlasKey::Svg(gpui::RenderSvgParams { path: "mono-page-size-test".into(), size });
+            let tile = atlas.get_or_insert_with(key.clone(), &mut || {
+                Ok(Some((size, Cow::Owned(vec![0; width as usize * height as usize]))))
+            }).unwrap().unwrap();
+            {
+                let lock = atlas.0.lock();
+                let texture = lock.backend.texture(tile.texture_id).unwrap();
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                unsafe { texture.texture.GetDesc(&mut desc) };
+                assert_eq!((desc.Width, desc.Height), (page_width as u32, page_height as u32));
+                assert_eq!(desc.Format, DXGI_FORMAT_R8_UNORM);
+            }
+            atlas.remove(&key);
+            assert!(atlas.get_texture_view(tile.texture_id).is_none());
+        }
     }
 
     #[test]
