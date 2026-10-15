@@ -61,3 +61,24 @@ constant, a notch lands in about 120 ms); `Div` scroll containers (`src/elements
 it lands. Precise deltas (trackpads, which already arrive per frame with momentum) apply at once
 and cancel any easing in flight; reversing direction drops the rest of the old one. This is
 shared code: every platform's wheel events take the same path.
+
+## Compact transient arenas
+
+The app's element and event arenas, and the fallback element arena, allocate 64 KiB chunks
+instead of eagerly reserving 1 MiB each. Empty arenas allocate no chunk. `src/arena.rs` gives
+an oversized or over-aligned value a suitably sized/aligned chunk, so compact defaults do not
+reduce the supported element or event size. Allocated chunks are reused across frames; this
+does not add allocation churn to cached draws, shrink text/layout caches, change rendering or
+schedule idle work. The mechanism is shared by every platform.
+
+Regression tests cover lazy allocation, reuse, values larger than a normal chunk, alignment,
+destructor execution, stale references and nested clear deferral.
+
+On macOS arm64, back-to-back signed release runs (1920×950 at 1×, Home, 30 seconds idle)
+reduced jemalloc's dirty `App-Specific Tag 15` from 13,352,960 to 11,501,568 bytes
+(−1.77 MiB) and physical footprint from 50,889,688 to 48,956,400 bytes (−1.84 MiB).
+IOSurface (7,438,336 bytes), IOAccelerator graphics (5,570,560 bytes) and owned unmapped
+graphics (1,294,336 bytes) were unchanged. System Malloc Small changed by −65,536 bytes;
+the change itself only affects Rust arena allocations.
+
+
