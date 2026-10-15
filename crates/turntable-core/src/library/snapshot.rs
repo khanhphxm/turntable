@@ -8,10 +8,8 @@
 //!
 //! Cold listings and searches retain canonical JSON rather than decoded models in RAM.
 //! Loading still validates and normalizes every page; opening decodes only the requested one.
-//! The disk schema, byte/count limits and stale-first delivery are unchanged. This exchanges
-//! decoded page storage for a little synchronous work on cached Open/Search: in the measured
-//! native profile the largest first page (50 tracks) decoded in 0.094 ms median / 0.104 ms p95,
-//! versus 0.042 / 0.048 ms for cloning it. Native idle jemalloc footprint fell by 288 KiB.
+//! The disk schema, byte/count limits and stale-first delivery are unchanged; cached
+//! Open/Search trades decoded-page storage for synchronous decoding of the requested page.
 
 use std::{
 	fs,

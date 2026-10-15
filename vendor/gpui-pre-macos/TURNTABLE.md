@@ -50,25 +50,13 @@ For an idle CPU/RSS sample on macOS, run `top -l 3 -s 10 -pid <PID> -stats pid,c
 Set `TURNTABLE_HOME` to an isolated profile copy with a distinct Connect device
 name and regenerated device ID; never benchmark with the live user profile.
 
-## Idle Metal command storage
+## Idle resource retirement
 
-`WindowFrameSource::complete_frame` reports its existing parked-frame transition
-to the window. That callback then retires an idle renderer command queue after
-drawable parking; pending GPU frames keep their existing queue and order.
-This does not add a timer, alter the three-unused-frame tail,
-park during live resize, change visibility handling, or replace the backing
-layer. The renderer recreates its queue on the next actual draw. See
-`../gpui-pre-apple/TURNTABLE.md` for resource ownership, measurements and the
-Metal-specific cross-platform boundary.
+`WindowFrameSource::complete_frame` retires idle Metal command storage after
+drawable parking; pending GPU work keeps its queue and submission order. Live
+resize, backing-layer identity and the three-unused-frame tail are unchanged.
 
-## Quiescent GPUI heap notification
-
-`src/window.rs` now reports the same `WindowFrameSource::complete_frame` parked
-transition through GPUI's platform-neutral `on_frame_idle` callback, after Metal
-retirement and with the native window mutex released. It adds no timer, frame,
-idle-tail change or rendering-resolution change. GPUI releases only disposable
-frame-building storage; its existing visibility callback handles hidden windows.
-See `../gpui-pre/TURNTABLE.md` for ownership, regression coverage and native
-per-category measurements: the added heap trim saved 1.70 MiB of jemalloc dirty
-memory and 1.42 MiB of physical footprint, with unchanged pixels and 0.0% idle CPU.
-
+After releasing the native window mutex, the same transition calls GPUI's
+`on_frame_idle` to release disposable frame-building storage without a timer or
+extra frame. Hidden windows use the existing visibility callback. See the
+Apple and GPUI patch docs for ownership and retention rules.

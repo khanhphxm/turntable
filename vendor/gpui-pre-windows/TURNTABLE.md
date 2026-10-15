@@ -62,39 +62,15 @@ font fallback and font-identity caching are intentionally unchanged.
 
 ### Exact atlas rectangles
 
-Atlas pages use guillotiere 0.6.2 instead of bucketed shelves. Exact rectangles
-avoid shelf-height padding and can be reclaimed individually while neighboring
-tiles remain live. Allocations never move, so cached scene coordinates remain
-valid. The allocator's empty state replaces the redundant live-key counter;
-device-loss reset, upload bounds checks and explicit image ownership are unchanged.
+Atlas pages use guillotiere to avoid shelf padding and reclaim individual tiles
+without moving live allocations or invalidating cached-scene coordinates.
+Device-loss reset, upload bounds checks and explicit image ownership are
+unchanged, as is subpixel-color page sizing.
 
-Polychrome fragment samples clamp to the tile's outer texel centers rather than
-reading adjacent/uninitialized pixels when an image is upscaled. Vertex UVs are
-not inset and interior image mapping is unchanged. The corresponding Metal Home
-comparison saved 1,343,488 charged graphics bytes, with no footprint cost for
-the sampling correction; see the [Apple inventory](../gpui-pre-apple/TURNTABLE.md#exact-atlas-packing-2026-10-15).
-Those numbers are not Windows runtime measurements.
-
-Content-sized color pages additionally saved 360,448 charged graphics bytes
-(352 KiB) in the native Metal Home A/B. Tiny images share smaller pages while
-nine 164×164 images still fit one 512×512 page. WARP regressions cover exact
-248×248 and 248×106 backing. This is a direct allocator-policy port, not a
-Windows runtime result; see the [native comparison](../gpui-pre-apple/TURNTABLE.md#content-sized-color-pages).
-
-Monochrome A8/R8 pages now start at 256×256 and still grow to fit larger
-glyphs/SVGs; subpixel-color pages are unchanged. Native Metal Home saved another
-114,688 graphics bytes (112 KiB), with one 1-LSB screenshot pixel difference.
-WARP regressions cover small/oversized masks and last-tile release;
-see the [native comparison](../gpui-pre-apple/TURNTABLE.md#compact-monochrome-pages).
-
-### Round-2 cross-check (2026-10-15)
-
-`cargo xwin check --tests` passed on the macOS host for
-`x86_64-pc-windows-msvc`, including the backend and WARP regression code.
-Windows runtime and FXC shader execution were unavailable, so this is not a
-native WARP or rendering result. The standalone lockfile follows the allocator
-manifest cutover to guillotiere. The direct Metal analogue passed native 1×/2×
-real-scene comparisons; see the [Apple verification](../gpui-pre-apple/TURNTABLE.md#round-2-verification-2026-10-15).
+Polychrome fragment samples clamp to tile-edge texel centers to prevent linear
+filtering from reading neighboring pixels. Vertex UVs and interior image
+mapping are unchanged. The WARP tests cover rectangle reuse, exact-size color
+pages, oversized masks and last-tile release.
 
 ## Windows measurement (2026-10-14)
 
