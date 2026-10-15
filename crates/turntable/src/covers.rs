@@ -9,6 +9,14 @@
 //! JPEG pixel buffers. PNG/WebP lack that decode-time reduction, but share the
 //! same concurrency limit. Decoder state and resize inputs are dropped before
 //! BGRA conversion; the host's allocator controls when freed pages are purged.
+//! Ready images transfer their CPU pixels to the atlas upload, retaining only
+//! dimensions and a weak-source reloader. Atlas hits need no decoding; eviction
+//! or a second window regenerates identical BGRA pixels from the encoded source.
+//! A ≤96 px navigation preview is prepared in the same background decode before
+//! transferring the full buffer, so retiring a page never re-decodes large art
+//! on the UI thread.
+//! The pixel budgets below conservatively count uncompressed size even after
+//! upload has released that allocation.
 //!
 //! Active views share a 12 MiB decoded-pixel budget. Cache boundaries retain their
 //! leases while GPUI replays a cached subtree; virtual lists refresh theirs when
@@ -87,6 +95,8 @@ struct Entry {
 	source:      Weak<Cover>,
 	warm_source: Option<Arc<Cover>>,
 	fallback:    Option<Arc<RenderImage>>,
+	// Prepared off-thread; never uploaded until it becomes the warm image.
+	preview:     Option<Arc<RenderImage>>,
 	state:       State,
 	scopes:      u16,
 	bytes:       usize,
@@ -96,6 +106,11 @@ struct Entry {
 struct Source {
 	cover:  Weak<Cover>,
 	scopes: u16,
+}
+
+struct Decoded {
+	image:   Arc<RenderImage>,
+	preview: Option<Arc<RenderImage>>,
 }
 
 /// App-global LRU cache. `get` installs the default cache on first use.
@@ -243,10 +258,11 @@ impl CoverCache {
 				}
 				return false;
 			};
-			let warm = entry.source.upgrade().and_then(|source| preview(image).map(|image| (source, image)));
+			let warm =
+				entry.source.upgrade().and_then(|source| entry.preview.take().or_else(|| preview(image)).map(|image| (source, image)));
 			release(Arc::clone(image));
 			let Some((source, image)) = warm else { return false };
-			entry.bytes = image.as_bytes(0).map_or(0, <[u8]>::len);
+			entry.bytes = image.byte_len(0);
 			*bytes += entry.bytes;
 			entry.warm_source = Some(source);
 			entry.state = State::Warm(image);
@@ -310,6 +326,7 @@ impl CoverCache {
 				source:      Arc::downgrade(cover),
 				warm_source: None,
 				fallback:    None,
+				preview:     None,
 				state:       State::Pending(vec![requester]),
 				scopes:      cache.scope,
 				bytes:       0,
@@ -418,7 +435,7 @@ impl CoverCache {
 		}
 	}
 
-	fn complete(&mut self, key: Key, decoded: Option<Arc<RenderImage>>, mut release: impl FnMut(Arc<RenderImage>)) -> Vec<AnyWeakEntity> {
+	fn complete(&mut self, key: Key, decoded: Option<Decoded>, mut release: impl FnMut(Arc<RenderImage>)) -> Vec<AnyWeakEntity> {
 		let Some(entry) = self.entries.get_mut(&key) else {
 			return Vec::new();
 		};
@@ -432,11 +449,12 @@ impl CoverCache {
 		if let Some(fallback) = entry.fallback.take() {
 			release(fallback);
 		}
-		if let Some(image) = decoded {
-			let bytes = image.as_bytes(0).map_or(0, <[u8]>::len);
+		if let Some(Decoded { image, preview }) = decoded {
+			let bytes = image.byte_len(0) + preview.as_ref().map_or(0, |image| image.byte_len(0));
 			if bytes <= self.budget {
 				entry.bytes = bytes;
 				self.bytes += bytes;
+				entry.preview = preview;
 				entry.state = State::Ready(image);
 			}
 			// A bucket larger than the entire budget cannot ever be cached.
@@ -497,28 +515,51 @@ fn preview(image: &Arc<RenderImage>) -> Option<Arc<RenderImage>> {
 	if width <= WARM_SIDE && height <= WARM_SIDE {
 		return Some(Arc::clone(image));
 	}
-	// RenderImage is already BGRA. Borrow its pixels; do not copy the full bucket
-	// or swap channels a second time when producing the small preview.
-	let pixels = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, image.as_bytes(0)?)?;
+	// RenderImage is already BGRA. Its buffer is borrowed or regenerated, never
+	// copied or channel-swapped again when producing the small preview.
+	let bytes = image.as_bytes(0)?;
+	let pixels = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(width, height, bytes.as_ref())?;
+	preview_pixels(&pixels)
+}
+
+fn preview_pixels(pixels: &impl image::GenericImageView<Pixel = image::Rgba<u8>>) -> Option<Arc<RenderImage>> {
+	let (width, height) = pixels.dimensions();
 	let longest = u64::from(width.max(height));
 	let scaled = |side: u32| u32::try_from(((u64::from(side) * u64::from(WARM_SIDE) + longest / 2) / longest).max(1)).ok();
-	Some(Arc::new(RenderImage::new([Frame::new(image::imageops::thumbnail(&pixels, scaled(width)?, scaled(height)?))])))
+	Some(Arc::new(RenderImage::new([Frame::new(image::imageops::thumbnail(pixels, scaled(width)?, scaled(height)?))])))
 }
 
-fn decode(cover: &Cover, side: u32) -> Option<Arc<RenderImage>> {
-	Some(render(decode_rgba(cover, side)?))
+fn decode(cover: &Arc<Cover>, side: u32) -> Option<Decoded> {
+	decode_image(cover, side, false)
 }
 
-fn decode_blurred(cover: &Cover) -> Option<Arc<RenderImage>> {
-	Some(render(image::imageops::blur(&decode_rgba(cover, BLUR_SIDE)?, BLUR_SIGMA)))
+fn decode_blurred(cover: &Arc<Cover>) -> Option<Decoded> {
+	decode_image(cover, BLUR_SIDE, true)
 }
 
-/// GPUI draws BGRA.
-fn render(mut bgra: RgbaImage) -> Arc<RenderImage> {
+fn decode_image(cover: &Arc<Cover>, side: u32, blur: bool) -> Option<Decoded> {
+	let pixels = decode_bgra(cover, side, blur)?;
+	let preview = if pixels.width().max(pixels.height()) > WARM_SIDE { Some(preview_pixels(&pixels)?) } else { None };
+	// The cache/core, not RenderImage, owns the encoded source's visibility lease.
+	// Keeping this weak also lets prune release images after their source is gone.
+	let source = Arc::downgrade(cover);
+	let image = Arc::new(RenderImage::new_with_reloader(Frame::new(pixels), move || {
+		let source = source.upgrade()?;
+		decode_bgra(&source, side, blur)
+	}));
+	Some(Decoded { image, preview })
+}
+
+/// GPUI draws BGRA; both the initial decode and re-uploads use the same conversion.
+fn decode_bgra(cover: &Cover, side: u32, blur: bool) -> Option<RgbaImage> {
+	let mut bgra = {
+		let rgba = decode_rgba(cover, side)?;
+		if blur { image::imageops::blur(&rgba, BLUR_SIGMA) } else { rgba }
+	};
 	for pixel in bgra.pixels_mut() {
 		pixel.0.swap(0, 2);
 	}
-	Arc::new(RenderImage::new([Frame::new(bgra)]))
+	Some(bgra)
 }
 
 fn decode_rgba(cover: &Cover, side: u32) -> Option<RgbaImage> {
@@ -621,6 +662,7 @@ mod tests {
 			source:      Arc::downgrade(source),
 			warm_source: None,
 			fallback:    None,
+			preview:     None,
 			state:       State::Pending(Vec::new()),
 			scopes:      cache.scope,
 			bytes:       0,
@@ -631,6 +673,28 @@ mod tests {
 
 	fn image(side: u32) -> Arc<RenderImage> {
 		Arc::new(RenderImage::new([Frame::new(RgbaImage::new(side, side))]))
+	}
+
+	fn ready(image: Arc<RenderImage>) -> Decoded {
+		Decoded { image, preview: None }
+	}
+
+	#[test]
+	fn retirement_reuses_prepared_pixels_without_a_foreground_decode() {
+		let mut cache = CoverCache::default();
+		let source = source();
+		let key = pending(&mut cache, &source, 328);
+		let full = Arc::new(RenderImage::new_with_reloader(Frame::new(RgbaImage::new(328, 328)), || None));
+		drop(full.as_bytes(0));
+		let prepared = image(WARM_SIDE);
+		cache.complete(key, Some(Decoded { image: full, preview: Some(Arc::clone(&prepared)) }), |_| {});
+		assert_eq!(cache.bytes, (328 * 328 + WARM_SIDE * WARM_SIDE) as usize * 4);
+		cache.reset_scopes(ROOT);
+		cache.retire(|_| {});
+		let State::Warm(image) = &cache.entries[&key].state else { panic!("prepared preview remains warm") };
+		assert!(Arc::ptr_eq(image, &prepared));
+		assert!(cache.entries[&key].preview.is_none());
+		assert_eq!(cache.bytes, (WARM_SIDE * WARM_SIDE) as usize * 4);
 	}
 
 	#[test]
@@ -653,9 +717,9 @@ mod tests {
 		assert!(matches!(cache.entries[&keys[0]].state, State::Decoding(_)));
 		assert!(!cache.entries.contains_key(&keys[2]));
 		cache.running -= 1;
-		cache.complete(keys[0], Some(image(328)), |_| {});
+		cache.complete(keys[0], Some(ready(image(328))), |_| {});
 		assert!(cache.next_decode().is_none());
-		cache.complete(keys[0], Some(image(64)), |_| {});
+		cache.complete(keys[0], Some(ready(image(64))), |_| {});
 		assert!(matches!(cache.entries[&keys[0]].state, State::Ready(_)));
 		assert_eq!(cache.bytes, 328 * 328 * 4);
 	}
@@ -667,7 +731,7 @@ mod tests {
 			let source = source();
 			let mut cache = CoverCache::default();
 			let key = pending(&mut cache, &source, 328);
-			cache.complete(key, Some(image(328)), |_| {});
+			cache.complete(key, Some(ready(image(328))), |_| {});
 			cache.reset_scopes(ROOT);
 			cache.retire(|_| {});
 			assert_eq!(Arc::strong_count(&source), 2);
@@ -691,7 +755,7 @@ mod tests {
 		let mut cache = CoverCache::default();
 		let source = source();
 		let key = pending(&mut cache, &source, 328);
-		cache.complete(key, Some(image(328)), |_| {});
+		cache.complete(key, Some(ready(image(328))), |_| {});
 		cache.entries.get_mut(&key).unwrap().scopes = ROOT | LISTING_ROWS;
 		cache.reset_scopes(ROOT);
 		let mut released = 0;
@@ -715,7 +779,7 @@ mod tests {
 			let weak = Arc::downgrade(&source);
 			let key = pending(&mut cache, &source, 328);
 			cache.sources.insert("cover".into(), Source { cover: weak.clone(), scopes: ROOT });
-			cache.complete(key, Some(image(328)), |_| {});
+			cache.complete(key, Some(ready(image(328))), |_| {});
 			cache.reset_scopes(ROOT);
 			cache.retire(|_| {});
 			drop(source);
@@ -732,7 +796,7 @@ mod tests {
 				assert_eq!(cache.queue.len(), 1);
 				assert_eq!(cache.running, 0);
 				let mut released = 0;
-				cache.complete(key, Some(image(328)), |_| released += 1);
+				cache.complete(key, Some(ready(image(328))), |_| released += 1);
 				assert_eq!(released, 1);
 				assert_eq!(cache.bytes, 328 * 328 * 4);
 				assert!(matches!(cache.entries[&key].state, State::Ready(_)));
@@ -752,7 +816,7 @@ mod tests {
 			let sources: Vec<_> = (0..20).map(|_| Arc::new(Cover { bytes: vec![0; 1_335_419 / 21], mime: "image/jpeg".into() })).collect();
 			for source in &sources {
 				let key = pending(&mut cache, source, 328);
-				cache.complete(key, Some(image(328)), |_| {});
+				cache.complete(key, Some(ready(image(328))), |_| {});
 				keys.push(key);
 			}
 			cache.retire(|_| {});
@@ -789,7 +853,7 @@ mod tests {
 			let expected = image(64);
 			let mut cache = CoverCache::default();
 			let key = pending(&mut cache, &source, 64);
-			cache.complete(key, Some(Arc::clone(&expected)), |_| {});
+			cache.complete(key, Some(ready(Arc::clone(&expected))), |_| {});
 			cx.set_global(cache);
 			let requester = cx.new(|_| ());
 			requester.update(cx, |(), cx| {
@@ -815,7 +879,7 @@ mod tests {
 			let expected = image(192);
 			let mut cache = CoverCache::default();
 			let key = pending(&mut cache, &source, 192);
-			cache.complete(key, Some(Arc::clone(&expected)), |_| {});
+			cache.complete(key, Some(ready(Arc::clone(&expected))), |_| {});
 			cx.set_global(cache);
 			let requester = cx.new(|_| ());
 			requester.update(cx, |(), cx| {
@@ -838,7 +902,7 @@ mod tests {
 		let source = source();
 		for side in [128, 384] {
 			let key = pending(&mut cache, &source, side);
-			cache.complete(key, Some(image(side)), |_| {});
+			cache.complete(key, Some(ready(image(side))), |_| {});
 		}
 		assert_eq!(cache.cached_key(Key::new(&source, 64)), Some(Key::new(&source, 128)));
 		assert_eq!(cache.cached_key(Key::new(&source, 192)), Some(Key::new(&source, 384)));
@@ -855,7 +919,7 @@ mod tests {
 		let mut released = 0;
 		for source in &sources {
 			let key = pending(&mut cache, source, 640);
-			cache.complete(key, Some(image(640)), |_| released += 1);
+			cache.complete(key, Some(ready(image(640))), |_| released += 1);
 			assert!(cache.bytes <= 12 * 1024 * 1024);
 		}
 		assert!(released > 0);
@@ -923,9 +987,9 @@ mod tests {
 		let mut cache = CoverCache::new(2 * 64 * 64 * 4);
 		let sources = [source(), source(), source()];
 		let first = pending(&mut cache, &sources[0], 64);
-		cache.complete(first, Some(image(64)), |_| {});
+		cache.complete(first, Some(ready(image(64))), |_| {});
 		let second = pending(&mut cache, &sources[1], 64);
-		cache.complete(second, Some(image(64)), |_| {});
+		cache.complete(second, Some(ready(image(64))), |_| {});
 		// Same touch performed by lookup, without needing a live GPUI entity.
 		cache.clock += 1;
 		if let Some(entry) = cache.entries.get_mut(&first) {
@@ -933,7 +997,7 @@ mod tests {
 		}
 		let third = pending(&mut cache, &sources[2], 64);
 		let mut released = 0;
-		cache.complete(third, Some(image(64)), |_| released += 1);
+		cache.complete(third, Some(ready(image(64))), |_| released += 1);
 		assert!(cache.entries.contains_key(&first));
 		assert!(!cache.entries.contains_key(&second));
 		assert!(cache.entries.contains_key(&third));
@@ -947,7 +1011,7 @@ mod tests {
 		let source = source();
 		for side in [64, 128] {
 			let key = pending(&mut cache, &source, side);
-			cache.complete(key, Some(image(side)), |_| {});
+			cache.complete(key, Some(ready(image(side))), |_| {});
 		}
 		assert_eq!(Arc::strong_count(&source), 1);
 		drop(source);
@@ -963,7 +1027,7 @@ mod tests {
 		let mut cache = CoverCache::new(64 * 64 * 4 - 1);
 		let source = source();
 		let key = pending(&mut cache, &source, 64);
-		cache.complete(key, Some(image(64)), |_| {});
+		cache.complete(key, Some(ready(image(64))), |_| {});
 		assert_eq!(cache.bytes, 0);
 		assert!(matches!(cache.entries.get(&key).map(|entry| &entry.state), Some(State::Failed)));
 	}
@@ -974,19 +1038,34 @@ mod tests {
 			let source = RgbaImage::from_pixel(640, 320, image::Rgba([210, 80, 30, 255]));
 			let mut bytes = std::io::Cursor::new(Vec::new());
 			DynamicImage::ImageRgba8(source).into_rgb8().write_to(&mut bytes, format)?;
-			let cover = Cover { bytes: bytes.into_inner(), mime: format.to_mime_type().into() };
+			let cover = Arc::new(Cover { bytes: bytes.into_inner(), mime: format.to_mime_type().into() });
 			let decoded = decode(&cover, 64);
 			assert!(decoded.is_some());
-			if let Some(decoded) = decoded {
+			if let Some(Decoded { image: decoded, .. }) = decoded {
 				assert_eq!(decoded.size(0).width.0, 64);
 				assert_eq!(decoded.size(0).height.0, 32);
-				if let Some(bytes) = decoded.as_bytes(0) {
-					assert!(bytes[0].abs_diff(30) < 4);
-					assert!(bytes[2].abs_diff(210) < 4);
-					assert_eq!(bytes[3], 255);
-				}
+				let bytes = decoded.as_bytes(0).expect("initial pixels are available");
+				assert!(bytes[0].abs_diff(30) < 4);
+				assert!(bytes[2].abs_diff(210) < 4);
+				assert_eq!(bytes[3], 255);
+				assert_eq!(decoded.as_bytes(0).expect("encoded source regenerates pixels").as_ref(), bytes.as_ref());
 			}
 		}
+		Ok(())
+	}
+
+	#[test]
+	fn reupload_sources_are_weak_and_blurred_pixels_restore_identically() -> Result<(), image::ImageError> {
+		let rgba = RgbaImage::from_fn(32, 32, |x, y| image::Rgba([u8::try_from(x * 8).unwrap(), u8::try_from(y * 8).unwrap(), 30, 255]));
+		let mut bytes = std::io::Cursor::new(Vec::new());
+		rgba.write_to(&mut bytes, ImageFormat::Png)?;
+		let cover = Arc::new(Cover { bytes: bytes.into_inner(), mime: "image/png".into() });
+		let Decoded { image, .. } = decode_blurred(&cover).unwrap();
+		assert_eq!(Arc::strong_count(&cover), 1);
+		let initial = image.as_bytes(0).unwrap();
+		assert_eq!(image.as_bytes(0).unwrap(), initial);
+		drop(cover);
+		assert!(image.as_bytes(0).is_none());
 		Ok(())
 	}
 

@@ -2443,12 +2443,12 @@ dependencies = [
  "core-text",
  "derive_more",
  "dispatch2",
- "etagere",
  "foreign-types",
  "futures",
  "gpui-pre",
  "gpui-pre-collections",
  "gpui-pre-util",
+ "guillotiere",
  "image",
  "libc",
  "log",
@@ -2766,10 +2766,10 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "cosmic-text",
- "etagere",
  "gpui-pre",
  "gpui-pre-collections",
  "gpui-pre-util",
+ "guillotiere",
  "itertools 0.14.0",
  "log",
  "parking_lot",
@@ -2792,12 +2792,12 @@ dependencies = [
  "accesskit_windows",
  "anyhow",
  "dunce",
- "etagere",
  "futures",
  "gpui-pre",
  "gpui-pre-collections",
  "gpui-pre-scheduler",
  "gpui-pre-util",
+ "guillotiere",
  "image",
  "itertools 0.14.0",
  "log",
@@ -2836,6 +2836,16 @@ checksum = "e20f99e46474f56bd905c56e817ebddcf377a611f94c53ac4649e4d3fa3c0cd0"
 dependencies = [
  "arraydeque",
  "smallvec",
+]
+
+[[package]]
+name = "guillotiere"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b62d5865c036cb1393e23c50693df631d3f5d7bcca4c04fe4cc0fd592e74a782"
+dependencies = [
+ "euclid",
+ "svg_fmt",
 ]
 
 [[package]]

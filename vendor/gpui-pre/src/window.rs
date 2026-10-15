@@ -344,7 +344,7 @@ slotmap::new_key_type! {
 thread_local! {
     /// Fallback arena used when no app-specific arena is active.
     /// In production, each window draw sets CURRENT_ELEMENT_ARENA to the app's arena.
-    pub(crate) static ELEMENT_ARENA: RefCell<Arena> = RefCell::new(Arena::new(1024 * 1024));
+    pub(crate) static ELEMENT_ARENA: RefCell<Arena> = RefCell::new(Arena::new(64 * 1024));
 
     /// Points to the current App's element arena during draw operations.
     /// This allows multiple test Apps to have isolated arenas, preventing
@@ -1951,6 +1951,18 @@ impl Window {
                 }
             }
         }));
+        platform_window.on_frame_idle(Box::new({
+            let mut cx = cx.to_async();
+            move || {
+                // As with frame requests, do not even borrow App during a nested draw.
+                if draw_in_progress() {
+                    return;
+                }
+                handle
+                    .update(&mut cx, |_, window, cx| window.release_idle_memory(cx))
+                    .log_err();
+            }
+        }));
         invalidator.set_platform_waker(platform_window.frame_waker());
         platform_window.on_visual_viewport_changed(Box::new({
             let mut cx = cx.to_async();
@@ -2039,6 +2051,9 @@ impl Window {
                 handle
                     .update(&mut cx, |_, window, cx| {
                         window.refresh_visibility(cx);
+                        if !window.is_visible() {
+                            window.release_idle_memory(cx);
+                        }
                     })
                     .log_err();
             }
@@ -2294,6 +2309,28 @@ impl Window {
         if self.invalidator.is_dirty() || self.needs_present.get() {
             profiler::journal::record_frame_pending(self.handle.window_id(), Instant::now());
         }
+    }
+
+    fn release_idle_memory(&mut self, cx: &mut App) {
+        if draw_in_progress() || !self.invalidator.not_drawing() {
+            return;
+        }
+        if let Some(layout_engine) = self.layout_engine.as_mut() {
+            layout_engine.release_idle_memory();
+        }
+        // The spare frame was cleared after the last swap. The rendered frame's
+        // paint records, element state, focus, hitboxes and listeners stay live.
+        self.next_frame = Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone()));
+        self.rendered_frame.scene.release_build_memory();
+        if let Ok(mut arena) = cx.element_arena.try_borrow_mut() {
+            arena.release_idle_memory();
+        }
+        cx.event_arena.release_idle_memory();
+        ELEMENT_ARENA.with(|arena| {
+            if let Ok(mut arena) = arena.try_borrow_mut() {
+                arena.release_idle_memory();
+            }
+        });
     }
 
     /// Whether the platform is presenting this window's frames (see
@@ -5117,7 +5154,7 @@ impl Window {
     }
 
     /// Paint an image into the scene for the next frame at the current z-index.
-    /// This method will panic if the frame_index is not valid
+    /// Returns an error if the frame index is invalid or its pixels cannot be regenerated.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
     /// Paint an image into `bounds`, positioning and scaling it according to `image_bounds`.
@@ -5153,10 +5190,8 @@ impl Window {
             .get_or_insert_with(params.into(), &mut || {
                 Ok(Some((
                     data.size(frame_index),
-                    Cow::Borrowed(
-                        data.as_bytes(frame_index)
-                            .expect("It's the caller's job to pass a valid frame index"),
-                    ),
+                    data.as_bytes(frame_index)
+                        .context("Image frame pixels are unavailable")?,
                 )))
             })?
             .expect("Callback above only returns Some");

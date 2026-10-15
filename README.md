@@ -32,7 +32,7 @@
 
 |               |       Idle | Playing | CPU playing |
 |---------------|-----------:|--------:|------------:|
-| Turntable     |      47 MB |   65 MB |        0.0% |
+| Turntable     |      39 MB |   65 MB |        0.0% |
 | Spotify       |     808 MB |  ~1 GB  |        4.4% |
 | [Spotifast](https://github.com/crmne/spotifast)¹ | 100–250 MB |         |             |
 

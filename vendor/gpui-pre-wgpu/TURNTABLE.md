@@ -8,12 +8,14 @@ to this copy. Modified upstream files carry Turntable notices.
 ## Resource sizing and lifetime
 
 This follows the resource policy already used by Turntable's Metal renderer,
-without changing images, text sampling, shaders, antialiasing or cache ownership:
+without changing image/glyph resolution, text sampling, antialiasing or cache ownership:
 
-- Small glyphs and images share 512×512 atlas pages rather than 1024×1024 pages.
-  Polychrome images larger than 256 pixels in either dimension get a tightly
-  sized page. A 640×640 cover therefore reserves 1.56 MiB rather than 4 MiB,
-  and unrelated small images cannot pin that large page after the cover leaves.
+- Monochrome glyphs use 256×256 pages rather than 1024×1024, growing to fit
+  oversized masks without changing their pixels. When no existing rectangle
+  fits a color tile, a new page uses 256×256 for edges up to 128px,
+  512×512 for edges up to one third of that shared page (170px), and exact
+  dimensions for larger tiles. A 640×640 cover reserves 1.56 MiB rather than
+  4 MiB; device texture-size limits and explicit image ownership are unchanged.
 - Instance data starts at 128 KiB instead of 2 MiB, on both the native storage
   buffer and WebGL texture paths. Existing geometric growth, device limits,
   binding alignment and retention of earlier in-flight bindings are unchanged.
@@ -29,6 +31,17 @@ native renderer; this extends the existing Metal policy rather than changing
 those backends. GPUI's explicit image ownership and Turntable's cover-cache
 budget still control atlas eviction; arbitrary per-frame eviction would break
 cached scenes.
+
+### Exact atlas rectangles
+
+Atlas pages use guillotiere to avoid shelf padding and reclaim individual tiles
+without moving live allocations or invalidating cached-scene coordinates.
+Upload swizzling, deferred uploads and texture generations are unchanged;
+subpixel-color page sizing is unchanged.
+
+Polychrome fragment samples clamp to tile-edge texel centers, preventing linear
+filtering from reading neighboring pixels. Vertex UVs and interior mapping stay
+unchanged; derivative sampling still precedes the alpha-clip branch.
 
 Regression tests cover compact-page sharing/reuse, independent large-image
 release, lazy/reused/resized/released path targets, and instance growth with

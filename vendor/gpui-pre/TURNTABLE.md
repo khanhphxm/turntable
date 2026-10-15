@@ -61,3 +61,65 @@ constant, a notch lands in about 120 ms); `Div` scroll containers (`src/elements
 it lands. Precise deltas (trackpads, which already arrive per frame with momentum) apply at once
 and cancel any easing in flight; reversing direction drops the rest of the old one. This is
 shared code: every platform's wheel events take the same path.
+
+## Compact transient storage
+
+Element/event arenas use lazy 64 KiB chunks rather than eagerly reserving 1 MiB.
+Oversized or over-aligned values get suitable chunks; active scopes still defer
+clearing and reclamation. After two clears use less than a quarter of a peak
+larger than four chunks, unused tails and oversized destructor storage are
+released, keeping at least two chunks of headroom. Stable and alternating
+workloads retain capacity; larger workloads grow normally again.
+
+`src/taffy.rs` similarly releases peak node storage after two frames use less
+than a quarter of a peak above 256 nodes. Layout IDs remain frame-local; cached
+views keep bounds and paint operations, not node IDs. Replacement preserves
+fractional layout. `src/bounds_tree.rs` stores child arrays only for internal
+nodes, avoiding unused slots in leaves without changing overlap ordering or
+clear/reuse behavior. These changes apply across platforms without extra frames
+or timers.
+
+## Regenerable image pixels
+
+`RenderImage::new_with_reloader` transfers a decoded BGRA frame into its first
+atlas upload without copying. Later misses invoke a thread-safe reloader;
+ordinary images still return borrowed pixels through `as_bytes`'s `Cow`.
+Metadata stays available without decoding. Reloads must preserve pixels and
+dimensions; failed or mismatched reloads report unavailable pixels. Atlas hits,
+layout and cached paint do not reload.
+
+Turntable supplies the same decode/resize/blur conversion for initial pixels and
+reloads, holding encoded sources weakly so eviction still releases artwork.
+Background decoding also prepares a ≤96 px preview for page retirement, avoiding
+large synchronous UI-thread decodes and preserving warm Back navigation. Cache
+budgets count uncompressed full-size pixels and previews even after upload.
+Persistent images remain available when regeneration is unsuitable; texture
+resolution, sampling and explicit atlas ownership are unchanged.
+
+## Quiescent frame storage
+
+`PlatformWindow::on_frame_idle` reports an existing frame-source park outside
+platform locks. GPUI releases the cleared spare frame, empty layout storage,
+scene-building bounds index and empty, unscoped arenas. The rendered frame's
+paint records, element state, focus, hitboxes and listeners remain live, as do
+text, image and page caches. Active draws, arena values/scopes and layout nodes
+prevent unsafe reclamation; the next draw regrows only needed scratch.
+
+The hidden/occluded-window path is shared across platforms. Visible-idle
+notification comes from macOS's three-unused-frame transition and the test
+platform; Windows and Linux do not yet emit it. No timer or extra frame is added.
+`crates/turntable/tests/gpui_idle.rs` covers retained input, cached replay and
+full relayout after idle or hide/reveal.
+
+## Compact scene replay records
+
+`src/scene.rs` stores primitive kind/index pairs in paint operations instead of
+duplicate primitives; paths and native surfaces move into renderer vectors.
+Stable draw-order/atlas sorting remaps every replay reference to its final index,
+using reusable index scratch only for batches needing reordering. Cached replay
+inserts each referenced primitive once. Partial ranges, nested layer order, path
+IDs, GPU layouts and renderer interfaces are unchanged across all backends.
+
+Regression coverage includes arena alignment/destruction/reuse, layout retention
+and rounding, bounds-tree overlap ordering, image transfer/reload failures, and
+stable sorting with full/partial replay of mixed primitives and nested layers.

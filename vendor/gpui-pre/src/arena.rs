@@ -1,3 +1,5 @@
+// Modified by Turntable: compact lazy arena chunks and quiescent/peak reuse; see ../TURNTABLE.md.
+
 use std::{
     alloc::{self, handle_alloc_error},
     cell::Cell,
@@ -23,23 +25,24 @@ struct Chunk {
     start: *mut u8,
     end: *mut u8,
     offset: *mut u8,
+    alignment: usize,
 }
 
 impl Drop for Chunk {
     fn drop(&mut self) {
         unsafe {
-            let chunk_size = self.end.offset_from_unsigned(self.start);
-            // SAFETY: This succeeded during allocation.
-            let layout = alloc::Layout::from_size_align_unchecked(chunk_size, 1);
+            let chunk_size = self.end.addr() - self.start.addr();
+            // SAFETY: This is the same layout used to allocate the chunk.
+            let layout = alloc::Layout::from_size_align_unchecked(chunk_size, self.alignment);
             alloc::dealloc(self.start, layout);
         }
     }
 }
 
 impl Chunk {
-    fn new(chunk_size: NonZeroUsize) -> Self {
+    fn new(chunk_size: NonZeroUsize, alignment: usize) -> Self {
         // this only fails if chunk_size is unreasonably huge
-        let layout = alloc::Layout::from_size_align(chunk_size.get(), 1).unwrap();
+        let layout = alloc::Layout::from_size_align(chunk_size.get(), alignment).unwrap();
         let start = unsafe { alloc::alloc(layout) };
         if start.is_null() {
             handle_alloc_error(layout);
@@ -49,6 +52,7 @@ impl Chunk {
             start,
             end,
             offset: start,
+            alignment,
         }
     }
 
@@ -83,6 +87,7 @@ pub struct Arena {
     elements: Vec<ArenaElement>,
     valid: Rc<Cell<bool>>,
     current_chunk_index: usize,
+    small_clear_count: u8,
     chunk_size: NonZeroUsize,
     scope_depth: usize,
 }
@@ -97,17 +102,21 @@ impl Arena {
     pub fn new(chunk_size: usize) -> Self {
         let chunk_size = NonZeroUsize::try_from(chunk_size).unwrap();
         Self {
-            chunks: vec![Chunk::new(chunk_size)],
+            chunks: Vec::new(),
             elements: Vec::new(),
             valid: Rc::new(Cell::new(true)),
             current_chunk_index: 0,
             chunk_size,
+            small_clear_count: 0,
             scope_depth: 0,
         }
     }
 
     pub fn capacity(&self) -> usize {
-        self.chunks.len() * self.chunk_size.get()
+        self.chunks
+            .iter()
+            .map(|chunk| chunk.end.addr() - chunk.start.addr())
+            .sum()
     }
 
     /// Marks the start of a scope (e.g. a window draw) whose allocations must stay
@@ -147,12 +156,40 @@ impl Arena {
         }
     }
 
+    /// Releases backing storage only after every value and enclosing scope is gone.
+    /// Unlike `clear`, an idle notification must never invalidate live allocations.
+    pub(crate) fn release_idle_memory(&mut self) {
+        if self.scope_depth != 0 || !self.elements.is_empty() {
+            return;
+        }
+        self.chunks = Vec::new();
+        self.elements = Vec::new();
+        self.current_chunk_index = 0;
+        self.small_clear_count = 0;
+    }
+
     fn force_clear(&mut self) {
         self.valid.set(false);
         self.valid = Rc::new(Cell::new(true));
+        let element_count = self.elements.len();
+        let used_chunks = (self.current_chunk_index + 1).min(self.chunks.len());
         self.elements.clear();
-        for chunk_index in 0..=self.current_chunk_index {
-            self.chunks[chunk_index].reset();
+        for chunk in self.chunks.iter_mut().take(used_chunks) {
+            chunk.reset();
+        }
+        if self.chunks.len() > 4 && used_chunks * 4 < self.chunks.len() {
+            self.small_clear_count += 1;
+        } else {
+            self.small_clear_count = 0;
+        }
+        if self.small_clear_count == 2 {
+            // Retain a little headroom, but not a large page's unused tail.
+            // All values have been dropped and active scopes defer this path.
+            self.chunks.truncate(used_chunks.max(2));
+            if self.elements.capacity() > element_count.max(128) * 4 {
+                self.elements = Vec::with_capacity(element_count.max(128));
+            }
+            self.small_clear_count = 0;
         }
         self.current_chunk_index = 0;
     }
@@ -172,8 +209,11 @@ impl Arena {
         }
 
         let layout = alloc::Layout::new::<T>();
-        let current_chunk = &mut self.chunks[self.current_chunk_index];
-        let ptr = if let Some(ptr) = current_chunk.allocate(layout) {
+        let ptr = if let Some(ptr) = self
+            .chunks
+            .get_mut(self.current_chunk_index)
+            .and_then(|chunk| chunk.allocate(layout))
+        {
             ptr.as_ptr()
         } else {
             self.allocate_next_chunk(layout)
@@ -193,25 +233,28 @@ impl Arena {
 
     #[inline(never)]
     fn allocate_next_chunk(&mut self, layout: alloc::Layout) -> *mut u8 {
-        self.current_chunk_index += 1;
-        if self.current_chunk_index >= self.chunks.len() {
-            self.chunks.push(Chunk::new(self.chunk_size));
-            assert_eq!(self.current_chunk_index, self.chunks.len() - 1);
-            log::trace!(
-                "increased element arena capacity to {}kb",
-                self.capacity() / 1024,
-            );
+        while self.current_chunk_index < self.chunks.len() {
+            self.current_chunk_index += 1;
+            if let Some(pointer) = self
+                .chunks
+                .get_mut(self.current_chunk_index)
+                .and_then(|chunk| chunk.allocate(layout))
+            {
+                return pointer.as_ptr();
+            }
         }
-        let current_chunk = &mut self.chunks[self.current_chunk_index];
-        if let Some(pointer) = current_chunk.allocate(layout) {
-            pointer.as_ptr()
-        } else {
-            panic!(
-                "Arena chunk_size of {} is too small to allocate {} bytes",
-                self.chunk_size,
-                layout.size()
-            );
-        }
+
+        // A large or over-aligned element gets its own chunk rather than making
+        // every arena reserve enough space for the largest possible element.
+        let chunk_size = NonZeroUsize::new(self.chunk_size.get().max(layout.size())).unwrap();
+        let mut chunk = Chunk::new(chunk_size, layout.align());
+        let pointer = chunk.allocate(layout).expect("new chunk fits its allocation");
+        self.chunks.push(chunk);
+        log::trace!(
+            "increased element arena capacity to {}kb",
+            self.capacity() / 1024,
+        );
+        pointer.as_ptr()
     }
 }
 
@@ -263,6 +306,88 @@ mod tests {
     use super::*;
 
     #[test]
+    fn idle_releases_only_cleared_unscoped_storage() {
+        let mut arena = Arena::new(64);
+        let value = arena.alloc(|| 42u64);
+        let capacity = arena.capacity();
+        arena.release_idle_memory();
+        assert_eq!(arena.capacity(), capacity);
+        assert_eq!(*value, 42);
+
+        arena.clear();
+        assert!(!value.valid.get());
+        arena.begin_scope();
+        arena.release_idle_memory();
+        assert_eq!(arena.capacity(), capacity);
+        arena.end_scope();
+        arena.release_idle_memory();
+        assert_eq!(arena.capacity(), 0);
+        assert_eq!(arena.chunks.capacity(), 0);
+        assert_eq!(arena.elements.capacity(), 0);
+        assert_eq!(arena.current_chunk_index, 0);
+
+        assert_eq!(*arena.alloc(|| 7u64), 7);
+        arena.clear();
+        arena.release_idle_memory();
+        assert_eq!(arena.capacity(), 0);
+    }
+
+    #[test]
+    fn test_arena_reclaims_drop_records_after_dropping_values() {
+        struct DropCounter(Rc<Cell<usize>>);
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        let drops = Rc::new(Cell::new(0));
+        let mut arena = Arena::new(8);
+        for _ in 0..1024 {
+            arena.alloc(|| DropCounter(drops.clone()));
+        }
+        arena.clear();
+        assert_eq!(drops.get(), 1024);
+        for _ in 0..2 {
+            arena.alloc(|| DropCounter(drops.clone()));
+            arena.clear();
+        }
+        assert_eq!(drops.get(), 1026);
+        assert_eq!(arena.capacity(), 16);
+        assert_eq!(arena.elements.capacity(), 128);
+    }
+
+    #[test]
+    fn test_arena_reclaims_peak_after_two_small_clears() {
+        let mut arena = Arena::new(16);
+        for _ in 0..6 {
+            arena.alloc(|| [0u8; 16]);
+        }
+        arena.clear();
+        assert_eq!(arena.capacity(), 96);
+
+        arena.alloc(|| 1u8);
+        arena.clear();
+        assert_eq!(arena.capacity(), 96);
+        arena.alloc(|| 2u8);
+        arena.clear();
+        assert_eq!(arena.capacity(), 32);
+        assert_eq!(*arena.alloc(|| [3u8; 16]), [3; 16]);
+    }
+
+    #[test]
+    fn test_arena_keeps_peak_for_alternating_use() {
+        let mut arena = Arena::new(16);
+        for count in [6, 1, 6, 1, 6] {
+            for _ in 0..count {
+                arena.alloc(|| [0u8; 16]);
+            }
+            arena.clear();
+            assert_eq!(arena.capacity(), 96);
+        }
+    }
+
+    #[test]
     fn test_arena() {
         let mut arena = Arena::new(1024);
         let a = arena.alloc(|| 1u64);
@@ -295,6 +420,37 @@ mod tests {
         arena.alloc(|| DropGuard(dropped.clone()));
         arena.clear();
         assert!(dropped.get());
+    }
+
+    #[test]
+    fn test_arena_starts_empty() {
+        let mut arena = Arena::new(1024);
+        assert_eq!(arena.capacity(), 0);
+        arena.clear();
+        assert_eq!(arena.capacity(), 0);
+        assert_eq!(*arena.alloc(|| 42u64), 42);
+        assert_eq!(arena.capacity(), 1024);
+    }
+
+    #[test]
+    fn test_arena_large_allocations() {
+        let mut arena = Arena::new(8);
+        assert_eq!(*arena.alloc(|| [7u8; 32]), [7; 32]);
+        assert_eq!(*arena.alloc(|| 42u64), 42);
+        arena.clear();
+        assert_eq!(*arena.alloc(|| 1u64), 1);
+        assert_eq!(*arena.alloc(|| [9u8; 64]), [9; 64]);
+    }
+
+    #[test]
+    fn test_arena_overaligned_allocations() {
+        #[repr(align(256))]
+        struct Aligned(u8);
+
+        let mut arena = Arena::new(8);
+        assert_eq!(arena.alloc(|| Aligned(42)).0, 42);
+        arena.clear();
+        assert_eq!(arena.alloc(|| Aligned(7)).0, 7);
     }
 
     #[test]

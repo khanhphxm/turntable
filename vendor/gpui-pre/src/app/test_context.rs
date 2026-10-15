@@ -1,3 +1,5 @@
+// Modified by Turntable: simulate platform quiescence without another frame; see ../../TURNTABLE.md.
+
 use crate::{
     Action, AnyView, AnyWindowHandle, App, AppCell, AppContext, AsyncApp, AvailableSpace,
     BackgroundExecutor, BorrowAppContext, Bounds, Capslock, ClipboardItem, DisplayId, DrawPhase,
@@ -470,6 +472,11 @@ impl TestAppContext {
     ) {
         self.test_window(window_handle)
             .simulate_visibility_change(visibility);
+    }
+
+    /// Simulates the platform parking a window's frame source, without drawing.
+    pub fn simulate_window_frame_idle(&self, window_handle: AnyWindowHandle) {
+        self.test_window(window_handle).simulate_frame_idle();
     }
 
     /// Simulates connecting a display.

@@ -8,6 +8,8 @@ runner = "scripts/run-signed.sh"
 
 
 [env]
-# jemalloc (the app's allocator, see crates/turntable/src/main.rs): one arena, no thread caches, and
-# freed pages go back to the OS within a second, so the footprint follows what is in use.
-JEMALLOC_SYS_WITH_MALLOC_CONF = "narenas:1,tcache:false,dirty_decay_ms:1000,muzzy_decay_ms:0"
+# jemalloc (the app's allocator, see crates/turntable/src/main.rs): one arena, no thread caches.
+# Purge freed pages immediately: allocation-driven decay can leave the last frame's pages
+# dirty once the app parks. Use one-page slabs where objects fit to reduce fragmentation;
+# larger objects get the minimum required pages. Neither policy adds an idle thread or timer.
+JEMALLOC_SYS_WITH_MALLOC_CONF = "narenas:1,tcache:false,dirty_decay_ms:0,muzzy_decay_ms:0,slab_sizes:1-65536:1"

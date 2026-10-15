@@ -49,3 +49,14 @@ transition and high-refresh-rate cap.
 For an idle CPU/RSS sample on macOS, run `top -l 3 -s 10 -pid <PID> -stats pid,command,cpu,mem`.
 Set `TURNTABLE_HOME` to an isolated profile copy with a distinct Connect device
 name and regenerated device ID; never benchmark with the live user profile.
+
+## Idle resource retirement
+
+`WindowFrameSource::complete_frame` retires idle Metal command storage after
+drawable parking; pending GPU work keeps its queue and submission order. Live
+resize, backing-layer identity and the three-unused-frame tail are unchanged.
+
+After releasing the native window mutex, the same transition calls GPUI's
+`on_frame_idle` to release disposable frame-building storage without a timer or
+extra frame. Hidden windows use the existing visibility callback. See the
+Apple and GPUI patch docs for ownership and retention rules.

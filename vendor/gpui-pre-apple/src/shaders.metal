@@ -1,3 +1,4 @@
+// Modified by Turntable: procedural quad vertices and tile-local filtering; see ../TURNTABLE.md.
 #include <metal_stdlib>
 #include <simd/simd.h>
 
@@ -65,13 +66,11 @@ struct QuadFragmentInput {
 
 vertex QuadVertexOutput quad_vertex(uint unit_vertex_id [[vertex_id]],
                                     uint quad_id [[instance_id]],
-                                    constant float2 *unit_vertices
-                                    [[buffer(QuadInputIndex_Vertices)]],
                                     constant Quad *quads
                                     [[buffer(QuadInputIndex_Quads)]],
                                     constant Size_DevicePixels *viewport_size
                                     [[buffer(QuadInputIndex_ViewportSize)]]) {
-  float2 unit_vertex = unit_vertices[unit_vertex_id];
+  float2 unit_vertex = float2(float(unit_vertex_id & 1u), 0.5 * float(unit_vertex_id & 2u));
   Quad quad = quads[quad_id];
   float4 device_position =
       to_device_position(unit_vertex, quad.bounds, viewport_size);
@@ -461,11 +460,10 @@ struct ShadowFragmentInput {
 
 vertex ShadowVertexOutput shadow_vertex(
     uint unit_vertex_id [[vertex_id]], uint shadow_id [[instance_id]],
-    constant float2 *unit_vertices [[buffer(ShadowInputIndex_Vertices)]],
     constant Shadow *shadows [[buffer(ShadowInputIndex_Shadows)]],
     constant Size_DevicePixels *viewport_size
     [[buffer(ShadowInputIndex_ViewportSize)]]) {
-  float2 unit_vertex = unit_vertices[unit_vertex_id];
+  float2 unit_vertex = float2(float(unit_vertex_id & 1u), 0.5 * float(unit_vertex_id & 2u));
   Shadow shadow = shadows[shadow_id];
 
   Bounds_ScaledPixels bounds;
@@ -569,11 +567,10 @@ struct UnderlineFragmentInput {
 
 vertex UnderlineVertexOutput underline_vertex(
     uint unit_vertex_id [[vertex_id]], uint underline_id [[instance_id]],
-    constant float2 *unit_vertices [[buffer(UnderlineInputIndex_Vertices)]],
     constant Underline *underlines [[buffer(UnderlineInputIndex_Underlines)]],
     constant Size_DevicePixels *viewport_size
     [[buffer(ShadowInputIndex_ViewportSize)]]) {
-  float2 unit_vertex = unit_vertices[unit_vertex_id];
+  float2 unit_vertex = float2(float(unit_vertex_id & 1u), 0.5 * float(unit_vertex_id & 2u));
   Underline underline = underlines[underline_id];
   float4 device_position =
       to_device_position(unit_vertex, underline.bounds, viewport_size);
@@ -634,13 +631,12 @@ struct MonochromeSpriteFragmentInput {
 
 vertex MonochromeSpriteVertexOutput monochrome_sprite_vertex(
     uint unit_vertex_id [[vertex_id]], uint sprite_id [[instance_id]],
-    constant float2 *unit_vertices [[buffer(SpriteInputIndex_Vertices)]],
     constant MonochromeSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
     constant Size_DevicePixels *viewport_size
     [[buffer(SpriteInputIndex_ViewportSize)]],
     constant Size_DevicePixels *atlas_size
     [[buffer(SpriteInputIndex_AtlasTextureSize)]]) {
-  float2 unit_vertex = unit_vertices[unit_vertex_id];
+  float2 unit_vertex = float2(float(unit_vertex_id & 1u), 0.5 * float(unit_vertex_id & 2u));
   MonochromeSprite sprite = sprites[sprite_id];
   float4 device_position =
       to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation, viewport_size);
@@ -687,14 +683,13 @@ struct PolychromeSpriteFragmentInput {
 
 vertex PolychromeSpriteVertexOutput polychrome_sprite_vertex(
     uint unit_vertex_id [[vertex_id]], uint sprite_id [[instance_id]],
-    constant float2 *unit_vertices [[buffer(SpriteInputIndex_Vertices)]],
     constant PolychromeSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
     constant Size_DevicePixels *viewport_size
     [[buffer(SpriteInputIndex_ViewportSize)]],
     constant Size_DevicePixels *atlas_size
     [[buffer(SpriteInputIndex_AtlasTextureSize)]]) {
 
-  float2 unit_vertex = unit_vertices[unit_vertex_id];
+  float2 unit_vertex = float2(float(unit_vertex_id & 1u), 0.5 * float(unit_vertex_id & 2u));
   PolychromeSprite sprite = sprites[sprite_id];
   float4 device_position =
       to_device_position(unit_vertex, sprite.bounds, viewport_size);
@@ -715,8 +710,14 @@ fragment float4 polychrome_sprite_fragment(
   PolychromeSprite sprite = sprites[input.sprite_id];
   constexpr sampler atlas_texture_sampler(mag_filter::linear,
                                           min_filter::linear);
+  float2 atlas_size = float2(atlas_texture.get_width(), atlas_texture.get_height());
+  float2 tile_origin = float2(sprite.tile.bounds.origin.x, sprite.tile.bounds.origin.y);
+  float2 tile_size = float2(sprite.tile.bounds.size.width, sprite.tile.bounds.size.height);
+  // Clamp only fragment samples, leaving the image's interior mapping unchanged.
+  float2 tile_position = clamp(input.tile_position, (tile_origin + 0.5) / atlas_size,
+                               (tile_origin + tile_size - 0.5) / atlas_size);
   float4 sample =
-      atlas_texture.sample(atlas_texture_sampler, input.tile_position);
+      atlas_texture.sample(atlas_texture_sampler, tile_position);
   float distance =
       quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
 
@@ -819,11 +820,10 @@ struct PathSpriteVertexOutput {
 vertex PathSpriteVertexOutput path_sprite_vertex(
   uint unit_vertex_id [[vertex_id]],
   uint sprite_id [[instance_id]],
-  constant float2 *unit_vertices [[buffer(SpriteInputIndex_Vertices)]],
   constant PathSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
   constant Size_DevicePixels *viewport_size [[buffer(SpriteInputIndex_ViewportSize)]]
 ) {
-  float2 unit_vertex = unit_vertices[unit_vertex_id];
+  float2 unit_vertex = float2(float(unit_vertex_id & 1u), 0.5 * float(unit_vertex_id & 2u));
   PathSprite sprite = sprites[sprite_id];
   // Don't apply content mask because it was already accounted for when
   // rasterizing the path.
@@ -860,20 +860,19 @@ struct SurfaceFragmentInput {
 
 vertex SurfaceVertexOutput surface_vertex(
     uint unit_vertex_id [[vertex_id]], uint surface_id [[instance_id]],
-    constant float2 *unit_vertices [[buffer(SurfaceInputIndex_Vertices)]],
     constant SurfaceBounds *surfaces [[buffer(SurfaceInputIndex_Surfaces)]],
     constant Size_DevicePixels *viewport_size
     [[buffer(SurfaceInputIndex_ViewportSize)]],
     constant Size_DevicePixels *texture_size
     [[buffer(SurfaceInputIndex_TextureSize)]]) {
-  float2 unit_vertex = unit_vertices[unit_vertex_id];
+  float2 unit_vertex = float2(float(unit_vertex_id & 1u), 0.5 * float(unit_vertex_id & 2u));
   SurfaceBounds surface = surfaces[surface_id];
   float4 device_position =
       to_device_position(unit_vertex, surface.bounds, viewport_size);
   float4 clip_distance = distance_from_clip_rect(unit_vertex, surface.bounds,
                                                  surface.content_mask.bounds);
   // We are going to copy the whole texture, so the texture position corresponds
-  // to the current vertex of the unit triangle.
+  // to the current vertex of the unit quad.
   float2 texture_position = unit_vertex;
   return SurfaceVertexOutput{
       device_position,

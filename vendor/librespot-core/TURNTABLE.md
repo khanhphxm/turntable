@@ -21,3 +21,8 @@ The controller handles a refusal as sign-out: stop Spirc/audio and cancel sessio
 Sign-out and Premium rejection share one account teardown. All account-scoped state is reset immediately while device preferences remain. Library requests, startup/player events and lyrics carry an account generation; stale queued/in-flight work cannot restore UI data or re-enable snapshot persistence. Startup authorization cancellation also guards the native credential cache write itself, rather than merely discarding the eventual engine response.
 
 `build.rs` no longer runs vergen or draws a random build ID. Upstream embedded the enclosing repository's git commit and dates, which made every commit rebuild librespot-core and its dependents (locally and in CI). The informational strings now use the crate version: the AP login's system information string reads `librespot-0.8.0-turntable`, and `VERSION_STRING` reads `librespot-0.8.0`. The `vergen-gitcl`, `rand` and `rand_distr` build-dependencies are removed.
+
+`src/dealer/mod.rs` starts tungstenite's read buffer at 4 KiB rather than 128 KiB
+for small dealer JSON/control messages. It still grows for large messages;
+message/frame/write limits and TLS/proxy/reconnection behavior are unchanged.
+This applies across platforms; tests cover large whole and fragmented messages.

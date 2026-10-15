@@ -1,4 +1,5 @@
 // Modified by Turntable from upstream GPUI/Zed; see ../TURNTABLE.md for changes.
+// Reports the existing parked-frame transition for Metal resource retirement.
 
 //! Frame pacing for macOS windows, built on `CVDisplayLink`.
 //!
@@ -367,7 +368,8 @@ impl WindowFrameSource {
         self.registration.is_some()
     }
 
-    pub fn complete_frame(&mut self) {
+    /// Returns whether the window's frame source parked this frame.
+    pub fn complete_frame(&mut self) -> bool {
         if self.registration.is_some() && self.activity.should_park() {
             // SAFETY: new's context is the window's live GPUIView. This method
             // runs inside its main-queue callback, before source/view teardown.
@@ -376,7 +378,7 @@ impl WindowFrameSource {
             // pauses while the resize grip is held. Its first idle tick after
             // AppKit ends the resize can then retire the pool normally.
             if view.inLiveResize() {
-                return;
+                return false;
             }
             self.stop();
             // SAFETY: NSView's nullable layer getter returns an object owned by
@@ -387,7 +389,9 @@ impl WindowFrameSource {
             if let Some(layer) = unsafe { layer.as_ref() } {
                 gpui_apple::metal_renderer::park_drawables(layer);
             }
+            return true;
         }
+        false
     }
 
     pub fn stop(&mut self) {

@@ -1,4 +1,5 @@
 // Modified by Turntable from upstream GPUI/Zed; see ../TURNTABLE.md for changes.
+// Retires renderer and GPUI scratch storage at the existing idle-frame transition.
 
 use crate::{
     BoolExt, MacDisplay, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
@@ -670,6 +671,7 @@ struct MacWindowState {
     frame_source: Option<WindowFrameSource>,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
+    frame_idle_callback: Option<Box<dyn FnMut()>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
     activate_callback: Option<Box<dyn FnMut(bool)>>,
     visibility_callback: Option<Box<dyn FnMut(WindowVisibility)>>,
@@ -1123,6 +1125,7 @@ impl MacWindow {
                     false,
                 ),
                 request_frame_callback: None,
+                frame_idle_callback: None,
                 event_callback: None,
                 activate_callback: None,
                 visibility_callback: None,
@@ -2044,6 +2047,10 @@ impl PlatformWindow for MacWindow {
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         self.0.as_ref().lock().request_frame_callback = Some(callback);
+    }
+
+    fn on_frame_idle(&self, callback: Box<dyn FnMut()>) {
+        self.0.as_ref().lock().frame_idle_callback = Some(callback);
     }
 
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>) {
@@ -3392,8 +3399,18 @@ extern "C" fn step(view: *mut c_void) {
         });
         let mut lock = window_state.lock();
         lock.request_frame_callback = Some(callback);
-        if let Some(frame_source) = lock.frame_source.as_mut() {
-            frame_source.complete_frame();
+        if lock
+            .frame_source
+            .as_mut()
+            .is_some_and(WindowFrameSource::complete_frame)
+        {
+            lock.renderer.park_resources();
+            let idle_callback = lock.frame_idle_callback.take();
+            drop(lock);
+            if let Some(mut idle_callback) = idle_callback {
+                idle_callback();
+                window_state.lock().frame_idle_callback = Some(idle_callback);
+            }
         }
     }
 }

@@ -1,3 +1,4 @@
+// Modified by Turntable: tile-local image filtering; see ../TURNTABLE.md.
 /* Functions useful for debugging:
 
 // A heat map color for debugging (blue -> cyan -> green -> yellow -> red).
@@ -1293,13 +1294,19 @@ fn vs_poly_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index
 
 @fragment
 fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
-    let sample = textureSample(t_sprite, s_sprite, input.tile_position);
+    let sprite = load_poly_sprite(input.sprite_id);
+    let atlas_size = vec2<f32>(textureDimensions(t_sprite, 0));
+    let tile_origin = vec2<f32>(sprite.tile.bounds.origin);
+    let tile_size = vec2<f32>(sprite.tile.bounds.size);
+    // Clamp only fragment samples, leaving the image's interior mapping unchanged.
+    let tile_position = clamp(input.tile_position, (tile_origin + vec2<f32>(0.5)) / atlas_size,
+                              (tile_origin + tile_size - vec2<f32>(0.5)) / atlas_size);
+    let sample = textureSample(t_sprite, s_sprite, tile_position);
     // Alpha clip after using the derivatives.
     if (any(input.clip_distances < vec4<f32>(0.0))) {
         return vec4<f32>(0.0);
     }
 
-    let sprite = load_poly_sprite(input.sprite_id);
     let distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
 
     var color = sample;

@@ -14,6 +14,11 @@
 	<key>CFBundleVersion</key><string>0.1.1</string>
 	<key>LSApplicationCategoryType</key><string>public.app-category.music</string>
 	<key>LSMinimumSystemVersion</key><string>12.0</string>
+	<!-- LaunchServices-only memory policy: one malloc magazine reduces fragmentation and xzone pointer-type buckets. -->
+	<key>LSEnvironment</key>
+	<dict>
+		<key>MallocMaxMagazines</key><string>1</string>
+	</dict>
 	<key>NSHighResolutionCapable</key><true/>
 	<!-- No one-time-code AutoFill in ordinary text fields (see main.rs). -->
 	<key>NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac</key><true/>

@@ -1,3 +1,5 @@
+// Modified by Turntable: deterministic frame-idle events; see ../../../TURNTABLE.md.
+
 use crate::{
     AnyWindowHandle, Bounds, DevicePixels, DispatchEventResult, DisplayId, GpuSpecs, HeadlessAtlas,
     Pixels, PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer, PlatformInput,
@@ -47,6 +49,7 @@ pub(crate) struct TestWindowState {
     display_changed_callback: Option<Box<dyn FnMut()>>,
     appearance_change_callback: Option<Box<dyn FnMut()>>,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
+    frame_idle_callback: Option<Box<dyn FnMut()>>,
     frame_wake_count: Rc<Cell<usize>>,
     frame_scheduled: bool,
     frame_callback_pending: bool,
@@ -121,6 +124,7 @@ impl TestWindow {
             display_changed_callback: None,
             appearance_change_callback: None,
             request_frame_callback: None,
+            frame_idle_callback: None,
             frame_wake_count: Rc::new(Cell::new(0)),
             frame_scheduled: false,
             frame_callback_pending: false,
@@ -135,6 +139,15 @@ impl TestWindow {
             start_external_drag_result: false,
         })))
     }
+
+    pub fn simulate_frame_idle(&self) {
+        let callback = self.0.lock().frame_idle_callback.take();
+        if let Some(mut callback) = callback {
+            callback();
+            self.0.lock().frame_idle_callback = Some(callback);
+        }
+    }
+
     pub fn simulate_scheduled_frame(&self) -> bool {
         let callback = {
             let mut state = self.0.lock();
@@ -493,6 +506,10 @@ impl PlatformWindow for TestWindow {
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         self.0.lock().request_frame_callback = Some(callback);
+    }
+
+    fn on_frame_idle(&self, callback: Box<dyn FnMut()>) {
+        self.0.lock().frame_idle_callback = Some(callback);
     }
 
     fn schedule_frame(&self) {

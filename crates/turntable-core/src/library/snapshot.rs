@@ -5,6 +5,11 @@
 //! (an atomic replacement can temporarily take another 2 MiB). The identity comes from the
 //! stored authorization, never from the cache. Corrupt, oversized or old-version files are
 //! ignored; a snapshot is a first paint, not proof that its data or authorization is current.
+//!
+//! Cold listings and searches retain canonical JSON rather than decoded models in RAM.
+//! Loading still validates and normalizes every page; opening decodes only the requested one.
+//! The disk schema, byte/count limits and stale-first delivery are unchanged; cached
+//! Open/Search trades decoded-page storage for synchronous decoding of the requested page.
 
 use std::{
 	fs,
@@ -18,6 +23,7 @@ use std::{
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use serde_json::value::{RawValue, to_raw_value};
 
 use super::{Home, Listing, Response, Route, Tile};
 use crate::{
@@ -46,13 +52,24 @@ struct Snapshot {
 #[derive(Serialize, Deserialize)]
 struct SavedListing {
 	route:   Route,
-	listing: Listing,
+	#[serde(deserialize_with = "saved_json::<Listing, _>")]
+	listing: Box<RawValue>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct SavedSearch {
 	query:   String,
-	results: SearchResults,
+	#[serde(deserialize_with = "saved_json::<SearchResults, _>")]
+	results: Box<RawValue>,
+}
+
+fn saved_json<'de, T, D>(deserializer: D) -> Result<Box<RawValue>, D::Error>
+where
+	T: Deserialize<'de> + Serialize,
+	D: serde::Deserializer<'de>,
+{
+	let page = T::deserialize(deserializer)?;
+	to_raw_value(&page).map_err(serde::de::Error::custom)
 }
 
 pub(super) struct Store {
@@ -152,18 +169,18 @@ impl Store {
 
 	pub(super) fn listing(&mut self, route: &Route) -> Option<Listing> {
 		let listings = &mut self.data.as_mut()?.listings;
-		let index = listings.iter().position(|saved| &saved.route == route)?;
+		let (index, saved) = listings.iter().enumerate().find(|(_, saved)| &saved.route == route)?;
+		let listing = serde_json::from_str(saved.listing.get()).ok()?;
 		let saved = listings.remove(index);
-		let listing = saved.listing.clone();
 		listings.push(saved);
 		Some(listing)
 	}
 
 	pub(super) fn search(&mut self, query: &str) -> Option<SearchResults> {
 		let searches = &mut self.data.as_mut()?.searches;
-		let index = searches.iter().position(|saved| saved.query == query.trim())?;
+		let (index, saved) = searches.iter().enumerate().find(|(_, saved)| saved.query == query.trim())?;
+		let results = serde_json::from_str(saved.results.get()).ok()?;
 		let saved = searches.remove(index);
-		let results = saved.results.clone();
 		searches.push(saved);
 		Some(results)
 	}
@@ -213,36 +230,39 @@ impl Store {
 				listing,
 			} => {
 				let Some(data) = &mut self.data else { return false };
+				let Ok(listing) = to_raw_value(listing) else { return false };
 				data.listings.retain(|saved| &saved.route != route);
 				if data.listings.len() == LISTINGS_KEPT {
 					data.listings.remove(0);
 				}
-				data.listings.push(SavedListing { route: route.clone(), listing: listing.clone() });
+				data.listings.push(SavedListing { route: route.clone(), listing });
 			},
 			Response::Search { query, results } => {
 				let Some(data) = &mut self.data else { return false };
+				let Ok(results) = to_raw_value(results) else { return false };
 				data.searches.retain(|saved| saved.query != query.trim());
 				if data.searches.len() == LISTINGS_KEPT {
 					data.searches.remove(0);
 				}
-				data.searches.push(SavedSearch { query: query.trim().to_owned(), results: results.clone() });
+				data.searches.push(SavedSearch { query: query.trim().to_owned(), results });
 			},
 			Response::ArtistPopular(id, popular) => {
-				let Some(listing) = self.saved_listing(&Route::Artist(id.clone())) else { return false };
-				listing.tracks.clone_from(&popular.tracks);
-				listing.plays.clone_from(&popular.plays);
-				listing.accent.clone_from(&popular.accent);
-				listing.popular_loaded = true;
-				listing.take_artist_overview(popular.overview.clone());
+				return self.update_saved_listing(&Route::Artist(id.clone()), |listing| {
+					listing.tracks.clone_from(&popular.tracks);
+					listing.plays.clone_from(&popular.plays);
+					listing.accent.clone_from(&popular.accent);
+					listing.popular_loaded = true;
+					listing.take_artist_overview(popular.overview.clone());
+				});
 			},
 			Response::Accent(route, accent) => {
-				let Some(listing) = self.saved_listing(route) else { return false };
-				listing.accent = Some(accent.clone());
+				return self.update_saved_listing(route, |listing| listing.accent = Some(accent.clone()));
 			},
 			Response::Plays(route, plays) => {
-				let Some(listing) = self.saved_listing(route) else { return false };
-				listing.plays =
-					listing.tracks.iter().map(|track| plays.get(id_of(&track.uri)).copied()).collect::<Option<_>>().unwrap_or_default();
+				return self.update_saved_listing(route, |listing| {
+					listing.plays =
+						listing.tracks.iter().map(|track| plays.get(id_of(&track.uri)).copied()).collect::<Option<_>>().unwrap_or_default();
+				});
 			},
 			Response::Playlists(playlists) => {
 				let Some(data) = &mut self.data else { return false };
@@ -257,8 +277,15 @@ impl Store {
 		true
 	}
 
-	fn saved_listing(&mut self, route: &Route) -> Option<&mut Listing> {
-		self.data.as_mut()?.listings.iter_mut().find(|saved| &saved.route == route).map(|saved| &mut saved.listing)
+	fn update_saved_listing(&mut self, route: &Route, update: impl FnOnce(&mut Listing)) -> bool {
+		let Some(saved) = self.data.as_mut().and_then(|data| data.listings.iter_mut().find(|saved| &saved.route == route)) else {
+			return false;
+		};
+		let Ok(mut listing) = serde_json::from_str::<Listing>(saved.listing.get()) else { return false };
+		update(&mut listing);
+		let Ok(json) = to_raw_value(&listing) else { return false };
+		saved.listing = json;
+		true
 	}
 
 	/// Encodes a bounded cache under the state lock; the caller owns off-lock disk I/O.
@@ -717,6 +744,90 @@ mod tests {
 		assert!(folder.children.is_empty());
 		restored.load(Some("bob"));
 		assert!(restored.rootlist().is_none());
+	}
+
+	#[test]
+	fn compact_pages_keep_the_json_schema_and_late_enrichment() {
+		let directory = tempfile::tempdir().unwrap();
+		let mut store = Store::new(directory.path());
+		connect(&mut store, "alex");
+		let route = Route::Artist("band".into());
+		assert!(store.record(&Response::Listing { route: route.clone(), offset: 0, listing: Listing::default() }));
+		let track: Track = serde_json::from_value(serde_json::json!({
+			"uri": "spotify:track:song", "name": "A song 雨", "artists": [{ "uri": "spotify:artist:band", "name": "Band" }]
+		}))
+		.unwrap();
+		assert!(store.record(&Response::ArtistPopular("band".into(), super::super::Popularity {
+			tracks:   vec![track.clone()],
+			plays:    vec![10],
+			overview: Some(crate::spotify::ArtistOverview { name: "Band 雨".into(), ..Default::default() }),
+			accent:   Some("#123456".into()),
+		})));
+		assert!(store.record(&Response::Accent(route.clone(), "#abcdef".into())));
+		assert!(store.record(&Response::Plays(route.clone(), [("song".into(), 42)].into())));
+		let mut results = SearchResults::default();
+		results.tracks.items.push(track);
+		assert!(store.record(&Response::Search { query: "  Band 雨  ".into(), results: results.clone() }));
+		store.save().unwrap();
+		let path = store.path("alex");
+		let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+		assert!(saved["listings"][0]["listing"].is_object(), "pages remain objects, not JSON strings");
+		assert!(saved["searches"][0]["results"].is_object());
+		let mut restored = Store::new(directory.path());
+		restored.load(Some("alex"));
+		let listing = restored.listing(&route).unwrap();
+		assert_eq!(listing.title, "Band 雨");
+		assert_eq!(listing.tracks, results.tracks.items);
+		assert_eq!(listing.plays, [42]);
+		assert_eq!(listing.accent.as_deref(), Some("#abcdef"));
+		assert!(listing.popular_loaded);
+		assert_eq!(listing.overview.unwrap().name, "Band 雨");
+		assert_eq!(restored.search(" Band 雨 ").unwrap(), results);
+		assert!(!restored.record(&Response::Accent(Route::Liked, "#000000".into())));
+	}
+
+	#[test]
+	fn compact_snapshot_pages_are_validated_before_accepting_the_account() {
+		let directory = tempfile::tempdir().unwrap();
+		let mut store = Store::new(directory.path());
+		connect(&mut store, "alex");
+		store.record(&Response::Listing { route: Route::Liked, offset: 0, listing: Listing::default() });
+		store.record(&Response::Search { query: "song".into(), results: SearchResults::default() });
+		store.save().unwrap();
+		let path = store.path("alex");
+		let saved: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+		for field in ["listing", "results"] {
+			let mut corrupt = saved.clone();
+			if field == "listing" {
+				corrupt["listings"][0][field]["kicker"] = "unrecognized kind".into();
+			} else {
+				corrupt["searches"][0][field]["tracks"]["items"] = "not tracks".into();
+			}
+			fs::write(&path, serde_json::to_vec(&corrupt).unwrap()).unwrap();
+			let mut restored = Store::new(directory.path());
+			restored.load(Some("alex"));
+			assert!(restored.connected().is_none(), "invalid {field} must reject the snapshot at load");
+		}
+	}
+
+	#[test]
+	fn compact_searches_keep_lru_order_and_independent_return_values() {
+		let directory = tempfile::tempdir().unwrap();
+		let mut store = Store::new(directory.path());
+		connect(&mut store, "alex");
+		for index in 0..LISTINGS_KEPT {
+			store.record(&Response::Search { query: index.to_string(), results: SearchResults::default() });
+		}
+		let mut opened = store.search("0").unwrap();
+		opened.tracks.total = 99;
+		store.record(&Response::Search { query: "new".into(), results: SearchResults::default() });
+		assert!(store.search("1").is_none());
+		assert_eq!(store.search("0").unwrap().tracks.total, 0);
+		store.save().unwrap();
+		let mut restored = Store::new(directory.path());
+		restored.load(Some("alex"));
+		assert!(restored.search("1").is_none());
+		assert_eq!(restored.search("0").unwrap().tracks.total, 0);
 	}
 
 	#[test]

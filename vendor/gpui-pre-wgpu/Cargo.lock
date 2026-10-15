@@ -1711,10 +1711,10 @@ dependencies = [
  "bytemuck",
  "cosmic-text",
  "criterion 0.5.1",
- "etagere",
  "gpui-pre",
  "gpui-pre-collections",
  "gpui-pre-util",
+ "guillotiere",
  "image",
  "itertools 0.14.0",
  "log",
@@ -1746,6 +1746,16 @@ name = "gpui-pre-ztracing-macro"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b0d73e1bc02eef886a5947f41b8512708792e9e5d3053d181843311a487f96f"
+
+[[package]]
+name = "guillotiere"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b62d5865c036cb1393e23c50693df631d3f5d7bcca4c04fe4cc0fd592e74a782"
+dependencies = [
+ "euclid",
+ "svg_fmt",
+]
 
 [[package]]
 name = "half"

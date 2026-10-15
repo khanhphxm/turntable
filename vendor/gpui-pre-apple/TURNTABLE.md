@@ -4,11 +4,21 @@ Based on gpui-pre-apple 0.3.9 (Apache-2.0), the Apple Metal renderer used by gpu
 
 ## Resource sizing and lifetime
 
-- Small glyphs and images share 512×512 atlas pages instead of 1024×1024 pages. Polychrome tiles larger than 256 pixels in either dimension receive a tightly sized page rather than a minimum 1024-pixel page. A 640×640 BGRA cover therefore reserves 1.56 MiB instead of 4 MiB. Small images cannot pin an otherwise-unused large cover page. Image pixels, sampling, glyph resolution and rendering shaders are unchanged.
+- Monochrome glyphs share 256×256 atlas pages instead of 1024×1024 pages; oversized glyphs/SVGs still grow a page to fit. New color pages use 256×256 backing for tiles up to 128px, 512×512 backing when tiles fit at least three across, and exact backing for larger tiles. Existing pages are reused first. A 640×640 BGRA cover therefore reserves 1.56 MiB instead of 4 MiB. Image pixels, glyph rasterization and rendering resolution are unchanged.
 - Instance buffers start at 128 KiB instead of 2 MiB per in-flight frame. The existing geometric growth, 256-byte binding alignment, 256 MiB maximum, Metal command-buffer resource retention, and completion-handler recycling remain unchanged. Complex scenes still grow normally; reducing the initial reservation is not a primitive-count limit.
 - Full-viewport path resolve/MSAA textures are allocated only for scenes containing paths, reused while their size matches, and released when a scene no longer needs them. Metal retains resources used by older in-flight command buffers. Four-sample antialiasing and Apple GPU memoryless MSAA are unchanged.
 
 Atlas removal still follows GPUI's explicit `drop_image` ownership API. Removing the last tile releases its texture; cached scenes can replay old sprite bindings, so arbitrary per-frame atlas eviction would be incorrect. Turntable's cover cache owns unused-image eviction. This patch does not add a polling timer or disable cached painting.
+
+## Atlas packing and sampling
+
+Atlas pages use guillotiere's exact rectangles to avoid shelf padding and reclaim individual tiles. Live tiles never move, preserving cached-scene coordinates; empty pages still follow explicit image ownership. Metal, wgpu and DirectX share this policy, preserving upload, texture-generation and device-loss handling. The wgpu/DirectX subpixel-color page policy is unchanged.
+
+Polychrome fragment samples clamp to each tile's outer texel centers to prevent linear filtering from reading neighboring pixels. Vertex UVs and interior image mapping are unchanged. Metal, WGSL and HLSL use the same rule; WGSL keeps derivative sampling before alpha clipping.
+
+## Procedural quad vertices
+
+Metal derives unit-quad corners from `vertex_id` and draws triangle strips, removing the static vertex buffer and its backing allocation. Quads, shadows, underlines, sprites, path resolves and video surfaces keep the same geometry; raw path vertices remain triangle lists. wgpu and DirectX already use procedural strips.
 
 ## Idle drawable pools
 
@@ -36,6 +46,14 @@ An additional uninstrumented 1920×950 offline run reported approximately 46 MiB
 Rejected alternatives: setting `drawableSize` to zero retained all three large surfaces (40.720 → 40.688 MiB footprint, Metal allocated size unchanged at 22.188 MiB). Freezing the last IOSurface into a persistent parent's `contents` and removing/recreating its child Metal layer saved the same memory as clearing `device`, but its first completed 1280×800 clear took 22.372 ms instead of 4.237 ms. Lowering `maximumDrawableCount` at runtime was already observed not to release the pool; permanently using two drawables also remains rejected by the earlier scrolling latency measurements below.
 
 The remaining drawable floor is one full-resolution presented surface: approximately 3.97 MiB at 1280×800 or 7.09 MiB at 1920×950, multiplied by four at 2× scale. This patch does not remove the driver's approximately 105 MiB submission transient while continuous GPUI animations run; animation frame demand is a separate cost.
+
+## Idle command storage (macOS)
+
+The existing drawable-parking transition releases an idle renderer-owned `MTLCommandQueue`. Completion-handler frame counts keep a busy queue alive so resumed frames cannot overtake earlier GPU work on another queue. The next draw recreates a retired queue; there is no GPU wait, timer or extra wakeup. iOS/headless callers and wgpu/DirectX queues are unchanged.
+
+The same hook trims excess completed instance buffers, keeping one warm buffer. In-flight buffers remain owned by their frames and return through normal completion callbacks. Shared-pool capacity and geometric growth are unchanged; other windows' active resources are untouched.
+
+Native regressions cover pending-queue ordering, repeated park/resume, warm-buffer reuse and cached-sprite readback after queue recreation.
 
 ## Regression coverage
 

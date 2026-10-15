@@ -1,20 +1,20 @@
-// Modified by Turntable: compact atlas pages and isolated large covers; see ../TURNTABLE.md.
+// Modified by Turntable: compact glyph pages, adaptive color sizing and exact packing; see ../TURNTABLE.md.
 use anyhow::{Context as _, Result};
-use etagere::{BucketedAtlasAllocator, size2};
 use gpui::{
     AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
     AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
 };
+use guillotiere::{AtlasAllocator, size2};
 use parking_lot::Mutex;
 use std::{borrow::Cow, ops, sync::Arc};
 
 use crate::WgpuContext;
 
-fn device_size_to_etagere(size: Size<DevicePixels>) -> etagere::Size {
+fn device_size_to_guillotiere(size: Size<DevicePixels>) -> guillotiere::Size {
     size2(size.width.0, size.height.0)
 }
 
-fn etagere_point_to_device(point: etagere::Point) -> Point<DevicePixels> {
+fn guillotiere_point_to_device(point: guillotiere::Point) -> Point<DevicePixels> {
     Point {
         x: DevicePixels(point.x),
         y: DevicePixels(point.y),
@@ -144,9 +144,8 @@ impl AtlasBackend for WgpuAtlasTextures {
         };
 
         if let Some(mut texture) = texture_slot.take() {
-            texture.allocator.deallocate(tile.tile_id.into());
-            texture.decrement_ref_count();
-            if texture.is_unreferenced() {
+            texture.allocator.deallocate(guillotiere::AllocId::deserialize(tile.tile_id.0));
+            if texture.allocator.is_empty() {
                 self.pending_uploads
                     .retain(|upload| upload.id != texture.id);
                 self.storage[id.kind]
@@ -190,6 +189,12 @@ impl WgpuAtlasTextures {
             width: DevicePixels(512),
             height: DevicePixels(512),
         };
+        // Small color tiles use half-size pages; medium tiles can fit three
+        // across a shared page, while larger tiles receive exact backing.
+        const SMALL_ATLAS_SIZE: Size<DevicePixels> = Size {
+            width: DevicePixels(256),
+            height: DevicePixels(256),
+        };
         let max_texture_size = self.max_texture_size as i32;
         let max_atlas_size = Size {
             width: DevicePixels(max_texture_size),
@@ -197,10 +202,17 @@ impl WgpuAtlasTextures {
         };
 
         let min_size = min_size.min(&max_atlas_size);
-        let size = if kind == AtlasTextureKind::Polychrome
-            && (min_size.width.0 > 256 || min_size.height.0 > 256)
-        {
-            min_size
+        let size = if kind == AtlasTextureKind::Polychrome {
+            let edge = min_size.width.0.max(min_size.height.0);
+            if edge > DEFAULT_ATLAS_SIZE.width.0 / 3 {
+                min_size
+            } else if edge <= SMALL_ATLAS_SIZE.width.0 / 2 {
+                min_size.max(&SMALL_ATLAS_SIZE).min(&max_atlas_size)
+            } else {
+                min_size.max(&DEFAULT_ATLAS_SIZE).min(&max_atlas_size)
+            }
+        } else if kind == AtlasTextureKind::Monochrome {
+            min_size.max(&SMALL_ATLAS_SIZE).min(&max_atlas_size)
         } else {
             min_size.max(&DEFAULT_ATLAS_SIZE).min(&max_atlas_size)
         };
@@ -237,11 +249,10 @@ impl WgpuAtlasTextures {
                 kind,
             },
             generation,
-            allocator: BucketedAtlasAllocator::new(device_size_to_etagere(size)),
+            allocator: AtlasAllocator::new(device_size_to_guillotiere(size)),
             format,
             texture,
             view,
-            live_atlas_keys: 0,
         };
 
         if let Some(ix) = index {
@@ -346,26 +357,24 @@ impl WgpuAtlasStorage {
 struct WgpuAtlasTexture {
     id: AtlasTextureId,
     generation: u64,
-    allocator: BucketedAtlasAllocator,
+    allocator: AtlasAllocator,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     format: wgpu::TextureFormat,
-    live_atlas_keys: u32,
 }
 
 impl WgpuAtlasTexture {
     fn allocate(&mut self, size: Size<DevicePixels>) -> Option<AtlasTile> {
-        let allocation = self.allocator.allocate(device_size_to_etagere(size))?;
+        let allocation = self.allocator.allocate(device_size_to_guillotiere(size))?;
         let tile = AtlasTile {
             texture_id: self.id,
-            tile_id: allocation.id.into(),
+            tile_id: gpui::TileId(allocation.id.serialize()),
             padding: 0,
             bounds: Bounds {
-                origin: etagere_point_to_device(allocation.rectangle.min),
+                origin: guillotiere_point_to_device(allocation.rectangle.min),
                 size,
             },
         };
-        self.live_atlas_keys += 1;
         Some(tile)
     }
 
@@ -375,14 +384,6 @@ impl WgpuAtlasTexture {
             wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm => 4,
             _ => 4,
         }
-    }
-
-    fn decrement_ref_count(&mut self) {
-        self.live_atlas_keys -= 1;
-    }
-
-    fn is_unreferenced(&self) -> bool {
-        self.live_atlas_keys == 0
     }
 }
 
@@ -509,6 +510,28 @@ mod tests {
     }
 
     #[test]
+    fn monochrome_pages_are_compact_without_limiting_tile_size() -> anyhow::Result<()> {
+        let (device, queue) = test_device_and_queue()?;
+        let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
+        for (width, height, page_width, page_height) in [(64, 64, 256, 256), (320, 144, 320, 256)] {
+            let size = Size { width: DevicePixels(width), height: DevicePixels(height) };
+            let key = AtlasKey::Svg(gpui::RenderSvgParams { path: "mono-page-size-test".into(), size });
+            let tile = atlas.get_or_insert_with(key.clone(), &mut || {
+                Ok(Some((size, Cow::Owned(vec![0; width as usize * height as usize]))))
+            })?.context("monochrome tile should exist")?;
+            {
+                let state = atlas.0.lock();
+                let texture = state.backend.storage.get(tile.texture_id).context("monochrome texture")?;
+                assert_eq!((texture.texture.width(), texture.texture.height()), (page_width as u32, page_height as u32));
+                assert_eq!(texture.texture.format(), wgpu::TextureFormat::R8Unorm);
+            }
+            atlas.remove(&key);
+            assert!(atlas.get_texture_info(tile.texture_id).is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn large_covers_have_compact_independently_released_pages() -> anyhow::Result<()> {
         let (device, queue) = test_device_and_queue()?;
         let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
@@ -530,13 +553,34 @@ mod tests {
         {
             let state = atlas.0.lock();
             let small_texture = state.backend.storage.get(small.texture_id).context("small texture")?;
-            assert_eq!((small_texture.texture.width(), small_texture.texture.height()), (512, 512));
+            assert_eq!((small_texture.texture.width(), small_texture.texture.height()), (256, 256));
             let large_texture = state.backend.storage.get(large.texture_id).context("large texture")?;
             assert_eq!((large_texture.texture.width(), large_texture.texture.height()), (640, 640));
         }
         atlas.remove(&large_key);
         assert!(atlas.get_texture_info(large.texture_id).is_none());
         assert!(atlas.get_texture_info(small.texture_id).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn covers_that_cannot_fit_three_across_use_exact_pages() -> anyhow::Result<()> {
+        let (device, queue) = test_device_and_queue()?;
+        let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
+        for (width, height) in [(248, 248), (248, 106)] {
+            let key = AtlasKey::Image(RenderImageParams { image_id: ImageId(1), frame_index: 0 });
+            let size = Size { width: DevicePixels(width), height: DevicePixels(height) };
+            let tile = atlas.get_or_insert_with(key.clone(), &mut || {
+                Ok(Some((size, Cow::Owned(vec![0; width as usize * height as usize * 4]))))
+            })?.context("image tile should exist")?;
+            {
+                let state = atlas.0.lock();
+                let texture = state.backend.storage.get(tile.texture_id).context("image texture")?;
+                assert_eq!((texture.texture.width(), texture.texture.height()), (width as u32, height as u32));
+            }
+            atlas.remove(&key);
+            assert!(atlas.get_texture_info(tile.texture_id).is_none());
+        }
         Ok(())
     }
 
@@ -583,6 +627,32 @@ mod tests {
 
         assert_eq!(second_tile.texture_id, first_tile.texture_id);
         assert_ne!(second_generation, first_generation);
+        Ok(())
+    }
+
+    #[test]
+    fn image_tiles_pack_without_shelf_padding() -> anyhow::Result<()> {
+        let (device, queue) = test_device_and_queue()?;
+        let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
+        let size = Size { width: DevicePixels(164), height: DevicePixels(164) };
+        let make_key = |image_id| AtlasKey::Image(RenderImageParams {
+            image_id: ImageId(image_id),
+            frame_index: 0,
+        });
+        let insert = |key| {
+            atlas.get_or_insert_with(key, &mut || {
+                Ok(Some((size, Cow::Owned(vec![0; 164 * 164 * 4]))))
+            }).unwrap().unwrap()
+        };
+        let tiles: Vec<_> = (0..9).map(|id| insert(make_key(id))).collect();
+        assert!(tiles.iter().all(|tile| tile.texture_id == tiles[0].texture_id));
+
+        // Reclaim one rectangle even while its neighbors keep their page alive.
+        atlas.remove(&make_key(1));
+        let replacement = insert(make_key(9));
+        assert_eq!(replacement.texture_id, tiles[0].texture_id);
+        assert_eq!(replacement.bounds, tiles[1].bounds);
+        assert!(atlas.get_texture_info(tiles[0].texture_id).is_some());
         Ok(())
     }
 
