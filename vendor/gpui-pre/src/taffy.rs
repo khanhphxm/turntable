@@ -1,4 +1,4 @@
-// Modified by Turntable: release peak layout capacity after sustained smaller frames; see ../TURNTABLE.md.
+// Modified by Turntable: reclaim quiescent/peak layout storage; see ../TURNTABLE.md.
 
 use crate::{
     AbsoluteLength, App, Bounds, DefiniteLength, Edges, GridTemplate, Length, Pixels, Point, Size,
@@ -82,6 +82,21 @@ impl TaffyLayoutEngine {
         self.absolute_layout_bounds.clear();
         self.absolute_outer_origins.clear();
         self.computed_layouts.clear();
+    }
+
+    /// Releases frame-local layout storage once the platform stops requesting frames.
+    pub(crate) fn release_idle_memory(&mut self) {
+        if self.taffy.total_node_count() != 0 {
+            return;
+        }
+        self.taffy = TaffyTree::with_capacity(0);
+        self.taffy.disable_rounding();
+        self.peak_node_count = 0;
+        self.small_frame_count = 0;
+        self.absolute_layout_bounds = FxHashMap::default();
+        self.absolute_outer_origins = FxHashMap::default();
+        self.computed_layouts = FxHashSet::default();
+        self.layout_bounds_scratch_space = Vec::new();
     }
 
     pub fn request_layout(
@@ -770,6 +785,50 @@ impl From<Size<Pixels>> for Size<AvailableSpace> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_preserves_active_nodes_and_restarts_with_unrounded_layout() {
+        let mut engine = TaffyLayoutEngine::new();
+        let style = taffy::Style {
+            size: taffy::Size {
+                width: taffy::Dimension::length(10.25),
+                height: taffy::Dimension::length(12.5),
+            },
+            ..Default::default()
+        };
+        let active = engine.taffy.new_leaf(style.clone()).unwrap();
+        engine.release_idle_memory();
+        assert_eq!(engine.taffy.total_node_count(), 1);
+        assert!(engine.taffy.style(active).is_ok());
+
+        engine.clear();
+        engine.absolute_layout_bounds.reserve(1024);
+        engine.absolute_outer_origins.reserve(1024);
+        engine.computed_layouts.reserve(1024);
+        engine.layout_bounds_scratch_space.reserve(1024);
+        engine.release_idle_memory();
+        assert_eq!(engine.peak_node_count, 0);
+        assert_eq!(engine.small_frame_count, 0);
+        assert_eq!(engine.absolute_layout_bounds.capacity(), 0);
+        assert_eq!(engine.absolute_outer_origins.capacity(), 0);
+        assert_eq!(engine.computed_layouts.capacity(), 0);
+        assert_eq!(engine.layout_bounds_scratch_space.capacity(), 0);
+
+        let resumed = engine.taffy.new_leaf(style).unwrap();
+        engine
+            .taffy
+            .compute_layout(
+                resumed,
+                taffy::Size {
+                    width: TaffyAvailableSpace::MaxContent,
+                    height: TaffyAvailableSpace::MaxContent,
+                },
+            )
+            .unwrap();
+        let layout = engine.taffy.layout(resumed).unwrap();
+        assert_eq!(layout.size.width, 10.25);
+        assert_eq!(layout.size.height, 12.5);
+    }
 
     #[test]
     fn clear_reclaims_capacity_after_two_much_smaller_frames() {

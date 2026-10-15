@@ -1,4 +1,4 @@
-// Modified by Turntable: compact lazy arena chunks and bounded peak reuse; see ../TURNTABLE.md.
+// Modified by Turntable: compact lazy arena chunks and quiescent/peak reuse; see ../TURNTABLE.md.
 
 use std::{
     alloc::{self, handle_alloc_error},
@@ -156,6 +156,18 @@ impl Arena {
         }
     }
 
+    /// Releases backing storage only after every value and enclosing scope is gone.
+    /// Unlike `clear`, an idle notification must never invalidate live allocations.
+    pub(crate) fn release_idle_memory(&mut self) {
+        if self.scope_depth != 0 || !self.elements.is_empty() {
+            return;
+        }
+        self.chunks = Vec::new();
+        self.elements = Vec::new();
+        self.current_chunk_index = 0;
+        self.small_clear_count = 0;
+    }
+
     fn force_clear(&mut self) {
         self.valid.set(false);
         self.valid = Rc::new(Cell::new(true));
@@ -292,6 +304,33 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use super::*;
+
+    #[test]
+    fn idle_releases_only_cleared_unscoped_storage() {
+        let mut arena = Arena::new(64);
+        let value = arena.alloc(|| 42u64);
+        let capacity = arena.capacity();
+        arena.release_idle_memory();
+        assert_eq!(arena.capacity(), capacity);
+        assert_eq!(*value, 42);
+
+        arena.clear();
+        assert!(!value.valid.get());
+        arena.begin_scope();
+        arena.release_idle_memory();
+        assert_eq!(arena.capacity(), capacity);
+        arena.end_scope();
+        arena.release_idle_memory();
+        assert_eq!(arena.capacity(), 0);
+        assert_eq!(arena.chunks.capacity(), 0);
+        assert_eq!(arena.elements.capacity(), 0);
+        assert_eq!(arena.current_chunk_index, 0);
+
+        assert_eq!(*arena.alloc(|| 7u64), 7);
+        arena.clear();
+        arena.release_idle_memory();
+        assert_eq!(arena.capacity(), 0);
+    }
 
     #[test]
     fn test_arena_reclaims_drop_records_after_dropping_values() {

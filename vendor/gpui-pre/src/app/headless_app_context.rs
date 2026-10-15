@@ -1,3 +1,5 @@
+// Modified by Turntable: simulate platform quiescence for render tests; see ../../TURNTABLE.md.
+
 //! Cross-platform headless app context for tests that need real text shaping.
 //!
 //! This replaces the macOS-only `HeadlessMetalAppContext` with a platform-neutral
@@ -159,6 +161,19 @@ impl HeadlessAppContext {
     ) -> Result<R> {
         let mut app = self.app.borrow_mut();
         app.update_window(window, f)
+    }
+
+    /// Simulates the platform parking a window's frame source, without drawing.
+    pub fn simulate_window_frame_idle(&mut self, window: AnyWindowHandle) -> Result<()> {
+        let platform_window = self.update_window(window, |_, window, _| {
+            window
+                .platform_window
+                .as_test()
+                .expect("headless test window")
+                .clone()
+        })?;
+        platform_window.simulate_frame_idle();
+        Ok(())
     }
 
     /// Captures a screenshot from a window.

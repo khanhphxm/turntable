@@ -1,3 +1,5 @@
+// Modified by Turntable: release completed scene-building scratch at idle; see ../TURNTABLE.md.
+
 // todo("windows"): remove
 #![cfg_attr(windows, allow(dead_code))]
 
@@ -160,6 +162,11 @@ impl Scene {
         self.polychrome_sprites
             .sort_by_key(|sprite| (sprite.order, sprite.tile.tile_id));
         self.surfaces.sort_by_key(|surface| surface.order);
+    }
+
+    /// Keeps the completed scene and cached paint records, but not its build-only index.
+    pub(crate) fn release_build_memory(&mut self) {
+        self.primitive_bounds = BoundsTree::default();
     }
 
     #[cfg_attr(

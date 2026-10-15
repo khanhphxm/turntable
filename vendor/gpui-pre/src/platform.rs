@@ -1,3 +1,5 @@
+// Modified by Turntable: platform-neutral frame-idle notification; see ../TURNTABLE.md.
+
 mod app_menu;
 mod keyboard;
 mod keystroke;
@@ -1255,6 +1257,12 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         None
     }
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>);
+    /// Registers an optional notification when the platform parks this window's
+    /// frame source. Run outside any window update and without holding platform
+    /// locks: the callback may update the app, but must not request another frame.
+    /// Backends without a parked-frame transition need not report this event;
+    /// never add a timer or an extra frame solely to deliver it.
+    fn on_frame_idle(&self, _callback: Box<dyn FnMut()>) {}
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>);
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>);
     /// Registers the callback invoked when [`Self::visibility`] changes. Only

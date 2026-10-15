@@ -67,9 +67,10 @@ shared code: every platform's wheel events take the same path.
 The app's element and event arenas, and the fallback element arena, allocate 64 KiB chunks
 instead of eagerly reserving 1 MiB each. Empty arenas allocate no chunk. `src/arena.rs` gives
 an oversized or over-aligned value a suitably sized/aligned chunk, so compact defaults do not
-reduce the supported element or event size. Allocated chunks are reused across frames; this
-does not add allocation churn to cached draws, shrink text/layout caches, change rendering or
-schedule idle work. The mechanism is shared by every platform.
+reduce the supported element or event size. Allocated chunks are reused while the frame source
+is active; normal cached draws do not shrink text/layout caches, change rendering or schedule
+idle work. Quiescent reclamation below releases scratch after that source parks. The mechanism
+is shared by every platform.
 
 Regression tests cover lazy allocation, reuse, values larger than a normal chunk, alignment,
 destructor execution, stale references and nested clear deferral.
@@ -195,4 +196,65 @@ Preparing the previews off-thread removed the rejected synchronous variant's
 native-window footprint comparison was inconclusive after the desktop locked:
 Home's covers were not painted while occluded, even with the display awake.
 
+
+## Quiescent frame storage
+
+`PlatformWindow::on_frame_idle` reports an existing platform frame-source park, not
+another frame request. macOS emits it at the same three-unused-frame transition
+that retires Metal command storage, outside the native window lock. GPUI also
+reclaims scratch through the existing hidden/occluded visibility callback. No
+timer, new frame, animation-tail change or background purge thread is introduced.
+
+`src/window.rs` releases the already-cleared spare frame, empty layout-engine
+storage, completed scene-building bounds index, and empty, unscoped app/fallback
+arenas. The live rendered frame's paint records, element state, focus, hitboxes,
+input handlers and listeners remain intact, as do text, image and page caches.
+An active draw is rejected before borrowing App; live arena values/scopes and
+active layout nodes independently prevent their storage from being released.
+The next cached or full draw grows only the scratch it needs.
+
+Back-to-back signed native macOS release runs, 1920×950 at 1x, Home, 30 seconds
+idle, used the same isolated account/profile. "Before" includes the integrated
+GPU/image changes and preceding heap optimizations; only the last column adds
+quiescent heap reclamation. All values below are dirty bytes except total:
+
+| Category | Original 54bf15b | Before | Quiescent heap |
+| --- | ---: | ---: | ---: |
+| jemalloc / App-Specific Tag 15 | 11,337,728 | 8,749,056 | 6,963,200 |
+| Malloc Small | 13,615,104 | 13,418,496 | 13,647,872 |
+| IOSurface | 7,438,336 | 7,438,336 | 7,438,336 |
+| IOAccelerator graphics | 5,570,560 | 5,537,792 | 5,537,792 |
+| Owned unmapped graphics | 1,294,336 | 0 | 0 |
+| Stack | 819,200 | 786,432 | 819,200 |
+| Physical footprint | 49,300,440 | 45,106,136 | 43,615,192 |
+
+The incremental reduction is 1,785,856 bytes (1.70 MiB) in jemalloc and
+1,490,944 bytes (1.42 MiB) in total; system-malloc variation is not attributed to
+this CPU-only change. Idle CPU remained 0.0%. Native before/after screenshots
+were pixel-identical at the full 1920×950 resolution.
+
+The real-app offscreen Metal probe compared each pre-idle frame with the retained
+scene, first cached replay and first forced full relayout after the callback:
+all 36 comparisons were pixel-identical. It covered Home, Playlist, Liked Songs,
+Home after navigation, and immediate/settled Back from Settings at 1920×950 1x
+and 1280×800 2x (2560×1600 output). First cached draws took 0.366–0.727 ms;
+first full relayouts took 1.424–2.059 ms. Warm controls were 0.155–1.195 ms and
+1.133–7.063 ms respectively. No visible redraw delay was introduced; the largest
+observed added cached/full CPU time was 0.326/0.554 ms. The probe issued no
+playback command and left the real pointer and frontmost application unchanged.
+
+`crates/turntable/tests/gpui_idle.rs` exercises real GPUI window callbacks,
+retained paint/focus/keyboard input, cached replay, and full relayout after idle
+or hide/reveal. It runs in the normal workspace suite, avoiding unrelated missing
+upstream unit-test font fixtures: `cargo test -p turntable --test gpui_idle`.
+Arena/layout unit tests additionally cover live-value/scope/node safety,
+storage release/reuse and unchanged fractional layout rounding.
+
+The reclamation itself is shared code, including the hidden-window path.
+Visible-idle notification is implemented on macOS and the deterministic test
+platform. Windows' scheduler parks on a background condvar, not a corresponding
+UI-thread window transition; it needs a synchronized main-thread park event
+before it can call this hook. wgpu owns GPU submission, not the platform frame
+source: its Linux/platform scheduler would likewise need to emit this event.
+No speculative Windows/wgpu scheduling change is included.
 

@@ -1951,6 +1951,18 @@ impl Window {
                 }
             }
         }));
+        platform_window.on_frame_idle(Box::new({
+            let mut cx = cx.to_async();
+            move || {
+                // As with frame requests, do not even borrow App during a nested draw.
+                if draw_in_progress() {
+                    return;
+                }
+                handle
+                    .update(&mut cx, |_, window, cx| window.release_idle_memory(cx))
+                    .log_err();
+            }
+        }));
         invalidator.set_platform_waker(platform_window.frame_waker());
         platform_window.on_visual_viewport_changed(Box::new({
             let mut cx = cx.to_async();
@@ -2039,6 +2051,9 @@ impl Window {
                 handle
                     .update(&mut cx, |_, window, cx| {
                         window.refresh_visibility(cx);
+                        if !window.is_visible() {
+                            window.release_idle_memory(cx);
+                        }
                     })
                     .log_err();
             }
@@ -2294,6 +2309,28 @@ impl Window {
         if self.invalidator.is_dirty() || self.needs_present.get() {
             profiler::journal::record_frame_pending(self.handle.window_id(), Instant::now());
         }
+    }
+
+    fn release_idle_memory(&mut self, cx: &mut App) {
+        if draw_in_progress() || !self.invalidator.not_drawing() {
+            return;
+        }
+        if let Some(layout_engine) = self.layout_engine.as_mut() {
+            layout_engine.release_idle_memory();
+        }
+        // The spare frame was cleared after the last swap. The rendered frame's
+        // paint records, element state, focus, hitboxes and listeners stay live.
+        self.next_frame = Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone()));
+        self.rendered_frame.scene.release_build_memory();
+        if let Ok(mut arena) = cx.element_arena.try_borrow_mut() {
+            arena.release_idle_memory();
+        }
+        cx.event_arena.release_idle_memory();
+        ELEMENT_ARENA.with(|arena| {
+            if let Ok(mut arena) = arena.try_borrow_mut() {
+                arena.release_idle_memory();
+            }
+        });
     }
 
     /// Whether the platform is presenting this window's frames (see

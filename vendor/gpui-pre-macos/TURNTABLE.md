@@ -61,3 +61,14 @@ layer. The renderer recreates its queue on the next actual draw. See
 `../gpui-pre-apple/TURNTABLE.md` for resource ownership, measurements and the
 Metal-specific cross-platform boundary.
 
+## Quiescent GPUI heap notification
+
+`src/window.rs` now reports the same `WindowFrameSource::complete_frame` parked
+transition through GPUI's platform-neutral `on_frame_idle` callback, after Metal
+retirement and with the native window mutex released. It adds no timer, frame,
+idle-tail change or rendering-resolution change. GPUI releases only disposable
+frame-building storage; its existing visibility callback handles hidden windows.
+See `../gpui-pre/TURNTABLE.md` for ownership, regression coverage and native
+per-category measurements: the added heap trim saved 1.70 MiB of jemalloc dirty
+memory and 1.42 MiB of physical footprint, with unchanged pixels and 0.0% idle CPU.
+
