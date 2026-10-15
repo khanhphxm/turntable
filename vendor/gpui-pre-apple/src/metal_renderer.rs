@@ -1,4 +1,4 @@
-// Modified by Turntable from upstream GPUI/Zed; see ../TURNTABLE.md for changes.
+// Modified by Turntable: GPU resource lifetime and sampling tests; see ../TURNTABLE.md.
 // Idle Metal command storage and excess instance buffers retire with the drawable pool.
 
 use crate::metal_atlas::MetalAtlas;
@@ -2007,6 +2007,70 @@ mod tests {
             }
             renderer.sprite_atlas.remove(&key);
             assert!(renderer.sprite_atlas.metal_texture(tile.texture_id).is_none());
+        }
+    }
+
+    #[test]
+    fn upscaled_images_clamp_edges_without_rescaling_interiors() {
+        use gpui::{AtlasKey, PlatformAtlas as _, PolychromeSprite, RenderImageParams};
+        use std::borrow::Cow;
+
+        let mut renderer = MetalRenderer::new_headless(Arc::new(Mutex::new(Default::default())));
+        let key = |id| AtlasKey::Image(RenderImageParams {
+            image_id: gpui::ImageId(id),
+            frame_index: 0,
+        });
+        let guard_pixel = [255u8, 0, 0, 255];
+        let guard = renderer.sprite_atlas.get_or_insert_with(key(1), &mut || {
+            Ok(Some((size(DevicePixels(1), DevicePixels(1)), Cow::Borrowed(&guard_pixel))))
+        }).unwrap().unwrap();
+        let texture = renderer.sprite_atlas.metal_texture(guard.texture_id).unwrap();
+        let blue = guard_pixel.repeat((texture.width() * texture.height()) as usize);
+        texture.replace_region(
+            metal::MTLRegion::new_2d(0, 0, texture.width(), texture.height()),
+            0,
+            blue.as_ptr().cast(),
+            texture.width() * 4,
+        );
+
+        // BGRA: red/green on the first row, blue/white on the second.
+        let pixels = [0, 0, 255, 255, 0, 255, 0, 255, 255, 0, 0, 255, 255, 255, 255, 255];
+        let tile = renderer.sprite_atlas.get_or_insert_with(key(2), &mut || {
+            Ok(Some((size(DevicePixels(2), DevicePixels(2)), Cow::Borrowed(&pixels))))
+        }).unwrap().unwrap();
+        assert_eq!(tile.texture_id, guard.texture_id);
+        let bounds = Bounds::new(Point::default(), size(ScaledPixels(8.), ScaledPixels(8.)));
+        let mut scene = Scene::default();
+        scene.insert_primitive(PolychromeSprite {
+            order: 0,
+            pad: 0,
+            grayscale: false.into(),
+            opacity: 1.,
+            bounds,
+            content_mask: ContentMask { bounds },
+            corner_radii: Default::default(),
+            tile,
+        });
+        scene.finish();
+        let image = renderer.render_scene_to_image(
+            &scene, size(DevicePixels(8), DevicePixels(8)),
+        ).unwrap();
+        for y in 0u8..8 {
+            for x in 0u8..8 {
+                let tx = ((f32::from(x) + 0.5) * 0.25 - 0.5).clamp(0., 1.);
+                let ty = ((f32::from(y) + 0.5) * 0.25 - 0.5).clamp(0., 1.);
+                let expected = [
+                    255. * ((1. - tx) * (1. - ty) + tx * ty),
+                    255. * tx,
+                    255. * ty,
+                    255.,
+                ];
+                let actual = image.get_pixel(u32::from(x), u32::from(y)).0;
+                for (actual, expected) in actual.into_iter().zip(expected) {
+                    assert!((f32::from(actual) - expected).abs() <= 1.,
+                        "pixel ({x}, {y}): {actual} instead of {expected}");
+                }
+            }
         }
     }
 

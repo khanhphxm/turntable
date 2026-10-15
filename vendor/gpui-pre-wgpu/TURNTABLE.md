@@ -8,7 +8,7 @@ to this copy. Modified upstream files carry Turntable notices.
 ## Resource sizing and lifetime
 
 This follows the resource policy already used by Turntable's Metal renderer,
-without changing images, text sampling, shaders, antialiasing or cache ownership:
+without changing image/glyph resolution, text sampling, antialiasing or cache ownership:
 
 - Small glyphs and images share 512×512 atlas pages rather than 1024×1024 pages.
   Polychrome images larger than 256 pixels in either dimension get a tightly
@@ -29,6 +29,22 @@ native renderer; this extends the existing Metal policy rather than changing
 those backends. GPUI's explicit image ownership and Turntable's cover-cache
 budget still control atlas eviction; arbitrary per-frame eviction would break
 cached scenes.
+
+### Exact atlas rectangles
+
+Atlas pages use guillotiere 0.6.2 rather than bucketed shelves. This avoids
+height-quantization waste and reclaims individual rectangles while neighboring
+tiles remain alive. Live tiles never move, preserving cached-scene coordinates;
+the allocator's empty state replaces the redundant live-key counter. Upload
+swizzling, deferred uploads and texture-generation tracking are unchanged.
+
+Polychrome fragment samples are clamped to the tile's outer texel centers,
+preventing linear filtering from reading neighboring/uninitialized pixels when
+an image is upscaled. Vertex UVs and interior image mapping are unchanged.
+WGSL retains derivative sampling before its alpha-clip branch. The corresponding
+Metal Home comparison saved 1,343,488 charged graphics bytes; the clamp itself
+was byte-for-byte footprint neutral. See the [Apple byte inventory](../gpui-pre-apple/TURNTABLE.md#exact-atlas-packing-2026-10-15).
+These figures are macOS measurements, not Linux/Windows runtime results.
 
 Regression tests cover compact-page sharing/reuse, independent large-image
 release, lazy/reused/resized/released path targets, and instance growth with

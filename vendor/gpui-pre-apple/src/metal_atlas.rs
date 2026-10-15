@@ -1,12 +1,12 @@
-// Modified by Turntable from upstream GPUI/Zed; see ../TURNTABLE.md for changes.
+// Modified by Turntable: exact atlas packing and texture lifetime; see ../TURNTABLE.md.
 
 use anyhow::{Context as _, Result};
 use derive_more::{Deref, DerefMut};
-use etagere::BucketedAtlasAllocator;
 use gpui::{
     AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
     AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
 };
+use guillotiere::AtlasAllocator;
 use metal::Device;
 use parking_lot::Mutex;
 use std::borrow::Cow;
@@ -86,9 +86,8 @@ impl AtlasBackend for MetalAtlasTextures {
         };
 
         if let Some(mut texture) = texture_slot.take() {
-            texture.allocator.deallocate(tile.tile_id.into());
-            texture.decrement_ref_count();
-            if texture.is_unreferenced() {
+            texture.allocator.deallocate(guillotiere::AllocId::deserialize(tile.tile_id.0));
+            if texture.allocator.is_empty() {
                 textures.free_list.push(id.index as usize);
             } else {
                 *texture_slot = Some(texture);
@@ -188,9 +187,8 @@ impl MetalAtlasTextures {
                 index: index.unwrap_or(texture_list.textures.len()) as u32,
                 kind,
             },
-            allocator: etagere::BucketedAtlasAllocator::new(size_to_etagere(size)),
+            allocator: AtlasAllocator::new(size_to_guillotiere(size)),
             metal_texture: AssertSend(metal_texture),
-            live_atlas_keys: 0,
         };
 
         if let Some(ix) = index {
@@ -217,24 +215,22 @@ impl MetalAtlasTextures {
 
 struct MetalAtlasTexture {
     id: AtlasTextureId,
-    allocator: BucketedAtlasAllocator,
+    allocator: AtlasAllocator,
     metal_texture: AssertSend<metal::Texture>,
-    live_atlas_keys: u32,
 }
 
 impl MetalAtlasTexture {
     fn allocate(&mut self, size: Size<DevicePixels>) -> Option<AtlasTile> {
-        let allocation = self.allocator.allocate(size_to_etagere(size))?;
+        let allocation = self.allocator.allocate(size_to_guillotiere(size))?;
         let tile = AtlasTile {
             texture_id: self.id,
-            tile_id: allocation.id.into(),
+            tile_id: gpui::TileId(allocation.id.serialize()),
             bounds: Bounds {
-                origin: point_from_etagere(allocation.rectangle.min),
+                origin: point_from_guillotiere(allocation.rectangle.min),
                 size,
             },
             padding: 0,
         };
-        self.live_atlas_keys += 1;
         Some(tile)
     }
 
@@ -261,21 +257,13 @@ impl MetalAtlasTexture {
             _ => unimplemented!(),
         }
     }
-
-    fn decrement_ref_count(&mut self) {
-        self.live_atlas_keys -= 1;
-    }
-
-    fn is_unreferenced(&mut self) -> bool {
-        self.live_atlas_keys == 0
-    }
 }
 
-fn size_to_etagere(size: Size<DevicePixels>) -> etagere::Size {
-    etagere::Size::new(size.width.into(), size.height.into())
+fn size_to_guillotiere(size: Size<DevicePixels>) -> guillotiere::Size {
+    guillotiere::Size::new(size.width.into(), size.height.into())
 }
 
-fn point_from_etagere(value: etagere::Point) -> Point<DevicePixels> {
+fn point_from_guillotiere(value: guillotiere::Point) -> Point<DevicePixels> {
     Point {
         x: DevicePixels::from(value.x),
         y: DevicePixels::from(value.y),
@@ -451,6 +439,23 @@ mod tests {
         atlas.remove(&large_key);
         assert!(atlas.metal_texture(large.texture_id).is_none());
         assert!(atlas.metal_texture(small.texture_id).is_some());
+    }
+
+    #[test]
+    fn test_image_tiles_pack_without_shelf_padding() {
+        let atlas = create_atlas().expect("Metal device");
+        let size = Size { width: DevicePixels(164), height: DevicePixels(164) };
+        let tiles: Vec<_> = (0..9)
+            .map(|id| insert_tile(&atlas, make_image_key(id, 0), size))
+            .collect();
+        assert!(tiles.iter().all(|tile| tile.texture_id == tiles[0].texture_id));
+
+        // Reclaim one rectangle even while its neighbors keep their page alive.
+        atlas.remove(&make_image_key(1, 0));
+        let replacement = insert_tile(&atlas, make_image_key(9, 0), size);
+        assert_eq!(replacement.texture_id, tiles[0].texture_id);
+        assert_eq!(replacement.bounds, tiles[1].bounds);
+        assert!(atlas.metal_texture(tiles[0].texture_id).is_some());
     }
 
     #[test]

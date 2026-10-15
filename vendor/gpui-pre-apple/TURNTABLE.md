@@ -4,11 +4,113 @@ Based on gpui-pre-apple 0.3.9 (Apache-2.0), the Apple Metal renderer used by gpu
 
 ## Resource sizing and lifetime
 
-- Small glyphs and images share 512×512 atlas pages instead of 1024×1024 pages. Polychrome tiles larger than 256 pixels in either dimension receive a tightly sized page rather than a minimum 1024-pixel page. A 640×640 BGRA cover therefore reserves 1.56 MiB instead of 4 MiB. Small images cannot pin an otherwise-unused large cover page. Image pixels, sampling, glyph resolution and rendering shaders are unchanged.
+- Glyphs and images share 512×512 atlas pages instead of 1024×1024 pages. Polychrome tiles larger than 256 pixels in either dimension receive a tightly sized page rather than a minimum 1024-pixel page. A 640×640 BGRA cover therefore reserves 1.56 MiB instead of 4 MiB. Small images cannot pin an otherwise-unused large cover page. Image pixels, glyph rasterization and rendering resolution are unchanged.
 - Instance buffers start at 128 KiB instead of 2 MiB per in-flight frame. The existing geometric growth, 256-byte binding alignment, 256 MiB maximum, Metal command-buffer resource retention, and completion-handler recycling remain unchanged. Complex scenes still grow normally; reducing the initial reservation is not a primitive-count limit.
 - Full-viewport path resolve/MSAA textures are allocated only for scenes containing paths, reused while their size matches, and released when a scene no longer needs them. Metal retains resources used by older in-flight command buffers. Four-sample antialiasing and Apple GPU memoryless MSAA are unchanged.
 
 Atlas removal still follows GPUI's explicit `drop_image` ownership API. Removing the last tile releases its texture; cached scenes can replay old sprite bindings, so arbitrary per-frame atlas eviction would be incorrect. Turntable's cover cache owns unused-image eviction. This patch does not add a polling timer or disable cached painting.
+
+## Exact atlas packing (2026-10-15)
+
+Atlas pages use [guillotiere's dynamic rectangle allocator](https://docs.rs/guillotiere/0.6.2/guillotiere/struct.AtlasAllocator.html)
+instead of bucketed shelves. Individual rectangles are reclaimed immediately;
+live tiles never move, so cached scene coordinates remain valid. Empty pages
+still follow explicit image ownership and are released normally. The allocator's
+empty state replaces the redundant per-page key counter. This is also applied
+to the wgpu and DirectX backends, without changing their upload, generation,
+device-loss or cached-scene rules.
+
+The old allocator rounded 164-pixel artwork into 192-pixel-high shelves. It also
+placed late 12–15-pixel glyphs in an existing 160-pixel SVG shelf after running
+out of fresh rows. Nine 164×164 tiles now fit one 512×512 page instead of spilling
+after six. A regression also removes/reuses a single tile while its neighbors
+keep their page alive. Glyph sizes already shared pages; there was not a separate
+monochrome texture for every font size.
+
+### Idle Home byte inventory
+
+At 1920×950 and 1×, the original baseline's 5,570,560 charged IOAccelerator
+graphics bytes break down exactly as follows. Matching native allocation stacks,
+Metal resource sizes and buffer CPU addresses distinguish driver heaps from
+application buffers; four 128-KiB mappings are not four instance buffers.
+
+| Resource | Charged bytes |
+| --- | ---: |
+| Four BGRA8 512×512 atlas pages, 1,064,960 each | 4,259,840 |
+| Two A8 512×512 atlas pages, 278,528 each | 557,056 |
+| One reusable scene instance buffer | 131,072 |
+| Suballocator page containing the 48-byte unit vertex buffer | 131,072 |
+| AGX bindless constant-sampler suballocator | 131,072 |
+| AGX vertex-program heap | 65,536 |
+| AGX fragment-program/ESL-state heap | 65,536 |
+| AGX device-initialization heap | 65,536 |
+| Device `setupDeferred` internal-buffer suballocator | 131,072 |
+| Two command-storage shared-memory tables, 16,384 each | 32,768 |
+| **Total** | **5,570,560** |
+
+The integrated idle queue policy releases the last two tables, leaving
+5,537,792 bytes. An additional 16-KiB device mapping has zero charge. The first
+pipeline creation allocates the shared shader/sampler heaps; the next seven do
+not increase `MTLDevice.currentAllocatedSize`. Path, MSAA and video-surface
+textures were absent. The final observed frame used 86,784 of its 131,072 scene
+bytes, so a 64-KiB initial buffer would immediately regrow.
+
+Live occupancy from the instrumented pre-packing integrated Home, after image-cache releases:
+
+| Page | Live tiles | Actual tile pixels | Pixel-area occupancy | Charged bytes |
+| --- | ---: | ---: | ---: | ---: |
+| A8 0 | 374 (349 glyphs, 25 SVGs) | 105,587 | 40.3% | 278,528 |
+| A8 1 | 56 glyphs | 6,879 | 2.6% | 278,528 |
+| BGRA 0 | 14 images | 117,936 | 45.0% | 1,064,960 |
+| BGRA 1 | 6 images | 156,948 | 59.9% | 1,064,960 |
+| BGRA 2 | 6 images | 136,784 | 52.2% | 1,064,960 |
+| BGRA 3 | 3 images | 90,928 | 34.7% | 1,064,960 |
+
+Those pages hold 2,010,384 image bytes and 112,466 monochrome bytes, versus
+4,816,896 charged atlas bytes. The 25 SVGs include a 138×138 heart; 12, 14, 16,
+24 and 32-pixel glyphs share the first page. Tile pixels exclude unused shelf
+space and the driver's per-texture overhead, not antialiased or transparent
+pixels within an image.
+
+`vmmap` identifies exactly one charged, full-size `CAMetalLayer Display Drawable`
+IOSurface at 7,438,336 bytes. Other tiny IOSurface mappings have zero charge;
+their region count is not an extra drawable pool. The displayed surface remains
+full resolution and is not removed by atlas packing.
+
+### Native packing comparison
+
+Signed release, private profile, idle full Home, 30-second settle, serialized
+back-to-back `/tmp/ttm.sh` runs. The original baseline was also run immediately
+before the two integrated variants; its IOAccelerator charge was 5,570,560 and
+IOSurface charge 7,438,336 bytes.
+
+| Category | Integrated bucketed shelves | Exact rectangles |
+| --- | ---: | ---: |
+| Physical footprint | 45,646,808 | 44,352,472 |
+| IOAccelerator graphics | 5,537,792 | 4,194,304 |
+| IOSurface | 7,438,336 | 7,438,336 |
+| Owned-unmapped graphics | 0 | 0 |
+| Malloc Small | 13,778,944 | 13,746,176 |
+| App-Specific Tag 15 | 8,912,896 | 8,994,816 |
+
+One monochrome and three color pages replace two and four respectively:
+**1,343,488 bytes (1.281 MiB) less charged graphics**, with a 1,294,336-byte
+total reduction in this pair. Both processes sampled 0.0% idle CPU. Heap
+residency varies independently; the graphics reduction matches the removed
+page sizes rather than relying on the total alone.
+
+Linear image filtering is clamped in the fragment shader to each tile's outer
+texel centers. This prevents adjacent/uninitialized texels contaminating an
+upscaled image when packing puts tiles next to each other. Vertex UVs are not
+inset and interior image mapping is not rescaled. The GPU pixel regression uses
+a two-by-two gradient surrounded by unrelated blue pixels and checks both edges
+and bilinear interiors. Metal, WGSL and HLSL apply the same rule.
+
+The separate clamp A/B was allocation-free: both variants reported 44,368,856
+total, 4,194,304 IOAccelerator, 7,438,336 IOSurface, zero owned-unmapped graphics,
+13,811,712 Malloc Small and 8,945,664 App-Specific Tag 15 bytes; idle CPU was 0.0%.
+The fix intentionally corrects image-edge pixels rather than claiming the
+previous unclamped output was a valid visual reference at those boundaries.
 
 ## Idle drawable pools
 
@@ -114,8 +216,8 @@ A separate smaller-atlas experiment was rejected: reducing minimum pages from
 512×512 to 256×256 changed IOAccelerator dirty bytes from 5,570,560 to 5,816,320
 (+240 KiB), not a saving. Four 1040-KiB color pages became seventeen 272-KiB
 pages; smaller glyph pages did not offset the extra color-page fragmentation.
-The original 512-pixel page policy is retained. No texture resolution, pixel
-format, sampling or atlas ownership changed in either delivered optimization.
+At that stage the original 512-pixel page policy was retained. No texture
+resolution, pixel format, sampling or atlas ownership changed in those two optimizations.
 
 The full-Home baseline and compact-idle-policy window captures were pixel-identical:
 zero changed pixels out of 1,824,000 at the unchanged 1920×950 resolution. Later

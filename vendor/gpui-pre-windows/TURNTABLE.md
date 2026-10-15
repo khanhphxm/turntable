@@ -58,6 +58,21 @@ The atlas tests use the WARP device to verify page size, reuse and independent
 release. DirectWrite continues to use its shared system factory and collection;
 font fallback and font-identity caching are intentionally unchanged.
 
+### Exact atlas rectangles
+
+Atlas pages use guillotiere 0.6.2 instead of bucketed shelves. Exact rectangles
+avoid shelf-height padding and can be reclaimed individually while neighboring
+tiles remain live. Allocations never move, so cached scene coordinates remain
+valid. The allocator's empty state replaces the redundant live-key counter;
+device-loss reset, upload bounds checks and explicit image ownership are unchanged.
+
+Polychrome fragment samples clamp to the tile's outer texel centers rather than
+reading adjacent/uninitialized pixels when an image is upscaled. Vertex UVs are
+not inset and interior image mapping is unchanged. The corresponding Metal Home
+comparison saved 1,343,488 charged graphics bytes, with no footprint cost for
+the sampling correction; see the [Apple inventory](../gpui-pre-apple/TURNTABLE.md#exact-atlas-packing-2026-10-15).
+Those numbers are not Windows runtime measurements.
+
 ## Windows measurement (2026-10-14)
 
 Windows 11 build 26200.9711, MSVC release, RTX 4070, 24 logical CPUs,

@@ -1,5 +1,5 @@
-// Turntable modification: compact glyph pages and dedicated large artwork; see ../TURNTABLE.md.
-use etagere::BucketedAtlasAllocator;
+// Modified by Turntable: exact atlas packing and isolated large covers; see ../TURNTABLE.md.
+use guillotiere::AtlasAllocator;
 use parking_lot::Mutex;
 use windows::Win32::Graphics::{
     Direct3D11::{
@@ -27,10 +27,9 @@ struct DirectXAtlasTextures {
 struct DirectXAtlasTexture {
     id: AtlasTextureId,
     bytes_per_pixel: u32,
-    allocator: BucketedAtlasAllocator,
+    allocator: AtlasAllocator,
     texture: ID3D11Texture2D,
     view: [Option<ID3D11ShaderResourceView>; 1],
-    live_atlas_keys: u32,
 }
 
 impl DirectXAtlas {
@@ -120,9 +119,8 @@ impl AtlasBackend for DirectXAtlasTextures {
         };
 
         if let Some(mut texture) = texture_slot.take() {
-            texture.allocator.deallocate(tile.tile_id.into());
-            texture.decrement_ref_count();
-            if texture.is_unreferenced() {
+            texture.allocator.deallocate(guillotiere::AllocId::deserialize(tile.tile_id.0));
+            if texture.allocator.is_empty() {
                 textures.free_list.push(texture.id.index as usize);
             } else {
                 *texture_slot = Some(texture);
@@ -244,10 +242,9 @@ impl DirectXAtlasTextures {
                 kind,
             },
             bytes_per_pixel,
-            allocator: etagere::BucketedAtlasAllocator::new(device_size_to_etagere(size)),
+            allocator: AtlasAllocator::new(device_size_to_guillotiere(size)),
             texture,
             view,
-            live_atlas_keys: 0,
         };
         if let Some(ix) = index {
             texture_list.textures[ix] = Some(atlas_texture);
@@ -270,17 +267,16 @@ impl DirectXAtlasTextures {
 
 impl DirectXAtlasTexture {
     fn allocate(&mut self, size: Size<DevicePixels>) -> Option<AtlasTile> {
-        let allocation = self.allocator.allocate(device_size_to_etagere(size))?;
+        let allocation = self.allocator.allocate(device_size_to_guillotiere(size))?;
         let tile = AtlasTile {
             texture_id: self.id,
-            tile_id: allocation.id.into(),
+            tile_id: gpui::TileId(allocation.id.serialize()),
             bounds: Bounds {
-                origin: etagere_point_to_device(allocation.rectangle.min),
+                origin: guillotiere_point_to_device(allocation.rectangle.min),
                 size,
             },
             padding: 0,
         };
-        self.live_atlas_keys += 1;
         Some(tile)
     }
 
@@ -326,21 +322,13 @@ impl DirectXAtlasTexture {
             );
         }
     }
-
-    fn decrement_ref_count(&mut self) {
-        self.live_atlas_keys -= 1;
-    }
-
-    fn is_unreferenced(&mut self) -> bool {
-        self.live_atlas_keys == 0
-    }
 }
 
-fn device_size_to_etagere(size: Size<DevicePixels>) -> etagere::Size {
-    etagere::Size::new(size.width.into(), size.height.into())
+fn device_size_to_guillotiere(size: Size<DevicePixels>) -> guillotiere::Size {
+    guillotiere::Size::new(size.width.into(), size.height.into())
 }
 
-fn etagere_point_to_device(value: etagere::Point) -> Point<DevicePixels> {
+fn guillotiere_point_to_device(value: guillotiere::Point) -> Point<DevicePixels> {
     Point {
         x: DevicePixels::from(value.x),
         y: DevicePixels::from(value.y),
@@ -424,6 +412,23 @@ mod tests {
 
         let tile_b = insert_tile(&atlas, big_key_b, big);
         assert_eq!(tile_b.texture_id, keeper_tile.texture_id);
+    }
+
+    #[test]
+    fn test_image_tiles_pack_without_shelf_padding() {
+        let atlas = create_atlas().expect("WARP device");
+        let size = Size { width: DevicePixels(164), height: DevicePixels(164) };
+        let tiles: Vec<_> = (0..9)
+            .map(|id| insert_tile(&atlas, make_image_key(id), size))
+            .collect();
+        assert!(tiles.iter().all(|tile| tile.texture_id == tiles[0].texture_id));
+
+        // Reclaim one rectangle even while its neighbors keep their page alive.
+        atlas.remove(&make_image_key(1));
+        let replacement = insert_tile(&atlas, make_image_key(9), size);
+        assert_eq!(replacement.texture_id, tiles[0].texture_id);
+        assert_eq!(replacement.bounds, tiles[1].bounds);
+        assert!(atlas.get_texture_view(tiles[0].texture_id).is_some());
     }
 
     #[test]
