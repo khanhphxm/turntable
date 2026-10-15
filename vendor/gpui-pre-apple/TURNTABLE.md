@@ -219,6 +219,51 @@ resolution. Instrumentation showed that the seven pipeline creations after the
 first did not increase `MTLDevice.currentAllocatedSize`; lazy creation has not
 established an additional footprint reduction.
 
+### Round-2 verification (2026-10-15)
+
+Final production sources passed workspace `cargo +nightly fmt --all -- --check`,
+22 signed Apple backend tests and 12 signed macOS platform tests, serialized at
+one test thread. The native pixel suite includes compact/large images, the
+gradient sampling regression, buffer growth, path rendering and CoreVideo
+surfaces. Apple/macOS and standalone wgpu all-targets Clippy passed with
+`-D warnings`. The wgpu suite passed all 44 tests on macOS, including real Metal
+atlas allocations and Naga validation of storage, WebGL and subpixel shaders.
+`cargo xwin check --tests` passed for the Windows backend and its WARP test code
+at `x86_64-pc-windows-msvc`. Windows runtime/FXC and Linux runtime were not
+available; their native behavior is not claimed from host-side checks.
+
+A disposable real-UI harness used the native Metal renderer and text system,
+not a mock scene or image resize. A provided integrated reference binary and
+the final build each rendered Home, the cached playlist, Liked, Home after
+navigation, and immediate/settled Home after Settings. Each comparison ran at
+1920×950 (1×) and 3840×1900 (2×), using the same private profile. All captures
+reported paused playback; foreground application and mouse position stayed
+unchanged. These headless captures are visual evidence, not native footprint
+measurements.
+
+| Scene | Changed pixels at 1× / 1,824,000 | Changed pixels at 2× / 7,296,000 |
+| --- | ---: | ---: |
+| Home | 970 | 1,191 |
+| Playlist | 818 | 2,411 |
+| Liked | 819 | 2,737 |
+| Home after navigation | 992 | 1,212 |
+| Immediate Home after Settings | 1,001 | 1,563 |
+| Settled Home after Settings | 1,001 | 1,563 |
+
+Maximum channel differences were 72 at 1× and 91 at 2×; diagnostic overlays
+locate the larger changes at image perimeters, where fragment-local clamping
+corrects neighboring/uninitialized texel bleed. They are not claimed as
+pixel-identical to the previous erroneous sampling. The gradient test verifies
+bilinear interiors without a vertex-UV inset or rescaling. Immediate and settled
+Home captures were pixel-identical within each build at both scales, exercising
+cached-scene replay without a delayed image redraw. Native procedural-vertex
+A/B screenshots were also pixel-identical.
+
+Standalone backend lockfiles now name guillotiere consistently with their
+manifests while retaining registry GPUI/taffy provenance; temporary host-check
+patch overrides are not shipped in those lockfiles. Production tracing and
+disposable capture/check harnesses are not part of the patch.
+
 ## Idle drawable pools
 
 On macOS, the display-link source clears the backing `CAMetalLayer`'s [nullable `device`](https://developer.apple.com/documentation/quartzcore/cametallayer/device) when its existing idle-frame tail parks. Core Animation retains the last presented image, while the layer releases the pool's other IOSurfaces. No image readback, copy, replacement layer, additional surface, polling timer, or change to the three-drawable limit is required. The renderer restores its original device immediately before the next `nextDrawable`. The backing layer and its application-owned animation sublayers keep their identity.

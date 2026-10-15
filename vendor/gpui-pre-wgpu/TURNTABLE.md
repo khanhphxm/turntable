@@ -77,6 +77,17 @@ excluded from workspace membership so their tests can also run explicitly:
 cargo test --manifest-path vendor/gpui-pre-wgpu/Cargo.toml --features test-support
 ```
 
+### Round-2 host verification (2026-10-15)
+
+All 44 standalone tests passed on macOS, including real Metal atlas allocations,
+individual rectangle reuse, exact-size color pages, oversized monochrome masks,
+texture generations, removed pending uploads, and Naga storage/WebGL/subpixel
+shader validation. All-targets Clippy passed with `-D warnings`. This is not a
+Linux or WebGL runtime test. The standalone lockfile uses guillotiere and keeps
+registry GPUI/taffy provenance rather than the temporary host-check overrides.
+Native macOS 1×/2× real-scene comparisons and per-category footprint results are
+recorded in the [Apple verification](../gpui-pre-apple/TURNTABLE.md#round-2-verification-2026-10-15).
+
 ## Deferred OpenGL initialization
 
 Native window startup first probes hardware Vulkan alone. If it succeeds,

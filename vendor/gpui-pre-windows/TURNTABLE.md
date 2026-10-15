@@ -87,6 +87,15 @@ glyphs/SVGs; subpixel-color pages are unchanged. Native Metal Home saved another
 WARP regressions cover small/oversized masks and last-tile release;
 see the [native comparison](../gpui-pre-apple/TURNTABLE.md#compact-monochrome-pages).
 
+### Round-2 cross-check (2026-10-15)
+
+`cargo xwin check --tests` passed on the macOS host for
+`x86_64-pc-windows-msvc`, including the backend and WARP regression code.
+Windows runtime and FXC shader execution were unavailable, so this is not a
+native WARP or rendering result. The standalone lockfile follows the allocator
+manifest cutover to guillotiere. The direct Metal analogue passed native 1×/2×
+real-scene comparisons; see the [Apple verification](../gpui-pre-apple/TURNTABLE.md#round-2-verification-2026-10-15).
+
 ## Windows measurement (2026-10-14)
 
 Windows 11 build 26200.9711, MSVC release, RTX 4070, 24 logical CPUs,
