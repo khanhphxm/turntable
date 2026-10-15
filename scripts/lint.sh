@@ -17,13 +17,14 @@
 #   deps    cargo machete: dependencies no source uses (`cargo install cargo-machete`)
 #   ban     no #[allow(..)] (use #[expect(lint, reason = "...")]), no lint set to "allow" in a manifest
 #
-# CARGO_TARGET_DIR is honoured. RUSTFMT_TOOLCHAIN (default nightly) picks the rustfmt.
+# CARGO_TARGET_DIR is honoured. LINT_PROFILE picks the cargo profile for clippy and docs (CI: ci). RUSTFMT_TOOLCHAIN (default nightly) picks the rustfmt.
 set -u
 
 cd "$(dirname "$0")/.." || exit 2
 
 ALL="fmt clippy docs deps ban"
 RUSTFMT_TOOLCHAIN=${RUSTFMT_TOOLCHAIN:-nightly}
+PROFILE_ARGS=${LINT_PROFILE:+--profile $LINT_PROFILE}
 
 case ${1:-} in
 	-h|--help) sed -n '2,24p' "$0"; exit 0 ;;
@@ -71,13 +72,13 @@ run_fmt() {
 }
 
 run_clippy() {
-	step clippy cargo clippy --locked --workspace --all-targets --keep-going -- -D warnings
+	step clippy cargo clippy --locked --workspace --all-targets --keep-going $PROFILE_ARGS -- -D warnings
 }
 
 run_docs() {
 	RUSTDOCFLAGS="-D warnings"
 	export RUSTDOCFLAGS
-	step docs cargo doc --locked --workspace --no-deps --document-private-items
+	step docs cargo doc --locked --workspace --no-deps --document-private-items $PROFILE_ARGS
 }
 
 run_deps() {

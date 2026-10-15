@@ -1,0 +1,45 @@
+name: Rust cache
+description: >
+  Restores the Cargo registry and the whole target/ directory, vendored path crates included,
+  then dates source files so Cargo rebuilds only what changed since the cache was built
+  (scripts/ci-mtime.sh). Only main saves, once per dependency set, from a clean build, so the
+  cache never accumulates stale artifacts; everything else restores the newest match.
+inputs:
+  key:
+    description: Cache name; one per job and OS.
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: key
+      shell: bash
+      env:
+        NAME: ${{ inputs.key }}
+        DEPS: ${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'vendor/**', 'rust-toolchain.toml', '.cargo/config.toml') }}
+      run: |
+        rustc=$(rustc -V | cut -d' ' -f2)
+        echo "prefix=rust-$NAME-$rustc-" >> "$GITHUB_OUTPUT"
+        echo "key=rust-$NAME-$rustc-$DEPS" >> "$GITHUB_OUTPUT"
+    - if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: actions/cache@v6
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+          target
+        key: ${{ steps.key.outputs.key }}
+    - if: github.event_name != 'push' || github.ref != 'refs/heads/main'
+      uses: actions/cache/restore@v6
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+          target
+        key: ${{ steps.key.outputs.key }}
+        restore-keys: ${{ steps.key.outputs.prefix }}
+    - shell: bash
+      run: |
+        echo CARGO_INCREMENTAL=0 >> "$GITHUB_ENV"
+        scripts/ci-mtime.sh
