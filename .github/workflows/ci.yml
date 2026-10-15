@@ -19,6 +19,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   MACOSX_DEPLOYMENT_TARGET: '12.0'
+  # Line tables keep test backtraces readable; full debug info only made the caches and links bigger.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 defaults:
   run:
@@ -101,7 +103,7 @@ jobs:
         run: scripts/install-linux-deps.sh
       - uses: ./.github/actions/rust-cache
         with:
-          key: ci-${{ matrix.os }}
+          key: ci-lint-${{ matrix.os }}
       - name: Install dependency auditor
         if: runner.os == 'Linux'
         run: cargo install cargo-machete --version 0.9.1 --locked
@@ -137,7 +139,7 @@ jobs:
         run: scripts/install-linux-deps.sh
       - uses: ./.github/actions/rust-cache
         with:
-          key: ci-${{ matrix.os }}
+          key: ci-test-${{ matrix.os }}
       # Cargo runs workspace tests, not dependency/backend tests needing a native desktop.
       # Keep the default ignored-test behavior for manual benchmarks and the native tray test.
       - run: cargo test --locked --workspace --all-targets
@@ -173,7 +175,7 @@ jobs:
         run: scripts/install-linux-deps.sh
       - uses: ./.github/actions/rust-cache
         with:
-          key: ci-${{ matrix.os }}
+          key: ci-build-${{ matrix.os }}
       - name: Release build including vendored path patches
         env:
           RUST_TARGET: ${{ matrix.target }}
