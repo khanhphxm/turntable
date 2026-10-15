@@ -1,4 +1,4 @@
-// Modified by Turntable: exact atlas packing and isolated large covers; see ../TURNTABLE.md.
+// Modified by Turntable: adaptive atlas sizing and exact packing; see ../TURNTABLE.md.
 use anyhow::{Context as _, Result};
 use gpui::{
     AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
@@ -189,6 +189,12 @@ impl WgpuAtlasTextures {
             width: DevicePixels(512),
             height: DevicePixels(512),
         };
+        // Small color tiles use half-size pages; medium tiles can fit three
+        // across a shared page, while larger tiles receive exact backing.
+        const SMALL_ATLAS_SIZE: Size<DevicePixels> = Size {
+            width: DevicePixels(256),
+            height: DevicePixels(256),
+        };
         let max_texture_size = self.max_texture_size as i32;
         let max_atlas_size = Size {
             width: DevicePixels(max_texture_size),
@@ -196,10 +202,15 @@ impl WgpuAtlasTextures {
         };
 
         let min_size = min_size.min(&max_atlas_size);
-        let size = if kind == AtlasTextureKind::Polychrome
-            && (min_size.width.0 > 256 || min_size.height.0 > 256)
-        {
-            min_size
+        let size = if kind == AtlasTextureKind::Polychrome {
+            let edge = min_size.width.0.max(min_size.height.0);
+            if edge > DEFAULT_ATLAS_SIZE.width.0 / 3 {
+                min_size
+            } else if edge <= SMALL_ATLAS_SIZE.width.0 / 2 {
+                min_size.max(&SMALL_ATLAS_SIZE).min(&max_atlas_size)
+            } else {
+                min_size.max(&DEFAULT_ATLAS_SIZE).min(&max_atlas_size)
+            }
         } else {
             min_size.max(&DEFAULT_ATLAS_SIZE).min(&max_atlas_size)
         };
@@ -518,13 +529,34 @@ mod tests {
         {
             let state = atlas.0.lock();
             let small_texture = state.backend.storage.get(small.texture_id).context("small texture")?;
-            assert_eq!((small_texture.texture.width(), small_texture.texture.height()), (512, 512));
+            assert_eq!((small_texture.texture.width(), small_texture.texture.height()), (256, 256));
             let large_texture = state.backend.storage.get(large.texture_id).context("large texture")?;
             assert_eq!((large_texture.texture.width(), large_texture.texture.height()), (640, 640));
         }
         atlas.remove(&large_key);
         assert!(atlas.get_texture_info(large.texture_id).is_none());
         assert!(atlas.get_texture_info(small.texture_id).is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn covers_that_cannot_fit_three_across_use_exact_pages() -> anyhow::Result<()> {
+        let (device, queue) = test_device_and_queue()?;
+        let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
+        for (width, height) in [(248, 248), (248, 106)] {
+            let key = AtlasKey::Image(RenderImageParams { image_id: ImageId(1), frame_index: 0 });
+            let size = Size { width: DevicePixels(width), height: DevicePixels(height) };
+            let tile = atlas.get_or_insert_with(key.clone(), &mut || {
+                Ok(Some((size, Cow::Owned(vec![0; width as usize * height as usize * 4]))))
+            })?.context("image tile should exist")?;
+            {
+                let state = atlas.0.lock();
+                let texture = state.backend.storage.get(tile.texture_id).context("image texture")?;
+                assert_eq!((texture.texture.width(), texture.texture.height()), (width as u32, height as u32));
+            }
+            atlas.remove(&key);
+            assert!(atlas.get_texture_info(tile.texture_id).is_none());
+        }
         Ok(())
     }
 

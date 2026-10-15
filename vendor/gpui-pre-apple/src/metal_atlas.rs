@@ -1,4 +1,4 @@
-// Modified by Turntable: exact atlas packing and texture lifetime; see ../TURNTABLE.md.
+// Modified by Turntable: adaptive atlas sizing, exact packing and texture lifetime; see ../TURNTABLE.md.
 
 use anyhow::{Context as _, Result};
 use derive_more::{Deref, DerefMut};
@@ -127,12 +127,16 @@ impl MetalAtlasTextures {
         min_size: Size<DevicePixels>,
         kind: AtlasTextureKind,
     ) -> &mut MetalAtlasTexture {
-        // Small glyphs and row images share compact pages. Large artwork gets a
-        // tightly sized page: a 640px cover otherwise pins a mostly empty 4MiB
-        // 1024px page until the last unrelated small tile is released.
+        // Small color tiles should not reserve a 1MiB page. Medium tiles share
+        // pages when at least three fit across; larger tiles get exact backing
+        // rather than pinning a mostly empty shared page.
         const DEFAULT_ATLAS_SIZE: Size<DevicePixels> = Size {
             width: DevicePixels(512),
             height: DevicePixels(512),
+        };
+        const SMALL_ATLAS_SIZE: Size<DevicePixels> = Size {
+            width: DevicePixels(256),
+            height: DevicePixels(256),
         };
         // Max texture size on all modern Apple GPUs. Anything bigger than that crashes in validateWithDevice.
         const MAX_ATLAS_SIZE: Size<DevicePixels> = Size {
@@ -140,10 +144,15 @@ impl MetalAtlasTextures {
             height: DevicePixels(16384),
         };
         let min_size = min_size.min(&MAX_ATLAS_SIZE);
-        let size = if kind == AtlasTextureKind::Polychrome
-            && (min_size.width.0 > 256 || min_size.height.0 > 256)
-        {
-            min_size
+        let size = if kind == AtlasTextureKind::Polychrome {
+            let edge = min_size.width.0.max(min_size.height.0);
+            if edge > DEFAULT_ATLAS_SIZE.width.0 / 3 {
+                min_size
+            } else if edge <= SMALL_ATLAS_SIZE.width.0 / 2 {
+                min_size.max(&SMALL_ATLAS_SIZE)
+            } else {
+                min_size.max(&DEFAULT_ATLAS_SIZE)
+            }
         } else {
             min_size.max(&DEFAULT_ATLAS_SIZE)
         };
@@ -373,8 +382,8 @@ mod tests {
         };
 
         let small = Size {
-            width: DevicePixels(64),
-            height: DevicePixels(64),
+            width: DevicePixels(164),
+            height: DevicePixels(164),
         };
         let big = Size {
             width: DevicePixels(256),
@@ -407,7 +416,7 @@ mod tests {
         let second = insert_tile(&atlas, make_image_key(2, 0), size);
         assert_eq!(first.texture_id, second.texture_id);
         let texture = atlas.metal_texture(first.texture_id).unwrap();
-        assert_eq!((texture.width(), texture.height()), (512, 512));
+        assert_eq!((texture.width(), texture.height()), (256, 256));
     }
 
     #[test]
@@ -439,6 +448,24 @@ mod tests {
         atlas.remove(&large_key);
         assert!(atlas.metal_texture(large.texture_id).is_none());
         assert!(atlas.metal_texture(small.texture_id).is_some());
+    }
+
+    #[test]
+    fn test_covers_that_cannot_fit_three_across_use_exact_pages() {
+        let atlas = create_atlas().expect("Metal device");
+        for (width, height) in [(248, 248), (248, 106)] {
+            let key = make_image_key(1, 0);
+            let tile = insert_tile(
+                &atlas,
+                key.clone(),
+                Size { width: DevicePixels(width), height: DevicePixels(height) },
+            );
+            let texture = atlas.metal_texture(tile.texture_id).unwrap();
+            assert_eq!((texture.width(), texture.height()), (width as u64, height as u64));
+            drop(texture);
+            atlas.remove(&key);
+            assert!(atlas.metal_texture(tile.texture_id).is_none());
+        }
     }
 
     #[test]

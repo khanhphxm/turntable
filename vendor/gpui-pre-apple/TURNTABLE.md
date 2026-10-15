@@ -4,7 +4,7 @@ Based on gpui-pre-apple 0.3.9 (Apache-2.0), the Apple Metal renderer used by gpu
 
 ## Resource sizing and lifetime
 
-- Glyphs and images share 512×512 atlas pages instead of 1024×1024 pages. Polychrome tiles larger than 256 pixels in either dimension receive a tightly sized page rather than a minimum 1024-pixel page. A 640×640 BGRA cover therefore reserves 1.56 MiB instead of 4 MiB. Small images cannot pin an otherwise-unused large cover page. Image pixels, glyph rasterization and rendering resolution are unchanged.
+- Monochrome glyphs share 512×512 atlas pages instead of 1024×1024 pages. New color pages use 256×256 backing for tiles up to 128px, 512×512 backing when tiles fit at least three across, and exact backing for larger tiles. Existing pages are reused first. A 640×640 BGRA cover therefore reserves 1.56 MiB instead of 4 MiB. Image pixels, glyph rasterization and rendering resolution are unchanged.
 - Instance buffers start at 128 KiB instead of 2 MiB per in-flight frame. The existing geometric growth, 256-byte binding alignment, 256 MiB maximum, Metal command-buffer resource retention, and completion-handler recycling remain unchanged. Complex scenes still grow normally; reducing the initial reservation is not a primitive-count limit.
 - Full-viewport path resolve/MSAA textures are allocated only for scenes containing paths, reused while their size matches, and released when a scene no longer needs them. Metal retains resources used by older in-flight command buffers. Four-sample antialiasing and Apple GPU memoryless MSAA are unchanged.
 
@@ -111,6 +111,39 @@ total, 4,194,304 IOAccelerator, 7,438,336 IOSurface, zero owned-unmapped graphic
 13,811,712 Malloc Small and 8,945,664 App-Specific Tag 15 bytes; idle CPU was 0.0%.
 The fix intentionally corrects image-edge pixels rather than claiming the
 previous unclamped output was a valid visual reference at those boundaries.
+
+### Content-sized color pages
+
+When a new page is required, the longest tile edge determines its reservation:
+up to 128px uses a 256×256 page; 129–170px uses a shared 512×512 page; larger
+tiles use their exact dimensions. The middle cutoff is one third of the shared
+page width, keeping nine 164×164 Home tiles together without reserving a whole
+512×512 page for a 248×248 portrait or 248×106 artist image. Existing rectangles
+are still tried first; there is no relocation, readback or new eviction policy.
+
+Back-to-back signed native Home measurements at the same 1920×950, 1×,
+30-second settle (all 0.0% idle CPU):
+
+| Category | Original baseline | Exact packing, 512px pages | Content-sized color pages |
+| --- | ---: | ---: | ---: |
+| Physical footprint | 49,480,664 | 44,237,760 | 43,992,024 |
+| IOAccelerator graphics | 5,570,560 | 4,194,304 | 3,833,856 |
+| IOSurface | 7,438,336 | 7,438,336 | 7,438,336 |
+| Owned-unmapped graphics | 1,294,336 | 0 | 0 |
+| Malloc Small | 13,697,024 | 13,615,104 | 13,746,176 |
+| App-Specific Tag 15 | 11,468,800 | 8,994,816 | 8,962,048 |
+
+Color backing changes from three 512×512 pages (3,194,880 bytes) to two
+512×512 pages, one 256×256 page, one 248×248 page and one 248×106 page
+(2,834,432 bytes). Native backing includes 16-KiB texture metadata and hardware
+padding: the last image charges 147,456 bytes, not its 105,152 pixel bytes.
+The reduction is **360,448 graphics bytes (352 KiB)** and 245,736 total bytes
+in this pair. A preceding comparison with two charged drawables was discarded.
+Native screenshots differ at only six of 1,824,000 pixels, at most two channel
+levels, in the portrait; text and the rest of the window match exactly. All
+image dimensions and sampling geometry are unchanged. The same page policy is
+ported directly to wgpu and DirectX; these are macOS, not cross-platform,
+footprint figures.
 
 ## Idle drawable pools
 

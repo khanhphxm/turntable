@@ -1,4 +1,4 @@
-// Modified by Turntable: exact atlas packing and isolated large covers; see ../TURNTABLE.md.
+// Modified by Turntable: adaptive atlas sizing and exact packing; see ../TURNTABLE.md.
 use guillotiere::AtlasAllocator;
 use parking_lot::Mutex;
 use windows::Win32::Graphics::{
@@ -164,6 +164,12 @@ impl DirectXAtlasTextures {
             width: DevicePixels(512),
             height: DevicePixels(512),
         };
+        // Small color tiles use half-size pages; medium tiles can fit three
+        // across a shared page, while larger tiles receive exact backing.
+        const SMALL_ATLAS_SIZE: Size<DevicePixels> = Size {
+            width: DevicePixels(256),
+            height: DevicePixels(256),
+        };
         // Max texture size for DirectX. See:
         // https://learn.microsoft.com/en-us/windows/win32/direct3d11/overviews-direct3d-11-resources-limits
         const MAX_ATLAS_SIZE: Size<DevicePixels> = Size {
@@ -171,10 +177,15 @@ impl DirectXAtlasTextures {
             height: DevicePixels(16384),
         };
         let min_size = min_size.min(&MAX_ATLAS_SIZE);
-        let size = if kind == AtlasTextureKind::Polychrome
-            && (min_size.width.0 > 256 || min_size.height.0 > 256)
-        {
-            min_size
+        let size = if kind == AtlasTextureKind::Polychrome {
+            let edge = min_size.width.0.max(min_size.height.0);
+            if edge > DEFAULT_ATLAS_SIZE.width.0 / 3 {
+                min_size
+            } else if edge <= SMALL_ATLAS_SIZE.width.0 / 2 {
+                min_size.max(&SMALL_ATLAS_SIZE)
+            } else {
+                min_size.max(&DEFAULT_ATLAS_SIZE)
+            }
         } else {
             min_size.max(&DEFAULT_ATLAS_SIZE)
         };
@@ -392,8 +403,8 @@ mod tests {
         };
 
         let small = Size {
-            width: DevicePixels(64),
-            height: DevicePixels(64),
+            width: DevicePixels(164),
+            height: DevicePixels(164),
         };
         let big = Size {
             width: DevicePixels(256),
@@ -442,7 +453,7 @@ mod tests {
         let texture = lock.backend.texture(first.texture_id).unwrap();
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { texture.texture.GetDesc(&mut desc) };
-        assert_eq!((desc.Width, desc.Height), (512, 512));
+        assert_eq!((desc.Width, desc.Height), (256, 256));
     }
 
     #[test]
@@ -470,5 +481,27 @@ mod tests {
         atlas.remove(&key);
         assert!(atlas.get_texture_view(large.texture_id).is_none());
         assert!(atlas.get_texture_view(small.texture_id).is_some());
+    }
+
+    #[test]
+    fn test_covers_that_cannot_fit_three_across_use_exact_pages() {
+        let atlas = create_atlas().expect("WARP device");
+        for (width, height) in [(248, 248), (248, 106)] {
+            let key = make_image_key(1);
+            let tile = insert_tile(
+                &atlas,
+                key.clone(),
+                Size { width: DevicePixels(width), height: DevicePixels(height) },
+            );
+            {
+                let lock = atlas.0.lock();
+                let texture = lock.backend.texture(tile.texture_id).unwrap();
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                unsafe { texture.texture.GetDesc(&mut desc) };
+                assert_eq!((desc.Width, desc.Height), (width as u32, height as u32));
+            }
+            atlas.remove(&key);
+            assert!(atlas.get_texture_view(tile.texture_id).is_none());
+        }
     }
 }

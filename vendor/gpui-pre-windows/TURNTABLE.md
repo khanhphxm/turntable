@@ -49,10 +49,11 @@ and GPU memory are not interchangeable with the target metric.
   released on the first path-free frame. Quad, image and glyph rendering does
   not use them. Resize and device recovery discard them until needed again;
   path antialiasing and shaders are unchanged.
-- Glyph and small-image atlas pages start at 512×512 rather than 1024×1024.
-  Polychrome artwork larger than 256px gets a tightly sized page, matching the
-  Metal backend's policy. An unrelated small glyph/image cannot keep that
-  cover's large backing page alive after eviction.
+- Monochrome glyph pages start at 512×512 rather than 1024×1024. If existing
+  rectangles cannot hold a color tile, its longest edge selects a new page:
+  up to 128px uses 256×256; up to one third of 512px (170px) uses 512×512;
+  larger artwork gets exact dimensions, matching Metal and wgpu. Texture-size
+  limits and explicit image ownership are unchanged.
 
 The atlas tests use the WARP device to verify page size, reuse and independent
 release. DirectWrite continues to use its shared system factory and collection;
@@ -72,6 +73,12 @@ not inset and interior image mapping is unchanged. The corresponding Metal Home
 comparison saved 1,343,488 charged graphics bytes, with no footprint cost for
 the sampling correction; see the [Apple inventory](../gpui-pre-apple/TURNTABLE.md#exact-atlas-packing-2026-10-15).
 Those numbers are not Windows runtime measurements.
+
+Content-sized color pages additionally saved 360,448 charged graphics bytes
+(352 KiB) in the native Metal Home A/B. Tiny images share smaller pages while
+nine 164×164 images still fit one 512×512 page. WARP regressions cover exact
+248×248 and 248×106 backing. This is a direct allocator-policy port, not a
+Windows runtime result; see the [native comparison](../gpui-pre-apple/TURNTABLE.md#content-sized-color-pages).
 
 ## Windows measurement (2026-10-14)
 

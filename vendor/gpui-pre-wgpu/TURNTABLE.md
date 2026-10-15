@@ -10,10 +10,11 @@ to this copy. Modified upstream files carry Turntable notices.
 This follows the resource policy already used by Turntable's Metal renderer,
 without changing image/glyph resolution, text sampling, antialiasing or cache ownership:
 
-- Small glyphs and images share 512×512 atlas pages rather than 1024×1024 pages.
-  Polychrome images larger than 256 pixels in either dimension get a tightly
-  sized page. A 640×640 cover therefore reserves 1.56 MiB rather than 4 MiB,
-  and unrelated small images cannot pin that large page after the cover leaves.
+- Monochrome glyphs use 512×512 pages rather than 1024×1024. When no existing
+  rectangle fits a color tile, a new page uses 256×256 for edges up to 128px,
+  512×512 for edges up to one third of that shared page (170px), and exact
+  dimensions for larger tiles. A 640×640 cover reserves 1.56 MiB rather than
+  4 MiB; device texture-size limits and explicit image ownership are unchanged.
 - Instance data starts at 128 KiB instead of 2 MiB, on both the native storage
   buffer and WebGL texture paths. Existing geometric growth, device limits,
   binding alignment and retention of earlier in-flight bindings are unchanged.
@@ -45,6 +46,12 @@ WGSL retains derivative sampling before its alpha-clip branch. The corresponding
 Metal Home comparison saved 1,343,488 charged graphics bytes; the clamp itself
 was byte-for-byte footprint neutral. See the [Apple byte inventory](../gpui-pre-apple/TURNTABLE.md#exact-atlas-packing-2026-10-15).
 These figures are macOS measurements, not Linux/Windows runtime results.
+
+Content-sized color pages additionally saved 360,448 charged graphics bytes
+(352 KiB) in the native Metal Home A/B. Tiny images share smaller pages while
+nine 164×164 images still fit one 512×512 page. The 248×248 and 248×106 cases
+have exact-page regressions. This is a direct allocator-policy port, not a
+Linux runtime measurement; see the [native comparison](../gpui-pre-apple/TURNTABLE.md#content-sized-color-pages).
 
 Regression tests cover compact-page sharing/reuse, independent large-image
 release, lazy/reused/resized/released path targets, and instance growth with
