@@ -1,3 +1,5 @@
+// Modified by Turntable: use a compact growable dealer read buffer; see ../../TURNTABLE.md.
+
 pub mod manager;
 mod maps;
 pub mod protocol;
@@ -495,6 +497,13 @@ impl Dealer {
     }
 }
 
+fn websocket_config() -> tungstenite::protocol::WebSocketConfig {
+    // Dealer traffic is normally small JSON/control messages. This is only the
+    // initial I/O buffer size: tungstenite still accepts and grows for large
+    // frames/messages under its unchanged default limits.
+    tungstenite::protocol::WebSocketConfig::default().read_buffer_size(4096)
+}
+
 /// Initializes a connection and returns futures that will finish when the connection is closed/lost.
 async fn connect(
     address: &Url,
@@ -515,10 +524,15 @@ async fn connect(
 
     let stream = socket::connect(host, port, proxy).await?;
 
-    let (mut ws_tx, ws_rx) = tokio_tungstenite::client_async_tls(address.as_str(), stream)
-        .await?
-        .0
-        .split();
+    let (mut ws_tx, ws_rx) = tokio_tungstenite::client_async_tls_with_config(
+        address.as_str(),
+        stream,
+        Some(websocket_config()),
+        None,
+    )
+    .await?
+    .0
+    .split();
 
     let (send_tx, mut send_rx) = mpsc::unbounded_channel::<WsMessage>();
 
@@ -721,4 +735,47 @@ where
     let _ = join_all(tasks).await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+    use tungstenite::protocol::{
+        Role, WebSocket, WebSocketConfig,
+        frame::{Frame, coding::{Data, OpCode}},
+    };
+
+    #[test]
+    fn compact_read_buffer_preserves_default_message_limits() {
+        let config = websocket_config();
+        let defaults = WebSocketConfig::default();
+        assert_eq!(config.read_buffer_size, 4096);
+        assert_eq!(config.max_message_size, defaults.max_message_size);
+        assert_eq!(config.max_frame_size, defaults.max_frame_size);
+        assert_eq!(config.write_buffer_size, defaults.write_buffer_size);
+        assert_eq!(config.max_write_buffer_size, defaults.max_write_buffer_size);
+    }
+
+    #[test]
+    fn compact_read_buffer_accepts_large_and_fragmented_messages() {
+        let payload = vec![b'x'; 512 * 1024];
+        for fragment_size in [payload.len(), 16 * 1024] {
+            let mut wire = Vec::new();
+            let fragments = payload.chunks(fragment_size);
+            let fragment_count = fragments.len();
+            for (index, fragment) in fragments.enumerate() {
+                let opcode = if index == 0 { Data::Binary } else { Data::Continue };
+                Frame::message(fragment.to_vec(), OpCode::Data(opcode), index + 1 == fragment_count)
+                    .format(&mut wire)
+                    .unwrap();
+            }
+            let mut websocket = WebSocket::from_raw_socket(
+                Cursor::new(wire),
+                Role::Client,
+                Some(websocket_config()),
+            );
+            assert_eq!(websocket.read().unwrap().into_data().as_ref(), payload);
+        }
+    }
 }

@@ -21,3 +21,19 @@ The controller handles a refusal as sign-out: stop Spirc/audio and cancel sessio
 Sign-out and Premium rejection share one account teardown. All account-scoped state is reset immediately while device preferences remain. Library requests, startup/player events and lyrics carry an account generation; stale queued/in-flight work cannot restore UI data or re-enable snapshot persistence. Startup authorization cancellation also guards the native credential cache write itself, rather than merely discarding the eventual engine response.
 
 `build.rs` no longer runs vergen or draws a random build ID. Upstream embedded the enclosing repository's git commit and dates, which made every commit rebuild librespot-core and its dependents (locally and in CI). The informational strings now use the crate version: the AP login's system information string reads `librespot-0.8.0-turntable`, and `VERSION_STRING` reads `librespot-0.8.0`. The `vergen-gitcl`, `rand` and `rand_distr` build-dependencies are removed.
+
+`src/dealer/mod.rs` sets tungstenite's initial read buffer to 4 KiB rather than
+128 KiB for the normally small dealer JSON/control messages. This is not a frame
+or message limit: tungstenite still grows as needed, and its default message,
+frame, write-buffer and TLS/proxy/reconnection behavior is unchanged. Tests read
+both a single 512 KiB message and the same payload fragmented into 16 KiB frames,
+and verify the original message/frame/write limits.
+
+Back-to-back macOS arm64 offscreen runs (1920×950 at 1x, signed-in but paused)
+reduced jemalloc dirty footprint relative to the preceding compact bounds tree:
+Home 8,634,368 → 8,519,680 bytes; Playlist 9,191,424 → 9,043,968;
+Liked Songs 9,256,960 → 9,142,272. Total footprint changed by −0.031,
+−0.688 and −0.594 MiB respectively, including independent system/GPU variation.
+The later Home sample had a different asynchronously loaded artist/artwork set
+and is not compared. This shared transport change applies to every platform;
+Linux/Windows runtime behavior has not been exercised on this macOS host.
