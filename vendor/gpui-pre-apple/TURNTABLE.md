@@ -37,6 +37,113 @@ Rejected alternatives: setting `drawableSize` to zero retained all three large s
 
 The remaining drawable floor is one full-resolution presented surface: approximately 3.97 MiB at 1280×800 or 7.09 MiB at 1920×950, multiplied by four at 2× scale. This patch does not remove the driver's approximately 105 MiB submission transient while continuous GPUI animations run; animation frame demand is a separate cost.
 
+## Idle command storage (macOS)
+
+The existing three-unused-frame drawable-parking transition also releases an
+idle renderer-owned `MTLCommandQueue`. An in-flight frame count is updated by
+the existing Metal completion handler. A busy queue is kept: a resumed frame
+must not overtake earlier GPU work by submitting on another queue. The next
+actual draw recreates only a retired queue; the device, backing layer, pipelines,
+atlas, viewport resolution and triple buffering stay unchanged. There is no GPU
+wait, additional timer or idle wakeup. A kept busy queue can retire on a later
+normal parking transition. iOS and headless callers do not invoke the macOS hook.
+
+An isolated 64×64 Metal clear probe fell from 6.594 to 5.579 MiB physical
+footprint when its completed queue was released; `currentAllocatedSize` fell
+from 0.906 to 0.453 MiB. A 1920×950 clear probe measured queue recreation at
+0.146–0.305 ms and encoding at 0.293–0.466 ms after idle retirement. Completed
+clears took 3.456–4.288 ms versus 0.331–2.277 ms with a retained queue, excluding
+each process's first submission. These are completion timings, not display-vsync
+measurements; the small resume cost does not change continuous-frame pacing.
+
+Signed release Turntable A/B, 1920×950 at 1×, cached signed-in Home, private
+profile, 30-second settle, no playback, back-to-back `/tmp/ttm.sh` runs:
+
+| Queue policy | Physical footprint MiB | IOSurface MiB | IOAccelerator dirty MiB | Owned-unmapped graphics MiB | Malloc Small MiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Baseline retained queue | 48.048 | 7.094 | 5.313 | 1.234 | 12.547 |
+| Retired idle queue | 46.970 | 7.094 | 5.406 | 0.000 | 12.500 |
+
+The repeatable saving is the owned-unmapped graphics charge; ordinary atlas
+textures remain resident. Recycled instance-buffer counts and Rust/system heap
+residency vary between launches, so the total alone is not the attribution.
+Both processes sampled 0.0% idle CPU. The approximately 4.5 MiB previously
+attributed to encoder creation ends at `IOGPUResourceCreate` and
+`IOGPUMetalResourcePoolCreatePooledResource`: it is command-storage VM backing,
+not demonstrated malloc heap. Its unused pages were already zero-dirty/purgeable
+before retirement and are not counted again as physical-footprint savings.
+
+Native regression coverage parks/resumes the same layer and queue repeatedly,
+including transaction presentation, overlay identity and an in-flight headless
+frame followed by pixel readback of cached sprites on the new queue.
+
+This queue-retirement operation is Metal-specific. wgpu's shared device/queue
+and D3D11's device/immediate context have no direct equivalent to dropping this
+per-window Metal queue. Those renderers are intentionally unchanged; a port
+would first need backend-specific idle driver-cache attribution and a lifecycle
+that does not disrupt other windows or in-flight submissions.
+
+### Idle instance-buffer trimming
+
+The same parking hook retains one completed instance buffer and releases excess
+free buffers left by startup or resize bursts. Buffers still owned by in-flight
+frames are not touched; their existing completion callbacks return them normally.
+The pool's geometric growth and current capacity are unchanged, and retaining
+one buffer keeps an ordinary first resumed frame warm. The pool is shared, but
+only currently unused buffers are discarded; other windows' active frames keep
+their own resources.
+
+In the same back-to-back comparison, keeping the idle queue retired and changing
+only this pool policy reduced IOAccelerator dirty bytes from 5,668,864 to
+5,537,792 (128 KiB). IOSurface stayed at 7,438,336 bytes and owned-unmapped
+graphics stayed at zero. Total physical footprint was 49,251,288 → 49,185,776
+bytes (−64 KiB); Malloc Small varied +80 KiB and the Rust heap −64 KiB. The
+graphics-category reduction, rather than the drifting total, is the kept result.
+The combined queue/buffer policy saved 1.266 MiB of charged graphics memory
+against the 50,381,808-byte baseline, with a 49,185,776-byte final total in this
+assay. The idle-pool regression checks that one completed buffer is retained and
+actually reused; cached-sprite readback also exercises parking while another
+headless submission is still in flight.
+
+The pending-frame regression holds an encoded command buffer before submission,
+verifies parking keeps its queue, then commits/waits and verifies that the now
+idle queue can retire. This protects cross-queue presentation ordering without
+waiting for GPU work on the application's idle path.
+
+A separate smaller-atlas experiment was rejected: reducing minimum pages from
+512×512 to 256×256 changed IOAccelerator dirty bytes from 5,570,560 to 5,816,320
+(+240 KiB), not a saving. Four 1040-KiB color pages became seventeen 272-KiB
+pages; smaller glyph pages did not offset the extra color-page fragmentation.
+The original 512-pixel page policy is retained. No texture resolution, pixel
+format, sampling or atlas ownership changed in either delivered optimization.
+
+The full-Home baseline and compact-idle-policy window captures were pixel-identical:
+zero changed pixels out of 1,824,000 at the unchanged 1920×950 resolution. Later
+fresh and reused profiles showed the baseline stuck on its Loading/empty-player
+screen, so those lower totals are not substituted for the signed-in Home assay.
+The final guarded release passed three occlude/reveal cycles on that
+screen with zero changed pixels in each cycle. Occlusion used a temporary,
+nonactivating opaque window placed immediately above the owned benchmark window,
+not system input or controls directed at the user's application.
+
+The final safety-guard A/B on the Loading page left all three graphics categories
+unchanged versus the previous policy: 7,438,336 IOSurface, 1,032,192 IOAccelerator
+dirty and 1,294,336 owned-unmapped bytes. Its 37,389,272 → 37,716,952 total
+variation is not reported as a Home improvement. Native verification passed all
+18 Apple and 12 macOS tests, including pending-queue ordering and real GPU pixel
+readback, plus strict Clippy for both crates. Their `test-support` features were
+unified through a temporary Cargo harness because Cargo rejects explicit feature
+selection for these dependency packages outside workspace membership. The harness
+was removed after verification. The release build and workspace formatting check
+also passed.
+
+Also rejected: calling the same retirement functions directly from the hidden
+occlusion-notification branch. In the Loading-screen comparison, baseline,
+idle-tail-only and notification-retirement builds all retained 7,438,336 IOSurface,
+1,032,192 IOAccelerator-dirty and 1,294,336 owned-unmapped graphics bytes. Totals
+were 38,306,776 / 37,323,712 / 38,274,008 bytes; Rust-heap drift, not graphics,
+accounted for the variation. The unproven extra hook was removed.
+
 ## Regression coverage
 
 The native Metal tests cover compact-page sharing, independent release of large cover textures, tile-space reuse, buffer growth preserving earlier bindings, lazy/reused/resized/released path targets, and rendered image/path pixels after allocation and lifetime changes.

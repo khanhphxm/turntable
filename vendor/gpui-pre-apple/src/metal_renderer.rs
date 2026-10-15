@@ -1,4 +1,5 @@
 // Modified by Turntable from upstream GPUI/Zed; see ../TURNTABLE.md for changes.
+// Idle Metal command storage and excess instance buffers retire with the drawable pool.
 
 use crate::metal_atlas::MetalAtlas;
 use anyhow::{Context as _, Result};
@@ -26,6 +27,8 @@ use objc2_core_video::{
 use parking_lot::Mutex;
 
 use std::{cell::Cell, ffi::c_void, mem, mem::MaybeUninit, ops::Range, ptr, slice, sync::Arc};
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // Exported to metal
 pub(crate) type PointF = gpui::Point<f32>;
@@ -135,7 +138,9 @@ pub struct MetalRenderer {
     presents_with_transaction: bool,
     /// For headless rendering, tracks whether output should be opaque
     opaque: bool,
-    command_queue: CommandQueue,
+    command_queue: Option<CommandQueue>,
+    #[cfg(target_os = "macos")]
+    in_flight_frames: Arc<AtomicUsize>,
     paths_rasterization_pipeline_state: metal::RenderPipelineState,
     path_sprites_pipeline_state: metal::RenderPipelineState,
     shadows_pipeline_state: metal::RenderPipelineState,
@@ -410,7 +415,9 @@ impl MetalRenderer {
             is_apple_gpu,
             is_unified_memory,
             opaque,
-            command_queue,
+            command_queue: Some(command_queue),
+            #[cfg(target_os = "macos")]
+            in_flight_frames: Arc::new(AtomicUsize::new(0)),
             paths_rasterization_pipeline_state,
             path_sprites_pipeline_state,
             shadows_pipeline_state,
@@ -513,6 +520,19 @@ impl MetalRenderer {
         // nothing to do
     }
 
+    /// Releases queue-owned command storage and excess free instance buffers.
+    /// Keep a busy queue so a resumed frame cannot overtake earlier GPU work on
+    /// a different queue. The next idle draw recreates only a retired queue.
+    #[cfg(target_os = "macos")]
+    pub fn park_resources(&mut self) {
+        if self.in_flight_frames.load(Ordering::Acquire) == 0 {
+            self.command_queue = None;
+        }
+        // Keep one warm buffer; startup/resize concurrency should not pin an
+        // entire peak-sized pool once the window's frame tail has parked.
+        self.instance_buffer_pool.lock().buffers.truncate(1);
+    }
+
     pub fn draw(&mut self, scene: &Scene) {
         let layer = match &self.layer {
             Some(l) => l.clone(),
@@ -609,9 +629,15 @@ impl MetalRenderer {
 
         let instance_buffer_pool = self.instance_buffer_pool.clone();
         let instance_buffer = Cell::new(Some(writer.finish()));
+        #[cfg(target_os = "macos")]
+        let in_flight_frames = self.in_flight_frames.clone();
+        #[cfg(target_os = "macos")]
+        in_flight_frames.fetch_add(1, Ordering::Relaxed);
         let block = RcBlock::new(move |_: ptr::NonNull<AnyObject>| {
             if let Some(instance_buffer) = instance_buffer.take() {
                 instance_buffer_pool.lock().release(instance_buffer);
+                #[cfg(target_os = "macos")]
+                in_flight_frames.fetch_sub(1, Ordering::Release);
             }
         });
         // SAFETY: Both pointee types are opaque views of the same Objective-C block pointer ABI.
@@ -756,7 +782,10 @@ impl MetalRenderer {
         texture: &metal::TextureRef,
         viewport_size: Size<DevicePixels>,
     ) -> Result<metal::CommandBuffer> {
-        let command_queue = self.command_queue.clone();
+        let command_queue = self
+            .command_queue
+            .get_or_insert_with(|| self.device.new_command_queue())
+            .clone();
         let command_buffer = command_queue.new_command_buffer();
         let alpha = if self.opaque { 1. } else { 0. };
 
@@ -1759,8 +1788,12 @@ mod tests {
             let overlay = objc2_quartz_core::CALayer::new();
             objc2_layer.addSublayer(&overlay);
 
-            for _ in 0..3 {
+            for cycle in 0..3 {
                 park_drawables(objc2_layer);
+                renderer.park_resources();
+                if cycle == 0 {
+                    assert!(renderer.command_queue.is_none());
+                }
                 let device: *mut AnyObject = unsafe { objc2::msg_send![objc2_layer, device] };
                 assert!(device.is_null());
                 let drawable_size = layer.drawable_size();
@@ -1772,6 +1805,7 @@ mod tests {
 
                 renderer.draw(&Scene::default());
                 assert_eq!(layer.device().as_ptr(), renderer.device.as_ptr());
+                assert!(renderer.command_queue.is_some());
                 assert_eq!(renderer.layer_ptr(), layer.as_ptr());
             }
         });
@@ -1785,6 +1819,63 @@ mod tests {
         layer.addSublayer(&overlay);
         park_drawables(&layer);
         assert_eq!(overlay.superlayer().as_deref(), Some(&*layer));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn pending_frames_keep_their_queue_until_completion() {
+        objc2::rc::autoreleasepool(|_| {
+            let mut renderer = MetalRenderer::new_headless(Arc::new(Mutex::new(Default::default())));
+            let descriptor = metal::TextureDescriptor::new();
+            descriptor.set_width(16);
+            descriptor.set_height(16);
+            descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+            descriptor.set_storage_mode(metal::MTLStorageMode::Private);
+            descriptor.set_usage(metal::MTLTextureUsage::RenderTarget);
+            let target = renderer.device.new_texture(&descriptor);
+            let command = renderer
+                .render_frame(
+                    &Scene::default(),
+                    &target,
+                    size(DevicePixels(16), DevicePixels(16)),
+                )
+                .unwrap();
+            let queue = renderer.command_queue.as_ref().unwrap().as_ptr();
+            assert_eq!(renderer.in_flight_frames.load(Ordering::Acquire), 1);
+
+            renderer.park_resources();
+            assert_eq!(renderer.command_queue.as_ref().unwrap().as_ptr(), queue);
+            command.commit();
+            command.wait_until_completed();
+            assert_eq!(renderer.in_flight_frames.load(Ordering::Acquire), 0);
+            renderer.park_resources();
+            assert!(renderer.command_queue.is_none());
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parking_keeps_one_completed_instance_buffer_for_reuse() {
+        objc2::rc::autoreleasepool(|_| {
+            let pool = Arc::new(Mutex::new(InstanceBufferPool::default()));
+            let mut renderer = MetalRenderer::new_headless(pool.clone());
+            let buffers: [_; 4] = std::array::from_fn(|_| {
+                pool.lock()
+                    .acquire(&renderer.device, renderer.is_unified_memory)
+            });
+            for buffer in buffers {
+                pool.lock().release(buffer);
+            }
+            let retained = pool.lock().buffers[0].as_ptr();
+            assert_eq!(pool.lock().buffers.len(), 4);
+
+            renderer.park_resources();
+            assert!(renderer.command_queue.is_none());
+            assert_eq!(pool.lock().buffers.len(), 1);
+            let writer =
+                InstanceBufferWriter::new(&renderer.device, &pool, renderer.is_unified_memory);
+            assert_eq!(writer.current.metal_buffer.as_ptr(), retained);
+        });
     }
 
     #[test]
@@ -1896,6 +1987,23 @@ mod tests {
                 .unwrap();
             for pixel in image.pixels() {
                 assert_eq!(pixel.0, [51, 34, 17, 255]);
+            }
+            #[cfg(target_os = "macos")]
+            for _ in 0..3 {
+                // Parking must preserve both pending work and cached atlas tiles.
+                // A busy queue stays alive until its submitted frames complete.
+                renderer
+                    .render_scene(&scene, size(DevicePixels(16), DevicePixels(16)))
+                    .unwrap();
+                renderer.park_resources();
+                assert!(renderer.sprite_atlas.metal_texture(tile.texture_id).is_some());
+                assert_eq!(
+                    renderer
+                        .render_scene_to_image(&scene, size(DevicePixels(16), DevicePixels(16)))
+                        .unwrap(),
+                    image
+                );
+                assert!(renderer.command_queue.is_some());
             }
             renderer.sprite_atlas.remove(&key);
             assert!(renderer.sprite_atlas.metal_texture(tile.texture_id).is_none());
