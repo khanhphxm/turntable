@@ -61,12 +61,32 @@ enum AppEvent {
 enum StartError {
 	Premium(crate::engine::SignInError),
 	SignInTimedOut,
+	RateLimited(Duration),
 	Other(String),
 }
 
 impl From<&str> for StartError {
 	fn from(message: &str) -> Self {
 		Self::Other(message.to_owned())
+	}
+}
+
+impl From<std::io::Error> for StartError {
+	fn from(error: std::io::Error) -> Self {
+		if let Some(source) = error.get_ref() {
+			if source.is::<crate::engine::SignInTimedOut>() {
+				return Self::SignInTimedOut;
+			}
+			if let Some(error) = source.downcast_ref::<crate::engine::SignInError>() {
+				return Self::Premium(error.clone());
+			}
+			if let Some(error) = source.downcast_ref::<librespot_core::Error>()
+				&& let Some(wait) = crate::spotify::Error::from_native(error).rate_limit_wait()
+			{
+				return Self::RateLimited(wait);
+			}
+		}
+		Self::Other(format!("Can't start the player: {error}"))
 	}
 }
 

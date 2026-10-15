@@ -54,6 +54,7 @@ impl MercuryManager {
     }
 
     fn request(&self, req: MercuryRequest) -> Result<MercuryFuture<MercuryResponse>, Error> {
+        self.session().http_client().check_rate_limit()?;
         let (tx, rx) = oneshot::channel();
 
         let pending = MercuryPending {
@@ -236,6 +237,17 @@ impl MercuryManager {
         };
 
         let status_code = response.status_code;
+        if status_code == 429 {
+            if let Some(callback) = pending.callback {
+                callback
+                    .send(Err(self.session().http_client().rate_limit(None)))
+                    .map_err(|_| MercuryError::Channel)?;
+            }
+            return Err(MercuryError::Response(response).into());
+        }
+        if status_code < 400 {
+            self.session().http_client().clear_rate_limit();
+        }
         if status_code >= 500 {
             error!("error {} for uri {}", status_code, &response.uri);
             Err(MercuryError::Response(response).into())

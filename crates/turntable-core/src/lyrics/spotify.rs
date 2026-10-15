@@ -28,7 +28,7 @@ pub fn lyrics(session: &SessionReader, track: &str) -> Result<Option<Lyrics>, St
 	match result {
 		Ok(bytes) => parse(&bytes),
 		Err(error) if error.kind == ErrorKind::NotFound => Ok(None),
-		Err(error) => Err(error.to_string()),
+		Err(error) => Err(crate::spotify::Error::from(error).user_message()),
 	}
 }
 

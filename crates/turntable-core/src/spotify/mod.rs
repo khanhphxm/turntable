@@ -7,6 +7,8 @@ mod client;
 mod error;
 mod http;
 mod model;
+#[cfg(test)]
+mod native_tests;
 mod web_player;
 
 pub use auth::{Token, TokenSource, open_browser};

@@ -26,3 +26,17 @@ Sign-out and Premium rejection share one account teardown. All account-scoped st
 for small dealer JSON/control messages. It still grows for large messages;
 message/frame/write limits and TLS/proxy/reconnection behavior are unchanged.
 This applies across platforms; tests cover large whole and fragmented messages.
+
+Native rate limiting uses one session-wide gate shared by HTTP (including spclient
+and pathfinder) and Mercury. HTTP 429 retains its Retry-After duration, including
+values beyond the short automatic retry budget; missing headers and Mercury 429
+use a five-second default. A GET gets at most one delayed retry, and writes are
+never replayed. Other requests fail locally during the pause instead of each
+sleeping or hitting Spotify. A zero header still spaces retries by one second.
+The gate's typed ResourceExhausted error carries the remaining wait. Only a real
+successful response after the deadline clears the incident, not a cache hit or a
+new loading attempt. The host uses that incident for a stable, friendly notice.
+
+Core loopback HTTP regressions cover request spacing, concurrent gate sharing,
+missing/zero/long headers, a repeated 429 and non-replayed writes. Synthetic
+Mercury and controller tests require neither Spotify credentials nor audio.

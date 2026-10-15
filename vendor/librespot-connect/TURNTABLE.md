@@ -14,6 +14,21 @@ Compared with the registry source:
 - Revision-bearing local playback commands report execution errors to the host.
   Native queue edits add, remove, move, clear or jump to occurrence UIDs without
   restarting playback or using Web API mutations; revisions reconcile the UI.
+- Command execution errors retain their native error type in snapshots, behind
+  an `Arc` for snapshot cloning. The host can recognize rate limits and display
+  its existing friendly message rather than librespot's raw Display string.
+- Local volume uses a latest-value watch channel, not the transport command
+  queue. The old SetVolume command bypassed the 500 ms debounce by falling
+  through to `notify()` on every slider step. One debounced report is in flight
+  at a time, with only the newest successor retained. A 429 postpones the report
+  to the session-wide backoff deadline; slider changes cannot shorten it. Local
+  audio gain still applies immediately in the controller. Only an outstanding
+  volume report has a timer; there is no idle polling.
+- Remote volume commands use the library worker's existing per-device queue
+  coalescing. After a 429 the worker retains only the latest refused volume and
+  sleeps on its request channel until that backoff deadline or new user work.
+  New values replace that retry, and account teardown cancels it. Ordinary
+  transport and playlist writes are not replayed.
 - `src/state/tracks.rs` preserves context/shuffle information and queued tracks
   beyond the bounded context preview, with offline regression tests.
 - Automatic next-track loads preserve the audio ring and coordinate the

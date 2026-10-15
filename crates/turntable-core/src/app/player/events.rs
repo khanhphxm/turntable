@@ -124,46 +124,24 @@ impl Controller {
 			return false;
 		}
 		match event {
-			AppEvent::Progress(_, text) => self.state.notice = Some(text),
-			AppEvent::EngineReady(_, Ok(engine)) => return self.on_engine_ready(engine),
-			AppEvent::EngineReady(_, Err(e)) => {
-				if std::mem::take(&mut self.discard_start) {
-					self.state.starting = false;
-					self.start_authorization.set_deadline(None);
-					if self.state.signed_in {
-						self.start_engine();
-					}
-					return true;
+			AppEvent::Progress(_, text) => {
+				if !self.state.library.rate_limited {
+					self.state.notice = Some(text);
 				}
-				let e = match e {
-					StartError::SignInTimedOut => {
-						self.cancel_sign_in(true);
-						return true;
-					},
-					StartError::Premium(error) => {
-						self.reject_sign_in(error);
-						return true;
-					},
-					StartError::Other(message) => message,
-				};
-				self.state.starting = false;
-				self.start_authorization.set_deadline(None);
-				self.state.notice = Some(e);
-				// Transient failures (offline, Spotify unreachable) recover on their
-				// own: try again later, backing off.
-				self.player_offline = true;
-				self.refresh_network_notice();
-				self.start_failures = self.start_failures.saturating_add(1);
-				self.retry_start_at = Some(Instant::now() + retry_wait(self.start_failures));
-				self.restore_without_session();
-				self.request_startup_home();
 			},
+			AppEvent::EngineReady(_, Ok(engine)) => return self.on_engine_ready(engine),
+			AppEvent::EngineReady(_, Err(error)) => return self.on_start_error(error),
 			AppEvent::Player(_, Incoming::Event(event)) => return self.on_player_event(event),
 			AppEvent::Player(_, Incoming::RestoreUnavailable { account }) => self.on_restore_unavailable(account),
 			AppEvent::Player(_, Incoming::ConnectState(state)) => return self.on_connect_state(state),
 			AppEvent::Player(_, Incoming::CommandFailed { id, message }) => {
 				self.state.playback_failed(id);
 				self.state.show_toast(message);
+			},
+			AppEvent::Player(_, Incoming::RateLimited { id, limited }) => {
+				self.state.playback_failed(id);
+				self.state.library.apply(library::Response::RateLimited { limited, revision: None });
+				self.refresh_network_notice();
 			},
 			AppEvent::Player(_, Incoming::Closed(reason)) => {
 				debug_log(&format!("player stopped: {reason}"));
@@ -199,6 +177,49 @@ impl Controller {
 		true
 	}
 
+	fn on_start_error(&mut self, error: StartError) -> bool {
+		if std::mem::take(&mut self.discard_start) {
+			self.state.starting = false;
+			self.start_authorization.set_deadline(None);
+			if self.state.signed_in {
+				self.start_engine();
+			}
+			return true;
+		}
+		let message = match error {
+			StartError::SignInTimedOut => {
+				self.cancel_sign_in(true);
+				return true;
+			},
+			StartError::Premium(error) => {
+				self.reject_sign_in(error);
+				return true;
+			},
+			StartError::RateLimited(wait) => {
+				self.state.starting = false;
+				self.start_authorization.set_deadline(None);
+				self.state.library.apply(library::Response::RateLimited { limited: true, revision: None });
+				self.state.notice = Some(crate::spotify::Error::RateLimited { retry_after: Some(wait) }.user_message());
+				self.refresh_network_notice();
+				self.start_failures = self.start_failures.saturating_add(1);
+				self.retry_start_at = Some(Instant::now() + wait.max(retry_wait(self.start_failures)));
+				return true;
+			},
+			StartError::Other(message) => message,
+		};
+		self.state.starting = false;
+		self.start_authorization.set_deadline(None);
+		self.state.notice = Some(message);
+		// Transient failures recover on their own without putting cached content back into loading.
+		self.player_offline = true;
+		self.refresh_network_notice();
+		self.start_failures = self.start_failures.saturating_add(1);
+		self.retry_start_at = Some(Instant::now() + retry_wait(self.start_failures));
+		self.restore_without_session();
+		self.request_startup_home();
+		true
+	}
+
 	fn on_engine_ready(&mut self, engine: crate::engine::Engine) -> bool {
 		self.state.starting = false;
 		self.start_authorization.set_deadline(None);
@@ -211,6 +232,7 @@ impl Controller {
 			return true;
 		}
 		self.start_failures = 0;
+		self.state.library.apply(library::Response::RateLimited { limited: false, revision: None });
 		self.player_offline = false;
 		self.refresh_network_notice();
 		self.state.notice = None;
@@ -293,6 +315,9 @@ impl Controller {
 			self.library.send(request);
 		}
 		match &response {
+			library::Response::RateLimited { revision: Some(revision), .. } => {
+				self.state.playback_failed(*revision);
+			},
 			library::Response::Offline(offline) => {
 				self.library_offline = *offline;
 				self.library_retry_at = offline.then(|| Instant::now() + HEALTH_EVERY);
@@ -321,6 +346,7 @@ impl Controller {
 		}
 		let connected = matches!(response, library::Response::Connected { .. });
 		self.state.library.apply(response);
+		self.refresh_network_notice();
 		self.state.drop_remote_if_signed_out();
 		if connected || !self.state.web_ready() {
 			self.poll_inflight = false;

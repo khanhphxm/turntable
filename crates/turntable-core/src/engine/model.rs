@@ -347,6 +347,11 @@ pub enum Incoming {
 		id:      u64,
 		message: String,
 	},
+	/// A native command was rate limited; show a stable notice rather than repeated toasts.
+	RateLimited {
+		id:      u64,
+		limited: bool,
+	},
 	/// The player stopped (its session ended); the client is done.
 	Closed(String),
 }

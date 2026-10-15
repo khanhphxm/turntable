@@ -149,7 +149,9 @@ impl Controller {
 			self.start_authorization.set_deadline(Some(Instant::now() + crate::engine::SIGN_IN_TIMEOUT));
 		}
 		self.state.sign_in_error = None;
-		self.state.notice = Some("Starting the player…".into());
+		if !self.state.library.rate_limited {
+			self.state.notice = Some("Starting the player…".into());
+		}
 		self.retry_start_at = None;
 		let launch = Launch {
 			name:              self.engine_name(),
@@ -341,13 +343,18 @@ impl Controller {
 
 	pub(super) fn refresh_network_notice(&mut self) {
 		self.state.offline = self.player_offline || self.library_offline;
-		self.state.network_notice = if self.state.offline {
-			Some("Can't reach Spotify. Showing saved library data; reconnecting…".into())
+		let notice = if self.state.library.rate_limited {
+			Some(crate::spotify::Error::RATE_LIMIT_MESSAGE)
+		} else if self.state.offline {
+			Some("Can't reach Spotify. Showing saved library data; reconnecting…")
 		} else if self.playback_interrupted {
-			Some("Reconnected to Spotify. Playback stopped; press Play to resume.".into())
+			Some("Reconnected to Spotify. Playback stopped; press Play to resume.")
 		} else {
 			None
 		};
+		if self.state.network_notice.as_deref() != notice {
+			self.state.network_notice = notice.map(str::to_owned);
+		}
 	}
 
 	pub(super) fn connect(&mut self) {
@@ -466,13 +473,5 @@ fn start_engine(
 		proxy:             launch.proxy.clone(),
 		streaming_quality: launch.streaming_quality,
 	};
-	Engine::start(&config, writer, progress, authorization).map_err(|error| {
-		if error.get_ref().is_some_and(|source| source.is::<crate::engine::SignInTimedOut>()) {
-			return StartError::SignInTimedOut;
-		}
-		match error.get_ref().and_then(|source| source.downcast_ref::<crate::engine::SignInError>()) {
-			Some(error) => StartError::Premium(error.clone()),
-			None => StartError::Other(format!("Can't start the player: {error}")),
-		}
-	})
+	Engine::start(&config, writer, progress, authorization).map_err(StartError::from)
 }

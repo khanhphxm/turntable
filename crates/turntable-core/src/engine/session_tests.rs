@@ -73,3 +73,24 @@ fn a_dead_network_times_out_and_a_later_read_can_succeed() -> Result<(), Box<dyn
 	assert_eq!(reader.block_on(async { Ok::<_, Error>(42) })?, 42);
 	Ok(())
 }
+
+#[test]
+fn native_backoff_is_shared_by_reader_clones_and_mercury_without_polling_io() -> Result<(), Box<dyn StdError>> {
+	let runtime = runtime()?;
+	let (_stop, rx) = watch::channel(false);
+	let reader = reader(&runtime, rx);
+	let error = reader.session().http_client().rate_limit(Some(Duration::from_secs(60)));
+	assert!(matches!(crate::spotify::Error::from(error), crate::spotify::Error::RateLimited { .. }));
+	for reader in [reader.clone(), reader] {
+		let polled = AtomicBool::new(false);
+		let result: Result<(), Error> = reader.block_on(async {
+			polled.store(true, Ordering::Relaxed);
+			Ok(())
+		});
+		assert!(!polled.load(Ordering::Relaxed));
+		assert!(matches!(crate::spotify::Error::from(result.unwrap_err()), crate::spotify::Error::RateLimited { .. }));
+		let mercury = reader.session().mercury().get("hm://test");
+		assert!(matches!(mercury, Err(error) if error.kind == librespot_core::error::ErrorKind::ResourceExhausted));
+	}
+	Ok(())
+}

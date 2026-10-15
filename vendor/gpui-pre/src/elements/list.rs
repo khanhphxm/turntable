@@ -1605,7 +1605,7 @@ impl Element for List {
         // Turntable: ease in the rest of a queued wheel notch, a step per frame.
         let step = {
             let mut state = self.state.0.borrow_mut();
-            state.wheel.is_active().then(|| state.wheel.step(scheduler::Instant::now()))
+            state.wheel.is_active().then(|| state.wheel.step(cx.background_executor().now()))
         };
         if let Some(step) = step {
             self.state.0.borrow_mut().scroll(&scroll_top, height, step, current_view, window, cx);
@@ -1618,7 +1618,7 @@ impl Element for List {
                 // apply at once and cancel any easing still in flight.
                 if !event.delta.precise() {
                     let delta = event.delta.pixel_delta(px(20.));
-                    list_state.0.borrow_mut().wheel.push(delta, scheduler::Instant::now());
+                    list_state.0.borrow_mut().wheel.push(delta, cx.background_executor().now());
                     cx.notify(current_view);
                     return;
                 }

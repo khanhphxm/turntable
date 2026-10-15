@@ -131,14 +131,14 @@ fn session_product_free_enforces_premium_without_me_or_a_snapshot() -> Result<()
 
 #[test]
 fn connect_devices_and_remote_state_read_the_dealer_cluster_without_api() -> Result<(), Box<dyn Error>> {
-	let Fixture { runtime: _runtime, stop: _stop, directory: _directory, session, minted, shared } = fixture()?;
+	let Fixture { runtime: _runtime, stop: _stop, directory: _directory, mut session, minted, shared } = fixture()?;
 	let mut cluster = Cluster { active_device_id: "phone".into(), ..Default::default() };
 	cluster.device.insert("phone".into(), DeviceInfo { name: "Phone".into(), can_play: true, ..Default::default() });
 	shared.set_cluster(cluster);
 	assert!(
-		matches!(connect_request(&session, Request::Devices)?, Some(Response::Devices(Ok(devices))) if devices.len() == 1 && devices[0].name == "Phone")
+		matches!(connect_request(&mut session, Request::Devices)?, Some(Response::Devices(Ok(devices))) if devices.len() == 1 && devices[0].name == "Phone")
 	);
-	assert!(matches!(connect_request(&session, Request::Playback)?, Some(Response::Playback(Ok(None)))));
+	assert!(matches!(connect_request(&mut session, Request::Playback)?, Some(Response::Playback(Ok(None)))));
 	assert_eq!(minted.load(Ordering::Relaxed), 0);
 	Ok(())
 }
@@ -152,7 +152,7 @@ fn connect_transfers_controls_and_missing_cluster_never_fall_back_with_session()
 		command:  spotify::PlayerCommand::Pause,
 		revision: 1,
 	}] {
-		let result = connect_request(&session, request)?;
+		let result = connect_request(&mut session, request)?;
 		assert!(matches!(
 			result,
 			Some(
@@ -170,7 +170,7 @@ fn connect_transfers_controls_and_missing_cluster_never_fall_back_with_session()
 		command:  spotify::PlayerCommand::Pause,
 		revision: 1,
 	}] {
-		let result = connect_request(&session, request)?;
+		let result = connect_request(&mut session, request)?;
 		assert!(
 			matches!(
 				result,
@@ -185,5 +185,28 @@ fn connect_transfers_controls_and_missing_cluster_never_fall_back_with_session()
 		);
 	}
 	assert_eq!(minted.load(Ordering::Relaxed), 4);
+	Ok(())
+}
+
+#[test]
+fn native_volume_bursts_keep_only_the_latest_value_until_retry_after() -> Result<(), Box<dyn Error>> {
+	let Fixture { runtime: _runtime, stop: _stop, directory: _directory, mut session, minted, shared } = fixture()?;
+	let _error = shared.session().http_client().rate_limit(Some(Duration::from_secs(60)));
+	let until = shared.session().http_client().rate_limit_until().unwrap();
+	for volume in 0..=100 {
+		let response = connect_request(&mut session, Request::Control {
+			device:   "phone".into(),
+			command:  spotify::PlayerCommand::Volume(volume),
+			revision: 0,
+		})?;
+		assert!(matches!(response, Some(Response::RateLimited { limited: true, .. })));
+		let pending = session.pending_volume.as_ref().unwrap();
+		assert_eq!(pending.volume, volume);
+		assert_eq!(pending.device, "phone");
+		assert!(pending.at >= until);
+		assert!(pending.at < until + Duration::from_secs(1));
+	}
+	assert_eq!(session.pending_volume.as_ref().unwrap().volume, 100);
+	assert_eq!(minted.load(Ordering::Relaxed), 0, "native backoff never falls through to the Web API");
 	Ok(())
 }

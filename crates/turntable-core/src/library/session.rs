@@ -138,6 +138,10 @@ impl Reader {
 		!self.shared.session().is_invalid() && self.shared.session().username() == username
 	}
 
+	pub(super) fn rate_limited(&self) -> bool {
+		self.shared.session().http_client().rate_limit_until().is_some()
+	}
+
 	pub(super) fn forget(&mut self, route: &Route) {
 		match route {
 			Route::Liked => self.collection = None,

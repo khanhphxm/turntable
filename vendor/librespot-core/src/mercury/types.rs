@@ -41,9 +41,10 @@ pub enum MercuryError {
 
 impl From<MercuryError> for Error {
     fn from(err: MercuryError) -> Self {
-        match err {
+        match &err {
             MercuryError::Channel => Error::aborted(err),
             MercuryError::Command(_) => Error::unimplemented(err),
+            MercuryError::Response(response) if response.status_code == 429 => Error::resource_exhausted(err),
             MercuryError::Response(_) => Error::unavailable(err),
         }
     }

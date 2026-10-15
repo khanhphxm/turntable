@@ -872,7 +872,13 @@ impl Shell {
 		let st = self.st();
 		let text =
 			st.network_notice.clone().or_else(|| st.offline.then(|| "You're offline. Showing music saved on this computer.".to_owned()))?;
-		let short = if st.offline { "Offline" } else { "Reconnected" };
+		let short = if st.library.rate_limited {
+			"Slowing down"
+		} else if st.offline {
+			"Offline"
+		} else {
+			"Reconnected"
+		};
 		Some(
 			div()
 				.id("network")

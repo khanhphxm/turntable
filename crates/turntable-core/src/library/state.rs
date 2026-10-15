@@ -64,6 +64,8 @@ pub struct Library {
 	/// A track to select once the page being opened lists it (a song card opens its album there).
 	pub reveal:                  Option<String>,
 	pub error:                   Option<String>,
+	/// Native rate-limit notice, cleared only by a successful network response, never by loading.
+	pub rate_limited:            bool,
 }
 
 impl Library {
@@ -222,7 +224,9 @@ impl Library {
 		self.selected = None;
 		self.show_selection = false;
 		self.reveal = None;
-		self.error = None;
+		if !self.rate_limited {
+			self.error = None;
+		}
 		self.route = route.clone();
 		match &route {
 			Route::Home => {
@@ -308,6 +312,17 @@ impl Library {
 				}
 			},
 			Response::LikedTracks(tracks) => self.apply_liked_tracks(tracks),
+			Response::RateLimited { limited, .. } => {
+				if limited {
+					self.stop_loading();
+					if !self.rate_limited {
+						self.error = Some(spotify::Error::RateLimited { retry_after: None }.user_message());
+					}
+				} else if self.rate_limited {
+					self.error = None;
+				}
+				self.rate_limited = limited;
+			},
 			Response::Home(home) => self.home = home,
 			Response::HomeRecentTracks(tracks) => self.home.take_recent_tracks(tracks),
 			Response::Artist(artist) => {
@@ -526,6 +541,8 @@ impl Library {
 			self.rootlist.clear();
 			self.expanded_folders.clear();
 			self.home = Home::default();
+			self.albums.clear();
+			self.followed.clear();
 		}
 		for playlist in &mut playlists {
 			playlist.normalize(&me.id, me.display_name.as_deref());
@@ -533,9 +550,6 @@ impl Library {
 		self.conn = Conn::Ready;
 		self.me = Some(me);
 		self.playlists = playlists;
-		// The albums and artists load next: none of a previous account's meanwhile.
-		self.albums.clear();
-		self.followed.clear();
 	}
 
 	fn apply_liked(&mut self, uri: String, liked: bool) {
@@ -556,14 +570,20 @@ impl Library {
 		if route.is_some_and(|r| *r != self.route) {
 			return;
 		}
-		if let Some(l) = &mut self.listing {
-			l.loading = false;
+		self.stop_loading();
+		if !self.rate_limited {
+			self.error = Some(message);
+		}
+	}
+
+	fn stop_loading(&mut self) {
+		if let Some(listing) = &mut self.listing {
+			listing.loading = false;
 		}
 		self.pending_offset = None;
 		if self.route == Route::Home {
 			self.home.loaded = true;
 		}
-		self.error = Some(message);
 	}
 
 	fn apply_listing(&mut self, route: &Route, offset: u32, mut listing: Listing) {
@@ -950,5 +970,25 @@ mod tests {
 			listing: Listing { tracks: vec![track()], added_at: vec![Some(20)], ..Listing::default() },
 		});
 		assert_eq!(lib.listing.as_ref().unwrap().added_at, [None, Some(20)]);
+	}
+
+	#[test]
+	fn rate_limited_reconnect_keeps_cached_library_and_navigation_keeps_its_notice() {
+		let mut lib = library();
+		lib.apply(Response::RateLimited { limited: true, revision: None });
+		let message = lib.error.clone();
+		let me = lib.me.clone().unwrap();
+		lib.apply(Response::Connected { me, playlists: lib.playlists.clone() });
+		assert_eq!(lib.albums.len(), 2);
+		assert_eq!(lib.followed.len(), 2);
+		lib.navigate(Route::Liked);
+		assert_eq!(lib.error, message);
+		lib.apply(Response::Listing { route: Route::Liked, offset: 0, listing: Listing::default() });
+		assert_eq!(lib.error, message);
+		lib.apply(Response::RateLimited { limited: false, revision: None });
+		assert!(lib.error.is_none());
+		lib.apply(Response::Connected { me: User { id: "other".into(), display_name: None }, playlists: Vec::new() });
+		assert!(lib.albums.is_empty());
+		assert!(lib.followed.is_empty());
 	}
 }
