@@ -97,6 +97,15 @@ footprint fell by 0.45–1.05 MiB, with independent system/GPU variation. Regres
 tests cover the two-clear threshold, alternating reuse, destructor execution and
 reclamation of oversized destructor-record storage.
 
+At 1x, Home, Playlist, Liked Songs, Home after navigation and immediate/settled
+Back after Settings matched the integrated base pixel-for-pixel. At 2x, text and
+image interiors remained identical; differences were confined to one-pixel image
+boundaries. Repeating the identical base binary reproduced those boundary changes
+(up to 87/255 per channel), and its repeated Playlist and immediate/settled Back
+frames exactly matched the candidate. The existing unpadded-atlas/linear-sampling
+boundary behavior is independent of these heap changes; no renderer change is
+included here.
+
 ## Layout capacity after cached frames
 
 `src/taffy.rs` releases Taffy's peak node storage after two consecutive frames
