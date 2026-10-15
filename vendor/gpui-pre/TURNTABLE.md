@@ -258,3 +258,39 @@ before it can call this hook. wgpu owns GPU submission, not the platform frame
 source: its Linux/platform scheduler would likewise need to emit this event.
 No speculative Windows/wgpu scheduling change is included.
 
+## Compact scene replay records
+
+`src/scene.rs` records a primitive's kind and typed-vector index instead of keeping
+another full primitive in every paint operation. Paths and native surfaces are
+moved into their renderer vectors rather than cloned into duplicate replay storage.
+Layer bounds and start/end operations remain in the original paint order.
+
+`Scene::finish` keeps the existing stable draw-order/atlas-tile sort. For a batch
+that needs reordering, it sorts the replay references and applies the corresponding
+permutation to the typed vector, updating every reference to its final index.
+Already ordered batches allocate no sorting scratch. Two small index arrays are
+reused across kinds and discarded before returning; no renderer-sized primitive
+copy is needed. Cached replay reads the referenced primitive and inserts it once
+into the next scene. Partial paint ranges, nested layers, path IDs and all public
+renderer vectors, GPU layouts and batch interfaces are unchanged.
+
+The shared implementation benefits Metal, wgpu and DirectX without a backend port.
+`crates/turntable/tests/gpui_idle.rs` covers stable sorting, repeated finish, full
+and partial replay, mixed paths/quads/atlas sprites, and nested layers.
+
+On macOS arm64 (1920×950, 1x, 30 seconds idle), relative to the compact slab and
+snapshot changes, jemalloc dirty footprint fell from 6,209,536 to 6,029,312 bytes
+(−176 KiB) and total footprint from 42,992,600 to 42,861,528 bytes (−128 KiB).
+IOSurface and both graphics categories were unchanged. System Malloc Small
+varied by +64 KiB, Malloc Metadata by +16 KiB and stack by −48 KiB; these are
+reported separately from the CPU scene-storage reduction. Native screenshots
+matched pixel-for-pixel and idle CPU remained 0.0%.
+
+At 1x/2x, all 36 pre-idle versus retained/cached/full captures matched exactly
+across Home, Playlist, Liked Songs and immediate/settled Back from Settings.
+Comparing separate base/candidate processes found small one-pixel image-boundary
+differences, also reproduced by running the unchanged base again (including an
+exact candidate match for the Retina Home and Liked frames). Text and image
+interiors were unchanged. First cached/full draws stayed at 0.356–0.641 ms and
+1.205–1.951 ms; no timer, extra frame request or visible redraw delay was added.
+
