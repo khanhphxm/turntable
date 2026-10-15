@@ -1684,16 +1684,20 @@ Used by:
     Source: https://github.com/khanhphxm/turntable/tree/main/vendor/gpui-pre
   - gpui-pre-apple 0.3.9 (https://github.com/zed-industries/zed)
     Source: https://github.com/khanhphxm/turntable/tree/main/vendor/gpui-pre-apple
+  - gpui-pre-linux 0.3.9 (https://github.com/zed-industries/zed)
+    Source: https://github.com/khanhphxm/turntable/tree/main/vendor/gpui-pre-linux
   - gpui-pre-macos 0.3.9 (https://github.com/zed-industries/zed)
     Source: https://github.com/khanhphxm/turntable/tree/main/vendor/gpui-pre-macos
+  - gpui-pre-wgpu 0.3.9 (https://github.com/zed-industries/zed)
+    Source: https://github.com/khanhphxm/turntable/tree/main/vendor/gpui-pre-wgpu
+  - gpui-pre-windows 0.3.9 (https://github.com/zed-industries/zed)
+    Source: https://github.com/khanhphxm/turntable/tree/main/vendor/gpui-pre-windows
   - gpui-pre-collections 0.3.9 (https://github.com/zed-industries/zed)
     Source: https://crates.io/api/v1/crates/gpui-pre-collections/0.3.9/download
   - gpui-pre-derive-refineable 0.3.9 (https://github.com/zed-industries/zed)
     Source: https://crates.io/api/v1/crates/gpui-pre-derive-refineable/0.3.9/download
   - gpui-pre-http-client 0.3.9 (https://github.com/zed-industries/zed)
     Source: https://crates.io/api/v1/crates/gpui-pre-http-client/0.3.9/download
-  - gpui-pre-linux 0.3.9 (https://github.com/zed-industries/zed)
-    Source: https://crates.io/api/v1/crates/gpui-pre-linux/0.3.9/download
   - gpui-pre-macros 0.3.9 (https://github.com/zed-industries/zed)
     Source: https://crates.io/api/v1/crates/gpui-pre-macros/0.3.9/download
   - gpui-pre-platform 0.3.9 (https://github.com/zed-industries/zed)
@@ -1708,10 +1712,6 @@ Used by:
     Source: https://crates.io/api/v1/crates/gpui-pre-sum-tree/0.3.9/download
   - gpui-pre-util 0.3.9 (https://github.com/zed-industries/zed)
     Source: https://crates.io/api/v1/crates/gpui-pre-util/0.3.9/download
-  - gpui-pre-wgpu 0.3.9 (https://github.com/zed-industries/zed)
-    Source: https://crates.io/api/v1/crates/gpui-pre-wgpu/0.3.9/download
-  - gpui-pre-windows 0.3.9 (https://github.com/zed-industries/zed)
-    Source: https://crates.io/api/v1/crates/gpui-pre-windows/0.3.9/download
   - gpui-pre-ztracing-macro 0.3.9 (https://github.com/zed-industries/zed)
     Source: https://crates.io/api/v1/crates/gpui-pre-ztracing-macro/0.3.9/download
   - gpui-pre-ztracing 0.3.9 (https://github.com/zed-industries/zed)
@@ -6118,12 +6118,6 @@ Used by:
     Source: https://crates.io/api/v1/crates/parking_lot_core/0.9.12/download
   - rustc_version 0.4.1 (https://github.com/djc/rustc-version-rs)
     Source: https://crates.io/api/v1/crates/rustc_version/0.4.1/download
-  - vergen-gitcl 1.0.8 (https://github.com/rustyhorde/vergen)
-    Source: https://crates.io/api/v1/crates/vergen-gitcl/1.0.8/download
-  - vergen-lib 0.1.6 (https://github.com/rustyhorde/vergen)
-    Source: https://crates.io/api/v1/crates/vergen-lib/0.1.6/download
-  - vergen 9.0.6 (https://github.com/rustyhorde/vergen)
-    Source: https://crates.io/api/v1/crates/vergen/9.0.6/download
 
 Copyright (c) 2016 The Rust Project Developers
 
@@ -8580,33 +8574,6 @@ DEALINGS IN THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  - num_threads 0.1.7 (https://github.com/jhpratt/num_threads)
-    Source: https://crates.io/api/v1/crates/num_threads/0.1.7/download
-
-Copyright (c) 2021 Jacob Pratt
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-Used by:
   - crypto-common 0.1.7 (https://github.com/RustCrypto/traits)
     Source: https://crates.io/api/v1/crates/crypto-common/0.1.7/download
 
@@ -9759,8 +9726,12 @@ MIT License (MIT)
 Used by:
   - x11rb-protocol 0.13.2 (https://github.com/psychon/x11rb)
     Source: https://crates.io/api/v1/crates/x11rb-protocol/0.13.2/download
+  - x11rb-protocol 0.14.0 (https://github.com/psychon/x11rb)
+    Source: https://crates.io/api/v1/crates/x11rb-protocol/0.14.0/download
   - x11rb 0.13.2 (https://github.com/psychon/x11rb)
     Source: https://crates.io/api/v1/crates/x11rb/0.13.2/download
+  - x11rb 0.14.0 (https://github.com/psychon/x11rb)
+    Source: https://crates.io/api/v1/crates/x11rb/0.14.0/download
 
 Copyright 2019 x11rb Contributers
 
@@ -10055,39 +10026,6 @@ Used by:
 MIT License
 
 Copyright (c) 2017 Nikolai Vazquez
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-Used by:
-  - darling 0.20.11 (https://github.com/TedDriggs/darling)
-    Source: https://crates.io/api/v1/crates/darling/0.20.11/download
-  - darling_core 0.20.11 (https://github.com/TedDriggs/darling)
-    Source: https://crates.io/api/v1/crates/darling_core/0.20.11/download
-  - darling_macro 0.20.11 (https://github.com/TedDriggs/darling)
-    Source: https://crates.io/api/v1/crates/darling_macro/0.20.11/download
-
-MIT License
-
-Copyright (c) 2017 Ted Driggs
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -11634,8 +11572,6 @@ MIT License (MIT)
 Used by:
   - half 2.7.1 (https://github.com/VoidStarKat/half-rs)
     Source: https://crates.io/api/v1/crates/half/2.7.1/download
-  - ident_case 1.0.1 (https://github.com/TedDriggs/ident_case)
-    Source: https://crates.io/api/v1/crates/ident_case/1.0.1/download
   - linebender_resource_handle 0.1.1 (https://github.com/linebender/raw_resource_handle)
     Source: https://crates.io/api/v1/crates/linebender_resource_handle/0.1.1/download
   - str_indices 0.4.4 (https://github.com/cessen/str_indices)
@@ -12465,37 +12401,6 @@ THE SOFTWARE.
 ================================================================================
 MIT License (MIT)
 Used by:
-  - strsim 0.11.1 (https://github.com/rapidfuzz/strsim-rs)
-    Source: https://crates.io/api/v1/crates/strsim/0.11.1/download
-
-The MIT License (MIT)
-
-Copyright (c) 2015 Danny Guo
-Copyright (c) 2016 Titus Wormer <tituswormer@gmail.com>
-Copyright (c) 2018 Akash Kurdekar
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-Used by:
   - raw-cpuid 11.6.0 (https://github.com/gz/rust-cpuid)
     Source: https://crates.io/api/v1/crates/raw-cpuid/11.6.0/download
 
@@ -12924,39 +12829,6 @@ Used by:
 The MIT License (MIT)
 
 Copyright (c) 2016 Vladimir Matveev
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-
-================================================================================
-MIT License (MIT)
-Used by:
-  - derive_builder 0.20.2 (https://github.com/colin-kiegel/rust-derive-builder)
-    Source: https://crates.io/api/v1/crates/derive_builder/0.20.2/download
-  - derive_builder_core 0.20.2 (https://github.com/colin-kiegel/rust-derive-builder)
-    Source: https://crates.io/api/v1/crates/derive_builder_core/0.20.2/download
-  - derive_builder_macro 0.20.2 (https://github.com/colin-kiegel/rust-derive-builder)
-    Source: https://crates.io/api/v1/crates/derive_builder_macro/0.20.2/download
-
-The MIT License (MIT)
-
-Copyright (c) 2016 rust-derive-builder contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
