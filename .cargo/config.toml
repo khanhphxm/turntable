@@ -8,6 +8,9 @@ runner = "scripts/run-signed.sh"
 
 
 [env]
-# jemalloc (the app's allocator, see crates/turntable/src/main.rs): one arena, no thread caches, and
-# freed pages go back to the OS within a second, so the footprint follows what is in use.
-JEMALLOC_SYS_WITH_MALLOC_CONF = "narenas:1,tcache:false,dirty_decay_ms:1000,muzzy_decay_ms:0"
+# jemalloc (the app's allocator, see crates/turntable/src/main.rs): one arena, no thread caches.
+# Purge freed pages immediately: decay is allocation-driven, so a one-second decay can leave
+# the last frame's freed pages dirty indefinitely once the app parks. This adds no idle thread
+# or timer. A 30-second idle macOS A/B on compact GPUI arenas saved another 0.73 MiB in
+# App-Specific Tag 15 and physical footprint; cache sizes and rendering are unchanged.
+JEMALLOC_SYS_WITH_MALLOC_CONF = "narenas:1,tcache:false,dirty_decay_ms:0,muzzy_decay_ms:0"
