@@ -109,10 +109,12 @@ jobs:
           tool: cargo-machete@0.9.1
       - name: Clippy, documentation, dependencies, banned patterns
         if: runner.os == 'Linux'
+        env:
+          LINT_PROFILE: ci
         run: scripts/lint.sh clippy docs deps ban
       - name: Platform clippy
         if: runner.os != 'Linux'
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --profile ci -- -D warnings
 
   test:
     name: test (${{ matrix.os }})
