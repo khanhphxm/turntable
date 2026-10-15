@@ -1,31 +1,12 @@
-use rand::Rng;
-use rand_distr::Alphanumeric;
-use vergen_gitcl::{BuildBuilder, Emitter, GitclBuilder};
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let gitcl = GitclBuilder::default()
-        .sha(true) // outputs 'VERGEN_GIT_SHA', and sets the 'short' flag true
-        .commit_date(true) // outputs 'VERGEN_GIT_COMMIT_DATE'
-        .build()?;
-
-    let build = BuildBuilder::default()
-        .build_date(true) // outputs 'VERGEN_BUILD_DATE'
-        .build()?;
-
-    Emitter::default()
-        .add_instructions(&build)?
-        .add_instructions(&gitcl)?
-        .emit()
-        .expect("Unable to generate the cargo keys!");
-    let build_id = match std::env::var("SOURCE_DATE_EPOCH") {
-        Ok(val) => val,
-        Err(_) => rand::rng()
-            .sample_iter(Alphanumeric)
-            .take(8)
-            .map(char::from)
-            .collect(),
-    };
-
-    println!("cargo:rustc-env=LIBRESPOT_BUILD_ID={build_id}");
-    Ok(())
+// Modified by Turntable: the upstream script embedded the enclosing repository's git commit,
+// commit date, build date and a random build ID via vergen, so every commit (and every day)
+// rebuilt librespot-core and everything above it. The values only feed informational strings,
+// so they are fixed (see TURNTABLE.md).
+fn main() {
+    let version = env!("CARGO_PKG_VERSION");
+    println!("cargo:rustc-env=VERGEN_GIT_SHA={version}");
+    println!("cargo:rustc-env=VERGEN_GIT_COMMIT_DATE=unknown");
+    println!("cargo:rustc-env=VERGEN_BUILD_DATE=unknown");
+    println!("cargo:rustc-env=LIBRESPOT_BUILD_ID=turntable");
+    println!("cargo:rerun-if-changed=build.rs");
 }
