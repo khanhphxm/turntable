@@ -81,6 +81,22 @@ IOSurface (7,438,336 bytes), IOAccelerator graphics (5,570,560 bytes) and owned 
 graphics (1,294,336 bytes) were unchanged. System Malloc Small changed by −65,536 bytes;
 the change itself only affects Rust arena allocations.
 
+## Bounded transient peak retention
+
+The compact arenas also release an unused chunk tail after two clears use less
+than a quarter of a peak larger than four chunks. They keep at least two chunks
+of headroom. A similarly oversized destructor-record vector is replaced without
+copying cleared entries. Stable and alternating full/small workloads keep their
+capacity; reopening a formerly large workload grows normally again. Active arena
+scopes still defer both dropping and reclamation. No timer or redraw is added.
+
+Relative to the preceding layout/tree/dealer changes, matched offscreen release
+samples reduced jemalloc dirty footprint by 327,680 bytes on Home, 868,352 on
+Playlist, 917,504 on Liked Songs and 720,896 on Home after navigation. Total
+footprint fell by 0.45–1.05 MiB, with independent system/GPU variation. Regression
+tests cover the two-clear threshold, alternating reuse, destructor execution and
+reclamation of oversized destructor-record storage.
+
 ## Layout capacity after cached frames
 
 `src/taffy.rs` releases Taffy's peak node storage after two consecutive frames

@@ -1,4 +1,4 @@
-// Modified by Turntable: lazily allocate compact arena chunks; see ../TURNTABLE.md.
+// Modified by Turntable: compact lazy arena chunks and bounded peak reuse; see ../TURNTABLE.md.
 
 use std::{
     alloc::{self, handle_alloc_error},
@@ -87,6 +87,7 @@ pub struct Arena {
     elements: Vec<ArenaElement>,
     valid: Rc<Cell<bool>>,
     current_chunk_index: usize,
+    small_clear_count: u8,
     chunk_size: NonZeroUsize,
     scope_depth: usize,
 }
@@ -106,6 +107,7 @@ impl Arena {
             valid: Rc::new(Cell::new(true)),
             current_chunk_index: 0,
             chunk_size,
+            small_clear_count: 0,
             scope_depth: 0,
         }
     }
@@ -157,9 +159,25 @@ impl Arena {
     fn force_clear(&mut self) {
         self.valid.set(false);
         self.valid = Rc::new(Cell::new(true));
+        let element_count = self.elements.len();
+        let used_chunks = (self.current_chunk_index + 1).min(self.chunks.len());
         self.elements.clear();
-        for chunk in self.chunks.iter_mut().take(self.current_chunk_index + 1) {
+        for chunk in self.chunks.iter_mut().take(used_chunks) {
             chunk.reset();
+        }
+        if self.chunks.len() > 4 && used_chunks * 4 < self.chunks.len() {
+            self.small_clear_count += 1;
+        } else {
+            self.small_clear_count = 0;
+        }
+        if self.small_clear_count == 2 {
+            // Retain a little headroom, but not a large page's unused tail.
+            // All values have been dropped and active scopes defer this path.
+            self.chunks.truncate(used_chunks.max(2));
+            if self.elements.capacity() > element_count.max(128) * 4 {
+                self.elements = Vec::with_capacity(element_count.max(128));
+            }
+            self.small_clear_count = 0;
         }
         self.current_chunk_index = 0;
     }
@@ -274,6 +292,61 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use super::*;
+
+    #[test]
+    fn test_arena_reclaims_drop_records_after_dropping_values() {
+        struct DropCounter(Rc<Cell<usize>>);
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        let drops = Rc::new(Cell::new(0));
+        let mut arena = Arena::new(8);
+        for _ in 0..1024 {
+            arena.alloc(|| DropCounter(drops.clone()));
+        }
+        arena.clear();
+        assert_eq!(drops.get(), 1024);
+        for _ in 0..2 {
+            arena.alloc(|| DropCounter(drops.clone()));
+            arena.clear();
+        }
+        assert_eq!(drops.get(), 1026);
+        assert_eq!(arena.capacity(), 16);
+        assert_eq!(arena.elements.capacity(), 128);
+    }
+
+    #[test]
+    fn test_arena_reclaims_peak_after_two_small_clears() {
+        let mut arena = Arena::new(16);
+        for _ in 0..6 {
+            arena.alloc(|| [0u8; 16]);
+        }
+        arena.clear();
+        assert_eq!(arena.capacity(), 96);
+
+        arena.alloc(|| 1u8);
+        arena.clear();
+        assert_eq!(arena.capacity(), 96);
+        arena.alloc(|| 2u8);
+        arena.clear();
+        assert_eq!(arena.capacity(), 32);
+        assert_eq!(*arena.alloc(|| [3u8; 16]), [3; 16]);
+    }
+
+    #[test]
+    fn test_arena_keeps_peak_for_alternating_use() {
+        let mut arena = Arena::new(16);
+        for count in [6, 1, 6, 1, 6] {
+            for _ in 0..count {
+                arena.alloc(|| [0u8; 16]);
+            }
+            arena.clear();
+            assert_eq!(arena.capacity(), 96);
+        }
+    }
 
     #[test]
     fn test_arena() {
