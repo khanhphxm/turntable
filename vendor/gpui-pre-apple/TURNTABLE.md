@@ -171,6 +171,54 @@ one of 1,824,000 pixels by one channel level. Tests exercise small and oversized
 monochrome allocations and last-tile release on all three backends.
 
 
+### Procedural quad vertices
+
+The Metal renderer now derives the four unit-quad corners from `vertex_id` and
+draws a triangle strip, matching the existing wgpu and DirectX implementation.
+Quads, shadows, underlines, monochrome/color sprites, path resolve sprites and
+video surfaces use the same corners and triangles. Raw path rasterization
+vertices remain triangle lists. There is no replacement inline buffer or CPU
+copy. The removed six-vertex, 48-byte buffer had pinned an entire 131,072-byte
+Metal suballocator page; its field, packing helper, bindings and shader inputs
+are removed. The exported `PointF` alias remains the path vertex's float point.
+
+Back-to-back signed native Home measurements, 1920×950 at 1×, 30 seconds,
+all 0.0% idle CPU:
+
+| Category | Original baseline | With unit buffer | Procedural corners |
+| --- | ---: | ---: | ---: |
+| Physical footprint | 50,332,632 | 44,024,792 | 43,615,192 |
+| IOAccelerator graphics | 5,570,560 | 3,719,168 | 3,588,096 |
+| IOSurface | 7,438,336 | 7,438,336 | 7,438,336 |
+| Owned-unmapped graphics | 1,294,336 | 0 | 0 |
+| Malloc Small | 13,254,656 | 13,828,096 | 13,680,640 |
+| App-Specific Tag 15 | 12,812,288 | 9,093,120 | 8,912,896 |
+
+This saves **131,072 graphics bytes (128 KiB)**; the paired total fell 409,600
+bytes, including independent heap-residency differences. Captured native Home
+pixels before/after were identical. A preceding footprint pair with two charged
+drawables was discarded rather than attributing surface retirement to this
+change. No new cross-platform port is needed: those backends already use
+procedural strips.
+
+### Remaining charged graphics
+
+The final idle Home's 3,588,096 graphics bytes comprise two 512×512 BGRA pages
+(2,129,920), one 256×256 BGRA page (278,528), one 248×248 BGRA page (278,528),
+one 248×106 BGRA page (147,456), two 256×256 A8 pages (163,840), the reusable
+scene buffer (131,072), and the shared sampler/shader/device/deferred heaps
+listed above (458,752). No path or video textures are live. The display still
+has one full-resolution 7,438,336-byte IOSurface.
+
+These four Round-2 changes remove **1,949,696 graphics bytes (1.859 MiB)** from
+the integrated starting point; the original baseline additionally retained the
+32-KiB command tables. Further atlas reduction would need measured page growth
+or compaction that preserves live coordinates, cached-scene bindings and
+in-flight resources, not eviction of still-referenced tiles or lower image
+resolution. Instrumentation showed that the seven pipeline creations after the
+first did not increase `MTLDevice.currentAllocatedSize`; lazy creation has not
+established an additional footprint reduction.
+
 ## Idle drawable pools
 
 On macOS, the display-link source clears the backing `CAMetalLayer`'s [nullable `device`](https://developer.apple.com/documentation/quartzcore/cametallayer/device) when its existing idle-frame tail parks. Core Animation retains the last presented image, while the layer releases the pool's other IOSurfaces. No image readback, copy, replacement layer, additional surface, polling timer, or change to the three-drawable limit is required. The renderer restores its original device immediately before the next `nextDrawable`. The backing layer and its application-owned animation sublayers keep their identity.

@@ -1,4 +1,4 @@
-// Modified by Turntable: GPU resource lifetime and sampling tests; see ../TURNTABLE.md.
+// Modified by Turntable: procedural quad vertices and GPU resource lifetime; see ../TURNTABLE.md.
 // Idle Metal command storage and excess instance buffers retire with the drawable pool.
 
 use crate::metal_atlas::MetalAtlas;
@@ -7,7 +7,7 @@ use block2::RcBlock;
 use core_graphics::geometry::CGSize;
 use gpui::{
     AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
-    PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
+    PrimitiveBatch, ScaledPixels, Scene, Size, size,
 };
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 use image::RgbaImage;
@@ -149,7 +149,6 @@ pub struct MetalRenderer {
     monochrome_sprites_pipeline_state: metal::RenderPipelineState,
     polychrome_sprites_pipeline_state: metal::RenderPipelineState,
     surfaces_pipeline_state: metal::RenderPipelineState,
-    unit_vertices: metal::Buffer,
     #[allow(clippy::arc_with_non_send_sync)]
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
     sprite_atlas: Arc<MetalAtlas>,
@@ -166,7 +165,7 @@ pub struct MetalRenderer {
 #[repr(C)]
 pub struct PathRasterizationVertex {
     pub xy_position: Point<ScaledPixels>,
-    pub st_position: Point<f32>,
+    pub st_position: PointF,
     pub color: Background,
     pub bounds: Bounds<ScaledPixels>,
 }
@@ -282,13 +281,6 @@ impl MetalRenderer {
             .new_library_with_data(SHADERS_METALLIB)
             .expect("error building metal library");
 
-        fn to_float2_bits(point: PointF) -> u64 {
-            let mut output = point.y.to_bits() as u64;
-            output <<= 32;
-            output |= point.x.to_bits() as u64;
-            output
-        }
-
         // Shared memory can be used only if CPU and GPU share the same memory space.
         // https://developer.apple.com/documentation/metal/setting-resource-storage-modes
         // iOS does not support managed resources. Its simulator may report a
@@ -299,25 +291,6 @@ impl MetalRenderer {
         // allocating backing store in system memory.
         // https://developer.apple.com/documentation/metal/mtlgpufamily
         let is_apple_gpu = device.supports_family(MTLGPUFamily::Apple1);
-
-        let unit_vertices = [
-            to_float2_bits(point(0., 0.)),
-            to_float2_bits(point(1., 0.)),
-            to_float2_bits(point(0., 1.)),
-            to_float2_bits(point(0., 1.)),
-            to_float2_bits(point(1., 0.)),
-            to_float2_bits(point(1., 1.)),
-        ];
-        let unit_vertices = device.new_buffer_with_data(
-            unit_vertices.as_ptr() as *const c_void,
-            mem::size_of_val(&unit_vertices) as u64,
-            if is_unified_memory {
-                MTLResourceOptions::StorageModeShared
-                    | MTLResourceOptions::CPUCacheModeWriteCombined
-            } else {
-                MTLResourceOptions::StorageModeManaged
-            },
-        );
 
         let paths_rasterization_pipeline_state = build_path_rasterization_pipeline_state(
             &device,
@@ -426,7 +399,6 @@ impl MetalRenderer {
             monochrome_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
             surfaces_pipeline_state,
-            unit_vertices,
             instance_buffer_pool,
             sprite_atlas,
             core_video_texture_cache,
@@ -952,11 +924,6 @@ impl MetalRenderer {
 
         command_encoder.set_render_pipeline_state(&self.shadows_pipeline_state);
         command_encoder.set_vertex_buffer(
-            ShadowInputIndex::Vertices as u64,
-            Some(&self.unit_vertices),
-            0,
-        );
-        command_encoder.set_vertex_buffer(
             ShadowInputIndex::Shadows as u64,
             Some(&instance_bindings.shadows.buffer),
             instance_bindings.shadows.offset as u64,
@@ -973,9 +940,9 @@ impl MetalRenderer {
         );
 
         command_encoder.draw_primitives_instanced_base_instance(
-            metal::MTLPrimitiveType::Triangle,
+            metal::MTLPrimitiveType::TriangleStrip,
             0,
-            6,
+            4,
             shadows.len() as u64,
             shadows.start as u64,
         );
@@ -994,11 +961,6 @@ impl MetalRenderer {
 
         command_encoder.set_render_pipeline_state(&self.quads_pipeline_state);
         command_encoder.set_vertex_buffer(
-            QuadInputIndex::Vertices as u64,
-            Some(&self.unit_vertices),
-            0,
-        );
-        command_encoder.set_vertex_buffer(
             QuadInputIndex::Quads as u64,
             Some(&instance_bindings.quads.buffer),
             instance_bindings.quads.offset as u64,
@@ -1015,9 +977,9 @@ impl MetalRenderer {
         );
 
         command_encoder.draw_primitives_instanced_base_instance(
-            metal::MTLPrimitiveType::Triangle,
+            metal::MTLPrimitiveType::TriangleStrip,
             0,
-            6,
+            4,
             quads.len() as u64,
             quads.start as u64,
         );
@@ -1039,11 +1001,6 @@ impl MetalRenderer {
             .context("missing path intermediate texture")?;
 
         command_encoder.set_render_pipeline_state(&self.path_sprites_pipeline_state);
-        command_encoder.set_vertex_buffer(
-            SpriteInputIndex::Vertices as u64,
-            Some(&self.unit_vertices),
-            0,
-        );
         command_encoder.set_vertex_bytes(
             SpriteInputIndex::ViewportSize as u64,
             mem::size_of_val(&viewport_size) as u64,
@@ -1086,9 +1043,9 @@ impl MetalRenderer {
         );
 
         command_encoder.draw_primitives_instanced(
-            metal::MTLPrimitiveType::Triangle,
+            metal::MTLPrimitiveType::TriangleStrip,
             0,
-            6,
+            4,
             sprites.len() as u64,
         );
         Ok(())
@@ -1107,11 +1064,6 @@ impl MetalRenderer {
 
         command_encoder.set_render_pipeline_state(&self.underlines_pipeline_state);
         command_encoder.set_vertex_buffer(
-            UnderlineInputIndex::Vertices as u64,
-            Some(&self.unit_vertices),
-            0,
-        );
-        command_encoder.set_vertex_buffer(
             UnderlineInputIndex::Underlines as u64,
             Some(&instance_bindings.underlines.buffer),
             instance_bindings.underlines.offset as u64,
@@ -1128,9 +1080,9 @@ impl MetalRenderer {
         );
 
         command_encoder.draw_primitives_instanced_base_instance(
-            metal::MTLPrimitiveType::Triangle,
+            metal::MTLPrimitiveType::TriangleStrip,
             0,
-            6,
+            4,
             underlines.len() as u64,
             underlines.start as u64,
         );
@@ -1157,11 +1109,6 @@ impl MetalRenderer {
         );
         command_encoder.set_render_pipeline_state(&self.monochrome_sprites_pipeline_state);
         command_encoder.set_vertex_buffer(
-            SpriteInputIndex::Vertices as u64,
-            Some(&self.unit_vertices),
-            0,
-        );
-        command_encoder.set_vertex_buffer(
             SpriteInputIndex::Sprites as u64,
             Some(&instance_bindings.monochrome_sprites.buffer),
             instance_bindings.monochrome_sprites.offset as u64,
@@ -1184,9 +1131,9 @@ impl MetalRenderer {
         command_encoder.set_fragment_texture(SpriteInputIndex::AtlasTexture as u64, Some(&texture));
 
         command_encoder.draw_primitives_instanced_base_instance(
-            metal::MTLPrimitiveType::Triangle,
+            metal::MTLPrimitiveType::TriangleStrip,
             0,
-            6,
+            4,
             sprites.len() as u64,
             sprites.start as u64,
         );
@@ -1213,11 +1160,6 @@ impl MetalRenderer {
         );
         command_encoder.set_render_pipeline_state(&self.polychrome_sprites_pipeline_state);
         command_encoder.set_vertex_buffer(
-            SpriteInputIndex::Vertices as u64,
-            Some(&self.unit_vertices),
-            0,
-        );
-        command_encoder.set_vertex_buffer(
             SpriteInputIndex::Sprites as u64,
             Some(&instance_bindings.polychrome_sprites.buffer),
             instance_bindings.polychrome_sprites.offset as u64,
@@ -1240,9 +1182,9 @@ impl MetalRenderer {
         command_encoder.set_fragment_texture(SpriteInputIndex::AtlasTexture as u64, Some(&texture));
 
         command_encoder.draw_primitives_instanced_base_instance(
-            metal::MTLPrimitiveType::Triangle,
+            metal::MTLPrimitiveType::TriangleStrip,
             0,
-            6,
+            4,
             sprites.len() as u64,
             sprites.start as u64,
         );
@@ -1261,11 +1203,6 @@ impl MetalRenderer {
         }
 
         command_encoder.set_render_pipeline_state(&self.surfaces_pipeline_state);
-        command_encoder.set_vertex_buffer(
-            SurfaceInputIndex::Vertices as u64,
-            Some(&self.unit_vertices),
-            0,
-        );
         command_encoder.set_vertex_buffer(
             SurfaceInputIndex::Surfaces as u64,
             Some(&instance_bindings.surfaces.buffer),
@@ -1334,9 +1271,9 @@ impl MetalRenderer {
             });
 
             command_encoder.draw_primitives_instanced_base_instance(
-                metal::MTLPrimitiveType::Triangle,
+                metal::MTLPrimitiveType::TriangleStrip,
                 0,
-                6,
+                4,
                 1,
                 (first_surface + index) as u64,
             );
@@ -1675,28 +1612,24 @@ impl InstanceBufferWriter {
 
 #[repr(C)]
 enum ShadowInputIndex {
-    Vertices = 0,
     Shadows = 1,
     ViewportSize = 2,
 }
 
 #[repr(C)]
 enum QuadInputIndex {
-    Vertices = 0,
     Quads = 1,
     ViewportSize = 2,
 }
 
 #[repr(C)]
 enum UnderlineInputIndex {
-    Vertices = 0,
     Underlines = 1,
     ViewportSize = 2,
 }
 
 #[repr(C)]
 enum SpriteInputIndex {
-    Vertices = 0,
     Sprites = 1,
     ViewportSize = 2,
     AtlasTextureSize = 3,
@@ -1705,7 +1638,6 @@ enum SpriteInputIndex {
 
 #[repr(C)]
 enum SurfaceInputIndex {
-    Vertices = 0,
     Surfaces = 1,
     ViewportSize = 2,
     TextureSize = 3,
@@ -1768,6 +1700,7 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::point;
     use objc2_core_foundation::{CFDictionary, CFType};
     use objc2_core_video::{
         CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane,
