@@ -2,10 +2,12 @@ name: Rust cache
 description: >
   Caches the Cargo registry and compiler outputs. rust-cache alone drops the vendored path
   crates from its target cache (they sit inside the workspace), so gpui and librespot rebuilt on
-  every run; sccache caches each rustc output by content instead, path crates included.
+  every run; sccache caches each rustc output by content instead, path crates included. Its
+  directory travels as one cache entry: sccache's own per-object GitHub cache backend made a cold
+  build take 20+ minutes.
 inputs:
   key:
-    description: Registry cache key; the registry is the same for every job on one OS.
+    description: Cache key prefix; the registry is the same for every job on one OS.
     required: true
 runs:
   using: composite
@@ -18,5 +20,19 @@ runs:
     - uses: mozilla-actions/sccache-action@v0.0.11
     - shell: bash
       run: |
-        echo SCCACHE_GHA_ENABLED=true >> "$GITHUB_ENV"
+        echo "SCCACHE_DIR=$RUNNER_TEMP/sccache" >> "$GITHUB_ENV"
+        echo SCCACHE_CACHE_SIZE=2G >> "$GITHUB_ENV"
         echo RUSTC_WRAPPER=sccache >> "$GITHUB_ENV"
+    # Only main saves (once per dependency set); everything else restores the closest match.
+    - if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}/sccache
+        key: sccache-${{ inputs.key }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'vendor/**') }}
+        restore-keys: sccache-${{ inputs.key }}-${{ github.job }}-
+    - if: github.event_name != 'push' || github.ref != 'refs/heads/main'
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ runner.temp }}/sccache
+        key: sccache-${{ inputs.key }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'vendor/**') }}
+        restore-keys: sccache-${{ inputs.key }}-${{ github.job }}-
