@@ -82,7 +82,7 @@ jobs:
       matrix:
         include:
           - os: macos
-            runner: macos-14
+            runner: macos-26
           - os: linux
             runner: ubuntu-24.04
           - os: windows
@@ -99,13 +99,14 @@ jobs:
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: scripts/install-linux-deps.sh
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-cache
         with:
-          shared-key: ci-lint-${{ matrix.os }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          key: lint-${{ matrix.os }}
       - name: Install dependency auditor
         if: runner.os == 'Linux'
-        run: cargo install cargo-machete --version 0.9.1 --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete@0.9.1
       - name: Clippy, documentation, dependencies, banned patterns
         if: runner.os == 'Linux'
         run: scripts/lint.sh clippy docs deps ban
@@ -121,7 +122,7 @@ jobs:
       matrix:
         include:
           - os: macos
-            runner: macos-14
+            runner: macos-26
           - os: linux
             runner: ubuntu-24.04
           - os: windows
@@ -136,24 +137,28 @@ jobs:
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: scripts/install-linux-deps.sh
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/rust-cache
         with:
-          shared-key: ci-test-${{ matrix.os }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          key: test-${{ matrix.os }}
       # Cargo runs workspace tests, not dependency/backend tests needing a native desktop.
       # Keep the default ignored-test behavior for manual benchmarks and the native tray test.
-      - run: cargo test --locked --workspace --all-targets
+      # rust-lld links Windows test binaries faster than MSVC's link.exe.
+      - env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-Clinker=rust-lld.exe' || '' }}
+        run: cargo test --locked --workspace --all-targets --profile ci
 
   build:
     name: build (${{ matrix.os }})
-    # Release builds are slow; only spend them once lint and tests pass everywhere.
-    needs: [lint, test]
+    # Fat-LTO release builds take 10-20 minutes; pull requests skip them, main and the merge
+    # queue keep proving the shipped configuration builds.
+    needs: fmt
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos
-            runner: macos-14
+            runner: macos-26
             target: aarch64-apple-darwin
           - os: linux
             runner: ubuntu-24.04
@@ -173,10 +178,6 @@ jobs:
       - name: Linux native dependencies
         if: runner.os == 'Linux'
         run: scripts/install-linux-deps.sh
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci-build-${{ matrix.os }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Release build including vendored path patches
         env:
           RUST_TARGET: ${{ matrix.target }}

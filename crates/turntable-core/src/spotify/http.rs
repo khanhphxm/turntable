@@ -403,7 +403,10 @@ pub fn urlencode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-	use std::{sync::Arc, thread};
+	use std::{
+		sync::{Arc, mpsc},
+		thread,
+	};
 
 	use super::*;
 
@@ -463,40 +466,41 @@ mod tests {
 		assert_eq!(message, "Invalid client");
 	}
 
+	/// Runs `enter` on another thread once the caller is ready; the receiver hears when it got in.
+	fn enter_later(gate: &Arc<Gate>, priority: Priority) -> (mpsc::Receiver<()>, thread::JoinHandle<()>) {
+		let (started, entered) = (mpsc::channel(), mpsc::channel());
+		let gate = gate.clone();
+		let handle = thread::spawn(move || {
+			started.0.send(()).unwrap();
+			drop(gate.enter(priority).unwrap());
+			entered.0.send(()).unwrap();
+		});
+		started.1.recv().unwrap();
+		(entered.1, handle)
+	}
+
 	#[test]
 	fn a_third_request_waits_for_a_slot_and_playback_never_does() {
 		let gate = Arc::new(Gate::new(2, 1));
 		let (first, _second) = (gate.enter(Priority::Normal).unwrap(), gate.enter(Priority::Normal).unwrap());
-		let waiting = {
-			let gate = gate.clone();
-			thread::spawn(move || {
-				let started = Instant::now();
-				drop(gate.enter(Priority::Normal).unwrap());
-				started.elapsed()
-			})
-		};
-		thread::sleep(Duration::from_millis(150));
+		let (entered, waiting) = enter_later(&gate, Priority::Normal);
+		assert!(entered.recv_timeout(Duration::from_millis(100)).is_err(), "no slot is free yet");
 		assert!(gate.enter(Priority::Player).is_ok(), "playback is not held back");
 		drop(first);
-		assert!(waiting.join().unwrap() >= Duration::from_millis(140), "it waited until a slot came free");
+		entered.recv().expect("it gets in once a slot comes free");
+		waiting.join().unwrap();
 	}
 
 	#[test]
 	fn speculative_requests_leave_slots_to_the_ones_the_user_waits_for() {
 		let gate = Arc::new(Gate::new(3, 1));
-		let _idle = gate.enter(Priority::Idle).unwrap();
-		let second = {
-			let gate = gate.clone();
-			thread::spawn(move || {
-				let started = Instant::now();
-				drop(gate.enter(Priority::Idle).unwrap());
-				started.elapsed()
-			})
-		};
-		thread::sleep(Duration::from_millis(100));
+		let idle = gate.enter(Priority::Idle).unwrap();
+		let (entered, second) = enter_later(&gate, Priority::Idle);
+		assert!(entered.recv_timeout(Duration::from_millis(100)).is_err(), "a second speculative one waits for the first");
 		assert!(gate.enter(Priority::Normal).is_ok(), "a normal request still finds a slot");
-		drop(_idle);
-		assert!(second.join().unwrap() >= Duration::from_millis(90), "a second speculative one waited for the first");
+		drop(idle);
+		entered.recv().expect("it gets in once the first is done");
+		second.join().unwrap();
 	}
 
 	#[test]

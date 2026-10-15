@@ -50,7 +50,7 @@ jobs:
   macos:
     name: macOS universal
     needs: version
-    runs-on: macos-14
+    runs-on: macos-26
     environment: release
     timeout-minutes: 120
     env:
