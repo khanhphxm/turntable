@@ -330,7 +330,7 @@ mod scrolling {
 			delta: ScrollDelta::Lines(point(0., -1.)),
 			..Default::default()
 		});
-		std::thread::sleep(std::time::Duration::from_millis(8));
+		cx.executor().advance_clock(std::time::Duration::from_millis(8));
 		frame(&mut cx);
 		let first = offset(&mut cx);
 		assert!(first > px(14.) && first < px(34.), "the first frame moves part of the notch: {first:?}");
@@ -338,7 +338,7 @@ mod scrolling {
 			if (offset(&mut cx) - px(34.)).abs() < px(0.01) {
 				break;
 			}
-			std::thread::sleep(std::time::Duration::from_millis(8));
+			cx.executor().advance_clock(std::time::Duration::from_millis(8));
 			cx.update(|window, cx| {
 				window.simulate_next_frame(cx);
 			});
