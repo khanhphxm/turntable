@@ -1,3 +1,5 @@
+// Modified by Turntable: store child arrays only for internal nodes; see ../TURNTABLE.md.
+
 use crate::{Bounds, Half};
 use std::{
     cmp,
@@ -24,6 +26,8 @@ where
 {
     /// All nodes stored contiguously for cache efficiency.
     nodes: Vec<Node<U>>,
+    /// Child arrays belong only to internal nodes, not to every leaf.
+    internal_children: Vec<NodeChildren>,
     /// Index of the root node, if any.
     root: Option<usize>,
     /// Index of the leaf with the highest ordering (for fast-path lookups).
@@ -57,8 +61,8 @@ enum NodeKind {
     },
     /// Internal node with children.
     Internal {
-        /// Indices of child nodes (2 to MAX_CHILDREN).
-        children: NodeChildren,
+        /// Index into the tree's internal child arrays.
+        children: usize,
     },
 }
 
@@ -107,6 +111,7 @@ where
     /// Clears all nodes from the tree.
     pub fn clear(&mut self) {
         self.nodes.clear();
+        self.internal_children.clear();
         self.root = None;
         self.max_leaf = None;
         self.insert_path.clear();
@@ -175,6 +180,7 @@ where
                     max_found = cmp::max(max_found, *order);
                 }
                 NodeKind::Internal { children } => {
+                    let children = &self.internal_children[*children];
                     // Children are maintained with highest max_order at the end.
                     // Push in forward order to highest (last) is popped first.
                     self.search_stack.extend(
@@ -223,11 +229,15 @@ where
                 children.push(root_idx);
             }
 
+            let children_index = self.internal_children.len();
+            self.internal_children.push(children);
             let new_root_idx = self.nodes.len();
             self.nodes.push(Node {
                 bounds: root_bounds.union(&bounds),
                 max_order: cmp::max(root_order, order),
-                kind: NodeKind::Internal { children },
+                kind: NodeKind::Internal {
+                    children: children_index,
+                },
             });
             self.root = Some(new_root_idx);
             return new_leaf_idx;
@@ -242,6 +252,7 @@ where
             let NodeKind::Internal { children } = &current.kind else {
                 unreachable!("Should only traverse internal nodes");
             };
+            let children = &self.internal_children[*children];
 
             self.insert_path.push(current_idx);
 
@@ -269,6 +280,7 @@ where
                     let node = &mut self.nodes[current_idx];
 
                     if let NodeKind::Internal { children } = &mut node.kind {
+                        let children = &mut self.internal_children[*children];
                         children.push(new_leaf_idx);
                         // Swap new leaf only if it has the highest max_order
                         if order <= node.max_order {
@@ -295,19 +307,22 @@ where
                         new_children.push(best_child_idx);
                     }
 
+                    let children_index = self.internal_children.len();
+                    self.internal_children.push(new_children);
                     let new_internal_idx = self.nodes.len();
                     let new_internal_max = cmp::max(sibling_order, order);
                     self.nodes.push(Node {
                         bounds: sibling_bounds.union(&bounds),
                         max_order: new_internal_max,
                         kind: NodeKind::Internal {
-                            children: new_children,
+                            children: children_index,
                         },
                     });
 
                     // Replace the leaf with the new internal in parent
                     let parent = &mut self.nodes[current_idx];
                     if let NodeKind::Internal { children } = &mut parent.kind {
+                        let children = &mut self.internal_children[*children];
                         let children_len = children.len();
 
                         children.indices[best_child_pos] = new_internal_idx;
@@ -338,6 +353,7 @@ where
                 // Swap updated child to end (skip first iteration since the invariant is already handled by previous cases)
                 if let Some(child_idx) = updated_child_idx {
                     if let NodeKind::Internal { children } = &mut node.kind {
+                        let children = &mut self.internal_children[*children];
                         if let Some(pos) = children.as_slice().iter().position(|&c| c == child_idx)
                         {
                             let last = children.len() - 1;
@@ -363,6 +379,7 @@ where
     fn default() -> Self {
         BoundsTree {
             nodes: Vec::new(),
+            internal_children: Vec::new(),
             root: None,
             max_leaf: None,
             insert_path: Vec::new(),
@@ -376,6 +393,46 @@ mod tests {
     use super::*;
     use crate::{Bounds, Point, Size};
     use rand::{Rng, SeedableRng};
+
+    #[test]
+    fn leaves_do_not_reserve_internal_child_arrays() {
+        assert!(
+            std::mem::size_of::<Node<f32>>()
+                <= std::mem::size_of::<Bounds<f32>>()
+                    + std::mem::size_of::<u32>()
+                    + std::mem::size_of::<Option<usize>>()
+                    + std::mem::align_of::<Node<f32>>()
+        );
+    }
+
+    #[test]
+    fn clearing_reuses_internal_child_storage_without_stale_links() {
+        let mut tree = BoundsTree::default();
+        for round in 0..3 {
+            let mut expected: Vec<(Bounds<f32>, u32)> = Vec::new();
+            for index in 0..512 {
+                let bounds = Bounds {
+                    origin: Point {
+                        x: ((index * 7 + round * 11) % 43) as f32,
+                        y: ((index * 13 + round * 3) % 31) as f32,
+                    },
+                    size: Size { width: 5.0, height: 9.0 },
+                };
+                let ordering = expected
+                    .iter()
+                    .filter_map(|(previous, order)| previous.intersects(&bounds).then_some(*order))
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                assert_eq!(tree.insert(bounds), ordering);
+                expected.push((bounds, ordering));
+            }
+            assert!(tree.internal_children.len() > 1);
+            tree.clear();
+            assert!(tree.nodes.is_empty());
+            assert!(tree.internal_children.is_empty());
+        }
+    }
 
     #[test]
     fn test_insert() {

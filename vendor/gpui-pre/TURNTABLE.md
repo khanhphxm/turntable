@@ -103,6 +103,22 @@ not include the native drawable or establish a new native idle CPU result.
 Regression tests cover the two-small-frame threshold, stable/alternating reuse
 and preservation of fractional layouts after replacement.
 
+## Compact bounds-tree leaves
+
+`src/bounds_tree.rs` keeps its fixed child arrays in a separate reusable vector,
+indexed only by internal nodes. Leaves no longer reserve twelve child slots just
+because they share an enum with internal nodes. Tree insertion, overlap ordering,
+traversal and GPU primitives are unchanged; clearing resets both vectors without
+discarding their reusable capacity. This is shared across all renderers/platforms.
+
+In the same offscreen workload, relative to the layout-capacity change, jemalloc
+dirty footprint fell by 180,224 bytes on Playlist, 147,456 on Liked Songs and
+180,224 on Home after navigation. Total footprint fell by 0.47–0.59 MiB, with
+system-malloc/GPU variation not attributed to this CPU-only tree change. The
+initial Home pair had different asynchronously loaded artist/artwork populations
+and is not a comparable sample. Regression coverage retains the existing random
+overlap oracle and adds leaf-size and repeated large-tree clear/reuse checks.
+
 ## Regenerable image pixels
 
 `RenderImage::new_with_reloader` accepts an already-decoded single BGRA frame and a
