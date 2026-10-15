@@ -7977,7 +7977,7 @@ dependencies = [
  "tikv-jemallocator",
  "tray-icon",
  "turntable-core",
- "windows 0.61.3",
+ "windows 0.62.2",
  "winreg",
  "x11rb 0.14.0",
 ]
@@ -8008,7 +8008,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "ureq",
- "windows 0.61.3",
+ "windows 0.62.2",
 ]
 
 [[package]]
