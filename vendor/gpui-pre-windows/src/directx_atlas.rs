@@ -1,5 +1,5 @@
-// Turntable modification: compact glyph pages and dedicated large artwork; see ../TURNTABLE.md.
-use etagere::BucketedAtlasAllocator;
+// Modified by Turntable: compact glyph pages, adaptive color sizing and exact packing; see ../TURNTABLE.md.
+use guillotiere::AtlasAllocator;
 use parking_lot::Mutex;
 use windows::Win32::Graphics::{
     Direct3D11::{
@@ -27,10 +27,9 @@ struct DirectXAtlasTextures {
 struct DirectXAtlasTexture {
     id: AtlasTextureId,
     bytes_per_pixel: u32,
-    allocator: BucketedAtlasAllocator,
+    allocator: AtlasAllocator,
     texture: ID3D11Texture2D,
     view: [Option<ID3D11ShaderResourceView>; 1],
-    live_atlas_keys: u32,
 }
 
 impl DirectXAtlas {
@@ -120,9 +119,8 @@ impl AtlasBackend for DirectXAtlasTextures {
         };
 
         if let Some(mut texture) = texture_slot.take() {
-            texture.allocator.deallocate(tile.tile_id.into());
-            texture.decrement_ref_count();
-            if texture.is_unreferenced() {
+            texture.allocator.deallocate(guillotiere::AllocId::deserialize(tile.tile_id.0));
+            if texture.allocator.is_empty() {
                 textures.free_list.push(texture.id.index as usize);
             } else {
                 *texture_slot = Some(texture);
@@ -166,6 +164,12 @@ impl DirectXAtlasTextures {
             width: DevicePixels(512),
             height: DevicePixels(512),
         };
+        // Small color tiles use half-size pages; medium tiles can fit three
+        // across a shared page, while larger tiles receive exact backing.
+        const SMALL_ATLAS_SIZE: Size<DevicePixels> = Size {
+            width: DevicePixels(256),
+            height: DevicePixels(256),
+        };
         // Max texture size for DirectX. See:
         // https://learn.microsoft.com/en-us/windows/win32/direct3d11/overviews-direct3d-11-resources-limits
         const MAX_ATLAS_SIZE: Size<DevicePixels> = Size {
@@ -173,10 +177,17 @@ impl DirectXAtlasTextures {
             height: DevicePixels(16384),
         };
         let min_size = min_size.min(&MAX_ATLAS_SIZE);
-        let size = if kind == AtlasTextureKind::Polychrome
-            && (min_size.width.0 > 256 || min_size.height.0 > 256)
-        {
-            min_size
+        let size = if kind == AtlasTextureKind::Polychrome {
+            let edge = min_size.width.0.max(min_size.height.0);
+            if edge > DEFAULT_ATLAS_SIZE.width.0 / 3 {
+                min_size
+            } else if edge <= SMALL_ATLAS_SIZE.width.0 / 2 {
+                min_size.max(&SMALL_ATLAS_SIZE)
+            } else {
+                min_size.max(&DEFAULT_ATLAS_SIZE)
+            }
+        } else if kind == AtlasTextureKind::Monochrome {
+            min_size.max(&SMALL_ATLAS_SIZE)
         } else {
             min_size.max(&DEFAULT_ATLAS_SIZE)
         };
@@ -244,10 +255,9 @@ impl DirectXAtlasTextures {
                 kind,
             },
             bytes_per_pixel,
-            allocator: etagere::BucketedAtlasAllocator::new(device_size_to_etagere(size)),
+            allocator: AtlasAllocator::new(device_size_to_guillotiere(size)),
             texture,
             view,
-            live_atlas_keys: 0,
         };
         if let Some(ix) = index {
             texture_list.textures[ix] = Some(atlas_texture);
@@ -270,17 +280,16 @@ impl DirectXAtlasTextures {
 
 impl DirectXAtlasTexture {
     fn allocate(&mut self, size: Size<DevicePixels>) -> Option<AtlasTile> {
-        let allocation = self.allocator.allocate(device_size_to_etagere(size))?;
+        let allocation = self.allocator.allocate(device_size_to_guillotiere(size))?;
         let tile = AtlasTile {
             texture_id: self.id,
-            tile_id: allocation.id.into(),
+            tile_id: gpui::TileId(allocation.id.serialize()),
             bounds: Bounds {
-                origin: etagere_point_to_device(allocation.rectangle.min),
+                origin: guillotiere_point_to_device(allocation.rectangle.min),
                 size,
             },
             padding: 0,
         };
-        self.live_atlas_keys += 1;
         Some(tile)
     }
 
@@ -326,21 +335,13 @@ impl DirectXAtlasTexture {
             );
         }
     }
-
-    fn decrement_ref_count(&mut self) {
-        self.live_atlas_keys -= 1;
-    }
-
-    fn is_unreferenced(&mut self) -> bool {
-        self.live_atlas_keys == 0
-    }
 }
 
-fn device_size_to_etagere(size: Size<DevicePixels>) -> etagere::Size {
-    etagere::Size::new(size.width.into(), size.height.into())
+fn device_size_to_guillotiere(size: Size<DevicePixels>) -> guillotiere::Size {
+    guillotiere::Size::new(size.width.into(), size.height.into())
 }
 
-fn etagere_point_to_device(value: etagere::Point) -> Point<DevicePixels> {
+fn guillotiere_point_to_device(value: guillotiere::Point) -> Point<DevicePixels> {
     Point {
         x: DevicePixels::from(value.x),
         y: DevicePixels::from(value.y),
@@ -404,8 +405,8 @@ mod tests {
         };
 
         let small = Size {
-            width: DevicePixels(64),
-            height: DevicePixels(64),
+            width: DevicePixels(164),
+            height: DevicePixels(164),
         };
         let big = Size {
             width: DevicePixels(256),
@@ -427,6 +428,23 @@ mod tests {
     }
 
     #[test]
+    fn test_image_tiles_pack_without_shelf_padding() {
+        let atlas = create_atlas().expect("WARP device");
+        let size = Size { width: DevicePixels(164), height: DevicePixels(164) };
+        let tiles: Vec<_> = (0..9)
+            .map(|id| insert_tile(&atlas, make_image_key(id), size))
+            .collect();
+        assert!(tiles.iter().all(|tile| tile.texture_id == tiles[0].texture_id));
+
+        // Reclaim one rectangle even while its neighbors keep their page alive.
+        atlas.remove(&make_image_key(1));
+        let replacement = insert_tile(&atlas, make_image_key(9), size);
+        assert_eq!(replacement.texture_id, tiles[0].texture_id);
+        assert_eq!(replacement.bounds, tiles[1].bounds);
+        assert!(atlas.get_texture_view(tiles[0].texture_id).is_some());
+    }
+
+    #[test]
     fn test_small_images_share_compact_pages() {
         let atlas = create_atlas().expect("WARP device");
         let size = Size { width: DevicePixels(128), height: DevicePixels(128) };
@@ -437,7 +455,29 @@ mod tests {
         let texture = lock.backend.texture(first.texture_id).unwrap();
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { texture.texture.GetDesc(&mut desc) };
-        assert_eq!((desc.Width, desc.Height), (512, 512));
+        assert_eq!((desc.Width, desc.Height), (256, 256));
+    }
+
+    #[test]
+    fn test_monochrome_pages_are_compact_without_limiting_tile_size() {
+        let atlas = create_atlas().expect("WARP device");
+        for (width, height, page_width, page_height) in [(64, 64, 256, 256), (320, 144, 320, 256)] {
+            let size = Size { width: DevicePixels(width), height: DevicePixels(height) };
+            let key = AtlasKey::Svg(gpui::RenderSvgParams { path: "mono-page-size-test".into(), size });
+            let tile = atlas.get_or_insert_with(key.clone(), &mut || {
+                Ok(Some((size, Cow::Owned(vec![0; width as usize * height as usize]))))
+            }).unwrap().unwrap();
+            {
+                let lock = atlas.0.lock();
+                let texture = lock.backend.texture(tile.texture_id).unwrap();
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                unsafe { texture.texture.GetDesc(&mut desc) };
+                assert_eq!((desc.Width, desc.Height), (page_width as u32, page_height as u32));
+                assert_eq!(desc.Format, DXGI_FORMAT_R8_UNORM);
+            }
+            atlas.remove(&key);
+            assert!(atlas.get_texture_view(tile.texture_id).is_none());
+        }
     }
 
     #[test]
@@ -465,5 +505,27 @@ mod tests {
         atlas.remove(&key);
         assert!(atlas.get_texture_view(large.texture_id).is_none());
         assert!(atlas.get_texture_view(small.texture_id).is_some());
+    }
+
+    #[test]
+    fn test_covers_that_cannot_fit_three_across_use_exact_pages() {
+        let atlas = create_atlas().expect("WARP device");
+        for (width, height) in [(248, 248), (248, 106)] {
+            let key = make_image_key(1);
+            let tile = insert_tile(
+                &atlas,
+                key.clone(),
+                Size { width: DevicePixels(width), height: DevicePixels(height) },
+            );
+            {
+                let lock = atlas.0.lock();
+                let texture = lock.backend.texture(tile.texture_id).unwrap();
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                unsafe { texture.texture.GetDesc(&mut desc) };
+                assert_eq!((desc.Width, desc.Height), (width as u32, height as u32));
+            }
+            atlas.remove(&key);
+            assert!(atlas.get_texture_view(tile.texture_id).is_none());
+        }
     }
 }

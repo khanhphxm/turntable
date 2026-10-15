@@ -8,12 +8,14 @@ to this copy. Modified upstream files carry Turntable notices.
 ## Resource sizing and lifetime
 
 This follows the resource policy already used by Turntable's Metal renderer,
-without changing images, text sampling, shaders, antialiasing or cache ownership:
+without changing image/glyph resolution, text sampling, antialiasing or cache ownership:
 
-- Small glyphs and images share 512×512 atlas pages rather than 1024×1024 pages.
-  Polychrome images larger than 256 pixels in either dimension get a tightly
-  sized page. A 640×640 cover therefore reserves 1.56 MiB rather than 4 MiB,
-  and unrelated small images cannot pin that large page after the cover leaves.
+- Monochrome glyphs use 256×256 pages rather than 1024×1024, growing to fit
+  oversized masks without changing their pixels. When no existing rectangle
+  fits a color tile, a new page uses 256×256 for edges up to 128px,
+  512×512 for edges up to one third of that shared page (170px), and exact
+  dimensions for larger tiles. A 640×640 cover reserves 1.56 MiB rather than
+  4 MiB; device texture-size limits and explicit image ownership are unchanged.
 - Instance data starts at 128 KiB instead of 2 MiB, on both the native storage
   buffer and WebGL texture paths. Existing geometric growth, device limits,
   binding alignment and retention of earlier in-flight bindings are unchanged.
@@ -29,6 +31,34 @@ native renderer; this extends the existing Metal policy rather than changing
 those backends. GPUI's explicit image ownership and Turntable's cover-cache
 budget still control atlas eviction; arbitrary per-frame eviction would break
 cached scenes.
+
+### Exact atlas rectangles
+
+Atlas pages use guillotiere 0.6.2 rather than bucketed shelves. This avoids
+height-quantization waste and reclaims individual rectangles while neighboring
+tiles remain alive. Live tiles never move, preserving cached-scene coordinates;
+the allocator's empty state replaces the redundant live-key counter. Upload
+swizzling, deferred uploads and texture-generation tracking are unchanged.
+
+Polychrome fragment samples are clamped to the tile's outer texel centers,
+preventing linear filtering from reading neighboring/uninitialized pixels when
+an image is upscaled. Vertex UVs and interior image mapping are unchanged.
+WGSL retains derivative sampling before its alpha-clip branch. The corresponding
+Metal Home comparison saved 1,343,488 charged graphics bytes; the clamp itself
+was byte-for-byte footprint neutral. See the [Apple byte inventory](../gpui-pre-apple/TURNTABLE.md#exact-atlas-packing-2026-10-15).
+These figures are macOS measurements, not Linux/Windows runtime results.
+
+Content-sized color pages additionally saved 360,448 charged graphics bytes
+(352 KiB) in the native Metal Home A/B. Tiny images share smaller pages while
+nine 164×164 images still fit one 512×512 page. The 248×248 and 248×106 cases
+have exact-page regressions. This is a direct allocator-policy port, not a
+Linux runtime measurement; see the [native comparison](../gpui-pre-apple/TURNTABLE.md#content-sized-color-pages).
+
+Monochrome A8/R8 pages now start at 256×256 and still grow to fit larger
+glyphs/SVGs; subpixel-color pages are unchanged. Native Metal Home saved another
+114,688 graphics bytes (112 KiB), with one 1-LSB screenshot pixel difference.
+Small and oversized mask allocations and last-tile release have regressions;
+see the [native comparison](../gpui-pre-apple/TURNTABLE.md#compact-monochrome-pages).
 
 Regression tests cover compact-page sharing/reuse, independent large-image
 release, lazy/reused/resized/released path targets, and instance growth with
@@ -46,6 +76,17 @@ excluded from workspace membership so their tests can also run explicitly:
 ```sh
 cargo test --manifest-path vendor/gpui-pre-wgpu/Cargo.toml --features test-support
 ```
+
+### Round-2 host verification (2026-10-15)
+
+All 44 standalone tests passed on macOS, including real Metal atlas allocations,
+individual rectangle reuse, exact-size color pages, oversized monochrome masks,
+texture generations, removed pending uploads, and Naga storage/WebGL/subpixel
+shader validation. All-targets Clippy passed with `-D warnings`. This is not a
+Linux or WebGL runtime test. The standalone lockfile uses guillotiere and keeps
+registry GPUI/taffy provenance rather than the temporary host-check overrides.
+Native macOS 1×/2× real-scene comparisons and per-category footprint results are
+recorded in the [Apple verification](../gpui-pre-apple/TURNTABLE.md#round-2-verification-2026-10-15).
 
 ## Deferred OpenGL initialization
 
